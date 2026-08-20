@@ -1,0 +1,33 @@
+{
+  "name": "agent-platform",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "nx run-many -t dev",
+    "build": "nx run-many -t build",
+    "check-types": "nx run-many -t check-types",
+    "test": "nx run-many -t test",
+    "dev:web": "nx run web:dev",
+    "dev:bff": "nx run @agent-platform/bff:dev",
+    "dev:engine": "nx run @agent-platform/engine:dev",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "infra:logs": "docker compose logs -f"
+  },
+  "dependencies": {
+    "@agent-platform/env": "workspace:*",
+    "dotenv": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@agent-platform/config": "workspace:*",
+    "@types/node": "catalog:",
+    "nx": "^23.1.0",
+    "typescript": "catalog:"
+  },
+  "packageManager": "pnpm@11.22.0"
+}

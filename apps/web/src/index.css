@@ -1,0 +1,221 @@
+@import "@agent-platform/ui/globals.css";
+
+:root {
+  --ap-bg: #050914;
+  --ap-bg-2: #070d1d;
+  --ap-bg-3: #0a1226;
+  --ap-panel: rgba(19, 32, 58, 0.55);
+  --ap-panel-solid: #0c1730;
+  --ap-elevated: rgba(28, 45, 78, 0.6);
+  --ap-border: rgba(96, 165, 214, 0.14);
+  --ap-border-strong: rgba(96, 200, 230, 0.32);
+  --ap-cyan: #22d3ee;
+  --ap-aqua: #06b6d4;
+  --ap-cyan-soft: rgba(34, 211, 238, 0.14);
+  --ap-violet: #8b5cf6;
+  --ap-violet-soft: rgba(139, 92, 246, 0.16);
+  --ap-text: #e8f0ff;
+  --ap-text-2: #b7c6e0;
+  --ap-muted: #7286a6;
+  --ap-success: #34d399;
+  --ap-warning: #fbbf24;
+  --ap-danger: #fb7185;
+  --ap-info: #38bdf8;
+  --ap-glow: 0 0 40px rgba(34, 211, 238, 0.25);
+}
+
+html {
+  background: var(--ap-bg);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--ap-bg);
+  color: var(--ap-text);
+  font-family:
+    Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui,
+    -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.analysis-edit-input {
+  width: 100%;
+  border: 1px solid var(--ap-border);
+  border-radius: 0.75rem;
+  background: rgb(5 9 20 / 55%);
+  padding: 0.7rem 0.8rem;
+  color: var(--ap-text);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  outline: none;
+}
+
+.analysis-edit-input:focus {
+  border-color: var(--ap-border-strong);
+  box-shadow: 0 0 0 2px rgb(34 211 238 / 8%);
+}
+
+h1,
+h2,
+h3,
+h4,
+label,
+button {
+  font-weight: 500;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+.ap-app-bg {
+  background-color: var(--ap-bg);
+  background-image:
+    radial-gradient(circle at 12% 18%, rgba(34, 211, 238, 0.1), transparent 42%),
+    radial-gradient(circle at 88% 6%, rgba(139, 92, 246, 0.1), transparent 40%),
+    radial-gradient(circle at 50% 120%, rgba(6, 182, 212, 0.1), transparent 55%),
+    linear-gradient(180deg, #050914 0%, #060b19 100%);
+}
+
+.ap-grid-texture {
+  background-image:
+    linear-gradient(rgba(96, 165, 214, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(96, 165, 214, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.ap-glass {
+  border: 1px solid var(--ap-border);
+  background: var(--ap-panel);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+
+.ap-glass-strong {
+  border: 1px solid var(--ap-border);
+  background: linear-gradient(180deg, rgba(22, 38, 70, 0.75), rgba(11, 21, 43, 0.85));
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+}
+
+.ap-cta {
+  background: linear-gradient(90deg, #22d3ee 0%, #0891b2 100%);
+  box-shadow: 0 8px 30px rgba(34, 211, 238, 0.35);
+  color: #04121c;
+  transition: filter 160ms ease;
+}
+
+.ap-cta:hover {
+  filter: brightness(1.06);
+}
+
+.ap-ring-glow {
+  box-shadow: var(--ap-glow);
+}
+
+.ap-hoverable {
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.ap-hoverable:hover {
+  border-color: var(--ap-border-strong);
+  box-shadow: 0 10px 34px rgba(4, 10, 22, 0.5);
+}
+
+.ap-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.ap-scroll::-webkit-scrollbar-thumb {
+  border-radius: 8px;
+  background: rgba(96, 165, 214, 0.22);
+}
+
+.ap-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ap-text-gradient {
+  background: linear-gradient(90deg, #e8f0ff 0%, #7dd3fc 60%, #a5b4fc 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+@keyframes ap-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+.ap-float {
+  animation: ap-float 6s ease-in-out infinite;
+  will-change: transform;
+}
+
+@keyframes ap-pulse-ring {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+@keyframes ap-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ap-rise-in {
+  animation: ap-rise-in 400ms ease-out both;
+}
+
+@media (max-width: 639px) {
+  .capability-orbit-outer {
+    width: min(280px, 78vw);
+    height: min(280px, 78vw);
+  }
+
+  .capability-orbit-inner {
+    width: min(200px, 58vw);
+    height: min(200px, 58vw);
+  }
+
+  .capability-node {
+    font-size: 11px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ap-float {
+    animation: none;
+  }
+
+  .ap-rise-in {
+    animation: none;
+  }
+
+  .ap-cta,
+  .ap-hoverable {
+    transition: none;
+  }
+}

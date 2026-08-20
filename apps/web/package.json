@@ -1,0 +1,40 @@
+{
+  "name": "web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "react-router build",
+    "dev": "react-router dev",
+    "start": "react-router-serve ./build/server/index.js",
+    "typecheck": "react-router typegen && tsc",
+    "check-types": "react-router typegen && tsc"
+  },
+  "dependencies": {
+    "@agent-platform/env": "workspace:*",
+    "@agent-platform/ui": "workspace:*",
+    "@react-router/fs-routes": "^8.3.0",
+    "@react-router/node": "^8.3.0",
+    "@react-router/serve": "^8.3.0",
+    "dotenv": "catalog:",
+    "isbot": "^5.2.1",
+    "lucide-react": "catalog:",
+    "next-themes": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "react-router": "^8.3.0",
+    "recharts": "2.15.2",
+    "sonner": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@agent-platform/config": "workspace:*",
+    "@react-router/dev": "^8.3.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:",
+    "vite": "^8.1.5"
+  }
+}

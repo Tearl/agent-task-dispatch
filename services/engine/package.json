@@ -1,0 +1,11 @@
+{
+  "name": "@agent-platform/engine",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "go run ./cmd/api",
+    "build": "go build -o dist/engine ./cmd/api",
+    "check-types": "go test ./...",
+    "test": "go test ./..."
+  }
+}
