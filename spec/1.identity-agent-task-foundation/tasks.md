@@ -32,7 +32,7 @@
   - Risk: high
   - Verification: Engine 授权/状态测试、数据库价格约束与并发容量测试
 
-- [ ] [T-104] [pending] 实现只写加密的 Agent 凭证轮换
+- [x] [T-104] [done] 实现只写加密的 Agent 凭证轮换
   - Repository: .
   - Covers: F-104, AC-104
   - Depends on: T-103

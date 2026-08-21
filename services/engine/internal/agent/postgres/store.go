@@ -465,17 +465,17 @@ func lower(value string) string {
 	return string(result)
 }
 
-const agentSelect = `SELECT agent_id,owner_id,name,category,tags,capabilities,languages,estimated_duration_seconds,author_bio,controller_address,payout_address,status,health,health_checked_at,health_valid_until,max_concurrency,active_capacity,aggregate_version,activated_at,current_price_version,created_at,updated_at FROM agents`
+const agentSelect = `SELECT agent_id,owner_id,name,category,tags,capabilities,languages,estimated_duration_seconds,author_bio,controller_address,payout_address,status,health,health_checked_at,health_valid_until,max_concurrency,active_capacity,aggregate_version,activated_at,current_price_version,current_credential_version,created_at,updated_at FROM agents`
 
-const agentSelectWithLiveCapacity = `SELECT a.agent_id,a.owner_id,a.name,a.category,a.tags,a.capabilities,a.languages,a.estimated_duration_seconds,a.author_bio,a.controller_address,a.payout_address,a.status,a.health,a.health_checked_at,a.health_valid_until,a.max_concurrency,(SELECT count(*)::integer FROM agent_capacity_leases l WHERE l.agent_id=a.agent_id AND l.released_at IS NULL AND l.expires_at>now()),a.aggregate_version,a.activated_at,a.current_price_version,a.created_at,a.updated_at FROM agents a`
+const agentSelectWithLiveCapacity = `SELECT a.agent_id,a.owner_id,a.name,a.category,a.tags,a.capabilities,a.languages,a.estimated_duration_seconds,a.author_bio,a.controller_address,a.payout_address,a.status,a.health,a.health_checked_at,a.health_valid_until,a.max_concurrency,(SELECT count(*)::integer FROM agent_capacity_leases l WHERE l.agent_id=a.agent_id AND l.released_at IS NULL AND l.expires_at>now()),a.aggregate_version,a.activated_at,a.current_price_version,a.current_credential_version,a.created_at,a.updated_at FROM agents a`
 
 type scanner interface{ Scan(...any) error }
 
 func scanAgent(row scanner) (value agent.Agent, err error) {
 	var tags, languages pq.StringArray
 	var healthChecked, healthValid, activated sql.NullTime
-	var price sql.NullInt64
-	err = row.Scan(&value.ID, &value.OwnerID, &value.Name, &value.Category, &tags, &value.Capabilities, &languages, &value.EstimatedDurationSeconds, &value.AuthorBio, &value.ControllerAddress, &value.PayoutAddress, &value.Status, &value.Health, &healthChecked, &healthValid, &value.MaxConcurrency, &value.ActiveCapacity, &value.AggregateVersion, &activated, &price, &value.CreatedAt, &value.UpdatedAt)
+	var price, credentialVersion sql.NullInt64
+	err = row.Scan(&value.ID, &value.OwnerID, &value.Name, &value.Category, &tags, &value.Capabilities, &languages, &value.EstimatedDurationSeconds, &value.AuthorBio, &value.ControllerAddress, &value.PayoutAddress, &value.Status, &value.Health, &healthChecked, &healthValid, &value.MaxConcurrency, &value.ActiveCapacity, &value.AggregateVersion, &activated, &price, &credentialVersion, &value.CreatedAt, &value.UpdatedAt)
 	value.Tags = []string(tags)
 	value.Languages = []string(languages)
 	if healthChecked.Valid {
@@ -490,6 +490,10 @@ func scanAgent(row scanner) (value agent.Agent, err error) {
 	if price.Valid {
 		v := int(price.Int64)
 		value.CurrentPriceVersion = &v
+	}
+	if credentialVersion.Valid {
+		v := int(credentialVersion.Int64)
+		value.CurrentCredentialVersion = &v
 	}
 	return value, err
 }

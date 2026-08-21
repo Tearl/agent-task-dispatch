@@ -10,13 +10,15 @@ import (
 
 	"github.com/example/agent-platform/engine/internal/agent"
 	"github.com/example/agent-platform/engine/internal/auth"
+	"github.com/example/agent-platform/engine/internal/credential"
 	"github.com/example/agent-platform/engine/internal/persistence"
 )
 
 type handler struct {
-	logger *slog.Logger
-	auth   *auth.Service
-	agents *agent.Service
+	logger      *slog.Logger
+	auth        *auth.Service
+	agents      *agent.Service
+	credentials *credential.Service
 }
 
 type nonceRequest struct {
@@ -42,7 +44,11 @@ func NewHandlerWithAuth(logger *slog.Logger, service *auth.Service) http.Handler
 }
 
 func NewHandlerWithServices(logger *slog.Logger, authService *auth.Service, agentService *agent.Service) http.Handler {
-	h := &handler{logger: logger, auth: authService, agents: agentService}
+	return NewHandlerWithCredentials(logger, authService, agentService, nil)
+}
+
+func NewHandlerWithCredentials(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service) http.Handler {
+	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /v1/auth/nonce", h.createNonce)
@@ -58,8 +64,45 @@ func NewHandlerWithServices(logger *slog.Logger, authService *auth.Service, agen
 		mux.HandleFunc("POST /v1/agents/{id}/capacity", h.updateAgentCapacity)
 		mux.HandleFunc("POST /v1/agents/{id}/prices", h.publishAgentPrice)
 	}
+	if credentialService != nil {
+		mux.HandleFunc("POST /v1/agents/{id}/credentials", h.rotateAgentCredential)
+	}
 
 	return requestLogging(logger, mux)
+}
+
+func (h *handler) rotateAgentCredential(writer http.ResponseWriter, request *http.Request) {
+	var input credential.RotateInput
+	if decodeJSON(writer, request, 20_480, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	metadata, _, err := h.credentials.Rotate(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeCredentialError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, metadata)
+}
+
+func (h *handler) writeCredentialError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, credential.ErrForbidden):
+		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "forbidden"})
+	case errors.Is(err, credential.ErrNotFound):
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "agent not found"})
+	case errors.Is(err, credential.ErrStaleVersion), errors.Is(err, credential.ErrInvalidState), errors.Is(err, persistence.ErrIdempotencyConflict):
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "credential conflict"})
+	case errors.Is(err, credential.ErrInvalidInput):
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid credential request"})
+	default:
+		h.logger.Error("credential operation failed", "error", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "credential service temporarily unavailable"})
+	}
 }
 
 func (h *handler) createAgent(writer http.ResponseWriter, request *http.Request) {

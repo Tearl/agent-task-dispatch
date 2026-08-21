@@ -61,6 +61,7 @@ type Agent struct {
 	AggregateVersion         int64      `json:"aggregateVersion"`
 	ActivatedAt              *time.Time `json:"activatedAt,omitempty"`
 	CurrentPriceVersion      *int       `json:"currentPriceVersion,omitempty"`
+	CurrentCredentialVersion *int       `json:"currentCredentialVersion,omitempty"`
 	CreatedAt                time.Time  `json:"createdAt"`
 	UpdatedAt                time.Time  `json:"updatedAt"`
 }

@@ -44,10 +44,16 @@ docs/
 
 ```bash
 cp .env.example .env
+# Generate two distinct ephemeral local-development keys. Persist replacements
+# in your local secret manager or .env if they must survive shell restarts.
+export AGENT_CREDENTIAL_KEK_BASE64="$(node -p "require('node:crypto').randomBytes(32).toString('base64')")"
+export AGENT_CREDENTIAL_IDEMPOTENCY_HMAC_BASE64="$(node -p "require('node:crypto').randomBytes(32).toString('base64')")"
 pnpm install
 pnpm infra:up
 pnpm dev
 ```
+
+Never reuse either development key in another environment. Production must inject two independently managed 32-byte keys and a versioned `AGENT_CREDENTIAL_KEY_REF` through the environment secret manager; the production KMS vendor remains an open decision.
 
 Local endpoints:
 
@@ -98,4 +104,4 @@ Create Better-T-Stack supports one web framework per generation and does not sca
 - Milvus or Pinecone for V1
 - refund, timeout, dispute, and contract administration rules
 - production Next.js-to-Lambda deployment adapter
-
+- production credential KMS vendor and key lifecycle

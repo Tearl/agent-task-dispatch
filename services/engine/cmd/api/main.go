@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"github.com/example/agent-platform/engine/internal/api"
 	"github.com/example/agent-platform/engine/internal/auth"
 	authpostgres "github.com/example/agent-platform/engine/internal/auth/postgres"
+	"github.com/example/agent-platform/engine/internal/credential"
+	credentialpostgres "github.com/example/agent-platform/engine/internal/credential/postgres"
 	persistencepostgres "github.com/example/agent-platform/engine/internal/persistence/postgres"
 	_ "github.com/lib/pq"
 )
@@ -26,6 +29,17 @@ func main() {
 	domain := requiredEnv(logger, "AUTH_DOMAIN")
 	chainID := requiredEnv(logger, "EVM_CHAIN_ID")
 	purpose := requiredEnv(logger, "AUTH_PURPOSE")
+	credentialKeyReference := requiredEnv(logger, "AGENT_CREDENTIAL_KEY_REF")
+	credentialRootKey, err := base64.StdEncoding.DecodeString(requiredEnv(logger, "AGENT_CREDENTIAL_KEK_BASE64"))
+	if err != nil {
+		logger.Error("credential encryption key is not valid base64")
+		os.Exit(1)
+	}
+	credentialIdempotencyKey, err := base64.StdEncoding.DecodeString(requiredEnv(logger, "AGENT_CREDENTIAL_IDEMPOTENCY_HMAC_BASE64"))
+	if err != nil {
+		logger.Error("credential idempotency key is not valid base64")
+		os.Exit(1)
+	}
 	db, err := sql.Open("postgres", databaseURL)
 	if err != nil {
 		logger.Error("database configuration failed", "error", err)
@@ -62,6 +76,21 @@ func main() {
 		logger.Error("agent service failed", "error", err)
 		os.Exit(1)
 	}
+	credentialEncryptor, err := credential.NewAESGCMEncryptor(credentialRootKey, credentialIdempotencyKey, credentialKeyReference)
+	if err != nil {
+		logger.Error("credential encryption configuration failed", "error", err)
+		os.Exit(1)
+	}
+	credentialStore, err := credentialpostgres.NewStore(db)
+	if err != nil {
+		logger.Error("credential store failed", "error", err)
+		os.Exit(1)
+	}
+	credentialService, err := credential.NewService(credentialStore, credentialEncryptor)
+	if err != nil {
+		logger.Error("credential service failed", "error", err)
+		os.Exit(1)
+	}
 	address := os.Getenv("ENGINE_ADDR")
 	if address == "" {
 		address = ":8080"
@@ -69,7 +98,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              address,
-		Handler:           api.NewHandlerWithServices(logger, authService, agentService),
+		Handler:           api.NewHandlerWithCredentials(logger, authService, agentService, credentialService),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,

@@ -94,3 +94,44 @@ func TestAgentDownMigrationPreservesImmutableHistory(t *testing.T) {
 		t.Fatal("agent rollback must preserve immutable price and audit history")
 	}
 }
+
+func TestAgentCredentialMigrationStoresOnlyEncryptedImmutableVersions(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000004_agent_credentials.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"ciphertext bytea NOT NULL",
+		"nonce bytea NOT NULL",
+		"wrapped_data_key bytea NOT NULL",
+		"key_nonce bytea NOT NULL",
+		"encryption_algorithm text NOT NULL",
+		"key_wrap_algorithm text NOT NULL",
+		"key_reference text NOT NULL",
+		"fingerprint text NOT NULL",
+		"agent credential versions are immutable",
+		"agents_current_credential_fk",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("agent credential migration missing %q", required)
+		}
+	}
+	lower := strings.ToLower(sql)
+	for _, forbidden := range []string{"plaintext", "api_key text", "secret text", "credential_value"} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("credential schema contains plaintext-shaped field %q", forbidden)
+		}
+	}
+}
+
+func TestAgentCredentialDownMigrationPreservesCiphertextHistory(t *testing.T) {
+	contents, err := os.ReadFile("migrations/000004_agent_credentials.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upper := strings.ToUpper(string(contents))
+	if strings.Contains(upper, "DROP TABLE") || strings.Contains(upper, "DELETE FROM") {
+		t.Fatal("credential rollback must preserve encrypted history")
+	}
+}

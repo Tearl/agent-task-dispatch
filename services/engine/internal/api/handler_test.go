@@ -19,6 +19,7 @@ import (
 	secpECDSA "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	engineagent "github.com/example/agent-platform/engine/internal/agent"
 	engineauth "github.com/example/agent-platform/engine/internal/auth"
+	enginecredential "github.com/example/agent-platform/engine/internal/credential"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -256,5 +257,60 @@ func TestAgentTransportAuthenticatesValidatesAndMapsConflicts(t *testing.T) {
 	handler.ServeHTTP(unknown, unknownRequest)
 	if unknown.Code != http.StatusBadRequest || store.createCalls != 1 {
 		t.Fatalf("unknown field: status=%d calls=%d", unknown.Code, store.createCalls)
+	}
+}
+
+type apiCredentialStore struct{ calls int }
+
+func (s *apiCredentialStore) Rotate(_ context.Context, mutation enginecredential.Mutation, agentID string, input enginecredential.StoreInput, envelope enginecredential.Envelope) (enginecredential.Metadata, bool, error) {
+	s.calls++
+	return enginecredential.Metadata{AgentID: agentID, Version: 1, AgentAggregateVersion: input.ExpectedVersion + 1, CredentialType: input.CredentialType, Label: input.Label, Fingerprint: envelope.Fingerprint, CreatedAt: mutation.Now}, false, nil
+}
+
+func TestCredentialTransportNeverReturnsOrLogsSecretAndRejectsAdmin(t *testing.T) {
+	store := &apiCredentialStore{}
+	encryptor, err := enginecredential.NewAESGCMEncryptor(bytes.Repeat([]byte{0x33}, 32), bytes.Repeat([]byte{0x34}, 32), "transport-key-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialService, err := enginecredential.NewService(store, encryptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerAuth, err := engineauth.NewService(staticSessionStore{session: engineauth.Session{UserID: "owner", Roles: []string{"agent_provider"}}}, engineauth.EthereumVerifier{}, engineauth.Config{Domain: "app.example", ChainID: "1", Purpose: "login"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	providerHandler := NewHandlerWithCredentials(slog.New(slog.NewJSONHandler(&logs, nil)), providerAuth, nil, credentialService)
+	secret := "sk_live_transport_secret_must_not_escape"
+	body := `{"credentialType":"api_key","label":"production","secret":"` + secret + `","expectedVersion":1}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/agents/agent-1/credentials", bytes.NewBufferString(body))
+	request.Header.Set("authorization", "Bearer provider-session")
+	request.Header.Set("Idempotency-Key", "rotate-1")
+	recorder := httptest.NewRecorder()
+	providerHandler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated || store.calls != 1 {
+		t.Fatalf("credential rotation: status=%d calls=%d body=%s", recorder.Code, store.calls, recorder.Body.String())
+	}
+	for _, output := range []string{recorder.Body.String(), logs.String()} {
+		for _, forbidden := range []string{secret, "ciphertext", "nonce", "wrappedDataKey", "keyNonce", "secretDigest", "keyReference"} {
+			if strings.Contains(output, forbidden) {
+				t.Fatalf("credential transport exposed %q: %s", forbidden, output)
+			}
+		}
+	}
+	adminAuth, err := engineauth.NewService(staticSessionStore{session: engineauth.Session{UserID: "admin", Roles: []string{"admin"}}}, engineauth.EthereumVerifier{}, engineauth.Config{Domain: "app.example", ChainID: "1", Purpose: "login"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHandler := NewHandlerWithCredentials(slog.New(slog.NewTextHandler(io.Discard, nil)), adminAuth, nil, credentialService)
+	adminRequest := httptest.NewRequest(http.MethodPost, "/v1/agents/agent-1/credentials", bytes.NewBufferString(body))
+	adminRequest.Header.Set("authorization", "Bearer admin-session")
+	adminRequest.Header.Set("Idempotency-Key", "admin-rotate")
+	adminRecorder := httptest.NewRecorder()
+	adminHandler.ServeHTTP(adminRecorder, adminRequest)
+	if adminRecorder.Code != http.StatusForbidden || store.calls != 1 || strings.Contains(adminRecorder.Body.String(), secret) {
+		t.Fatalf("admin credential rotation: status=%d calls=%d body=%s", adminRecorder.Code, store.calls, adminRecorder.Body.String())
 	}
 }
