@@ -7,7 +7,7 @@
 
 ## 任务
 
-- [ ] [T-101] [pending] 建立 Engine 持久化、迁移、幂等、审计与 Outbox 基础
+- [x] [T-101] [done] 建立 Engine 持久化、迁移、幂等、审计与 Outbox 基础
   - Repository: .
   - Covers: F-102, F-107, AC-102, AC-106
   - Depends on: none
@@ -15,7 +15,7 @@
   - Risk: high
   - Verification: 运行 `pnpm --filter @agent-platform/engine test`，覆盖迁移、重复键和 Outbox 原子性测试
 
-- [ ] [T-102] [pending] 实现钱包 nonce 校验与会话契约
+- [x] [T-102] [done] 实现钱包 nonce 校验与会话契约
   - Repository: .
   - Covers: F-101, F-102, AC-101, AC-102
   - Depends on: T-101
