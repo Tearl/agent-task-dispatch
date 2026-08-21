@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	secpECDSA "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
+	engineagent "github.com/example/agent-platform/engine/internal/agent"
 	engineauth "github.com/example/agent-platform/engine/internal/auth"
 	"golang.org/x/crypto/sha3"
 )
@@ -164,5 +166,95 @@ func TestCreateNonceRejectsInvalidWallet(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, recorder.Code)
+	}
+}
+
+type staticSessionStore struct{ session engineauth.Session }
+
+func (s staticSessionStore) SaveChallenge(_ context.Context, challenge engineauth.Challenge) (engineauth.Challenge, error) {
+	return challenge, nil
+}
+func (staticSessionStore) ConsumeChallenge(context.Context, engineauth.Challenge, string, engineauth.Session) (engineauth.Session, error) {
+	return engineauth.Session{}, errors.New("not implemented")
+}
+func (s staticSessionStore) ReadSession(context.Context, string, time.Time) (engineauth.Session, error) {
+	return s.session, nil
+}
+func (staticSessionStore) RevokeSession(context.Context, string, time.Time) error { return nil }
+
+type apiAgentStore struct {
+	createCalls int
+	mutation    engineagent.Mutation
+}
+
+func (s *apiAgentStore) Create(_ context.Context, mutation engineagent.Mutation, input engineagent.CreateInput, id string) (engineagent.Agent, bool, error) {
+	s.createCalls++
+	s.mutation = mutation
+	return engineagent.Agent{ID: id, OwnerID: mutation.ActorID, Name: input.Name, AggregateVersion: 1, Status: engineagent.StatusDraft}, false, nil
+}
+func (*apiAgentStore) UpdateProfile(context.Context, engineagent.Mutation, string, engineagent.ProfileInput) (engineagent.Agent, bool, error) {
+	return engineagent.Agent{}, false, engineagent.ErrNotFound
+}
+func (*apiAgentStore) Transition(context.Context, engineagent.Mutation, string, engineagent.LifecycleInput) (engineagent.Agent, bool, error) {
+	return engineagent.Agent{}, false, engineagent.ErrStaleVersion
+}
+func (*apiAgentStore) UpdateHealth(context.Context, engineagent.Mutation, string, engineagent.HealthInput) (engineagent.Agent, bool, error) {
+	return engineagent.Agent{}, false, nil
+}
+func (*apiAgentStore) UpdateCapacity(context.Context, engineagent.Mutation, string, engineagent.CapacityInput) (engineagent.Agent, bool, error) {
+	return engineagent.Agent{}, false, nil
+}
+func (*apiAgentStore) PublishPrice(context.Context, engineagent.Mutation, string, engineagent.PriceInput) (engineagent.PriceVersion, bool, error) {
+	return engineagent.PriceVersion{}, false, nil
+}
+func (*apiAgentStore) Get(context.Context, string, string) (engineagent.Agent, error) {
+	return engineagent.Agent{}, engineagent.ErrNotFound
+}
+func (*apiAgentStore) ReserveCapacity(context.Context, string, string, time.Time) (engineagent.CapacityLease, error) {
+	return engineagent.CapacityLease{}, nil
+}
+func (*apiAgentStore) ReleaseCapacity(context.Context, string, int64) error { return nil }
+
+func TestAgentTransportAuthenticatesValidatesAndMapsConflicts(t *testing.T) {
+	store := &apiAgentStore{}
+	agentService, err := engineagent.NewService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authService, err := engineauth.NewService(staticSessionStore{session: engineauth.Session{UserID: "owner", Roles: []string{"agent_provider"}}}, engineauth.EthereumVerifier{}, engineauth.Config{Domain: "app.example", ChainID: "1", Purpose: "login"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandlerWithServices(slog.New(slog.NewTextHandler(io.Discard, nil)), authService, agentService)
+	body := `{"name":"Research Agent","category":"research","tags":["analysis"],"capabilities":"research","languages":["en"],"estimatedDurationSeconds":300,"authorBio":"provider","controllerAddress":"0x1111111111111111111111111111111111111111","payoutAddress":"0x2222222222222222222222222222222222222222","maxConcurrency":2}`
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/v1/agents", bytes.NewBufferString(body)))
+	if unauthorized.Code != http.StatusUnauthorized || store.createCalls != 0 {
+		t.Fatalf("unauthorized create: status=%d calls=%d", unauthorized.Code, store.createCalls)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/agents", bytes.NewBufferString(body))
+	request.Header.Set("authorization", "Bearer session-token")
+	request.Header.Set("Idempotency-Key", "create-1")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated || store.createCalls != 1 || store.mutation.ActorID != "owner" || store.mutation.IdempotencyKey != "create-1" {
+		t.Fatalf("create transport: status=%d calls=%d mutation=%#v body=%s", recorder.Code, store.createCalls, store.mutation, recorder.Body.String())
+	}
+	conflictRequest := httptest.NewRequest(http.MethodPost, "/v1/agents/agent-1/lifecycle", bytes.NewBufferString(`{"status":"paused","expectedVersion":1}`))
+	conflictRequest.Header.Set("authorization", "Bearer session-token")
+	conflictRequest.Header.Set("Idempotency-Key", "transition-1")
+	conflict := httptest.NewRecorder()
+	handler.ServeHTTP(conflict, conflictRequest)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("stale version mapping: status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+	unknownRequest := httptest.NewRequest(http.MethodPost, "/v1/agents", bytes.NewBufferString(strings.TrimSuffix(body, "}")+`,"secret":"must-not-pass"}`))
+	unknownRequest.Header.Set("authorization", "Bearer session-token")
+	unknownRequest.Header.Set("Idempotency-Key", "create-2")
+	unknown := httptest.NewRecorder()
+	handler.ServeHTTP(unknown, unknownRequest)
+	if unknown.Code != http.StatusBadRequest || store.createCalls != 1 {
+		t.Fatalf("unknown field: status=%d calls=%d", unknown.Code, store.createCalls)
 	}
 }

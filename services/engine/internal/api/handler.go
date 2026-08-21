@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/example/agent-platform/engine/internal/agent"
 	"github.com/example/agent-platform/engine/internal/auth"
+	"github.com/example/agent-platform/engine/internal/persistence"
 )
 
 type handler struct {
 	logger *slog.Logger
 	auth   *auth.Service
+	agents *agent.Service
 }
 
 type nonceRequest struct {
@@ -35,15 +38,172 @@ func NewHandler(logger *slog.Logger) http.Handler {
 }
 
 func NewHandlerWithAuth(logger *slog.Logger, service *auth.Service) http.Handler {
-	h := &handler{logger: logger, auth: service}
+	return NewHandlerWithServices(logger, service, nil)
+}
+
+func NewHandlerWithServices(logger *slog.Logger, authService *auth.Service, agentService *agent.Service) http.Handler {
+	h := &handler{logger: logger, auth: authService, agents: agentService}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /v1/auth/nonce", h.createNonce)
 	mux.HandleFunc("POST /v1/auth/verify", h.verify)
 	mux.HandleFunc("GET /v1/auth/session", h.session)
 	mux.HandleFunc("DELETE /v1/auth/session", h.logout)
+	if agentService != nil {
+		mux.HandleFunc("POST /v1/agents", h.createAgent)
+		mux.HandleFunc("GET /v1/agents/{id}", h.getAgent)
+		mux.HandleFunc("PUT /v1/agents/{id}/profile", h.updateAgentProfile)
+		mux.HandleFunc("POST /v1/agents/{id}/lifecycle", h.transitionAgent)
+		mux.HandleFunc("POST /v1/agents/{id}/health", h.updateAgentHealth)
+		mux.HandleFunc("POST /v1/agents/{id}/capacity", h.updateAgentCapacity)
+		mux.HandleFunc("POST /v1/agents/{id}/prices", h.publishAgentPrice)
+	}
 
 	return requestLogging(logger, mux)
+}
+
+func (h *handler) createAgent(writer http.ResponseWriter, request *http.Request) {
+	var input agent.CreateInput
+	if decodeJSON(writer, request, 32_768, &input) != nil {
+		writeJSON(writer, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, _, err := h.agents.Create(request.Context(), session, request.Header.Get("Idempotency-Key"), input)
+	if err != nil {
+		h.writeAgentError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, value)
+}
+func (h *handler) getAgent(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.agents.Get(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeAgentError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+func (h *handler) updateAgentProfile(writer http.ResponseWriter, request *http.Request) {
+	var input agent.ProfileInput
+	if decodeJSON(writer, request, 32_768, &input) != nil {
+		writeJSON(writer, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, _, err := h.agents.UpdateProfile(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeAgentError(writer, err)
+		return
+	}
+	writeJSON(writer, 200, value)
+}
+func (h *handler) transitionAgent(writer http.ResponseWriter, request *http.Request) {
+	var input agent.LifecycleInput
+	if decodeJSON(writer, request, 4_096, &input) != nil {
+		writeJSON(writer, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, _, err := h.agents.Transition(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeAgentError(writer, err)
+		return
+	}
+	writeJSON(writer, 200, value)
+}
+func (h *handler) updateAgentHealth(writer http.ResponseWriter, request *http.Request) {
+	var input agent.HealthInput
+	if decodeJSON(writer, request, 4_096, &input) != nil {
+		writeJSON(writer, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, _, err := h.agents.UpdateHealth(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeAgentError(writer, err)
+		return
+	}
+	writeJSON(writer, 200, value)
+}
+func (h *handler) updateAgentCapacity(writer http.ResponseWriter, request *http.Request) {
+	var input agent.CapacityInput
+	if decodeJSON(writer, request, 4_096, &input) != nil {
+		writeJSON(writer, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, _, err := h.agents.UpdateCapacity(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeAgentError(writer, err)
+		return
+	}
+	writeJSON(writer, 200, value)
+}
+func (h *handler) publishAgentPrice(writer http.ResponseWriter, request *http.Request) {
+	var input agent.PriceInput
+	if decodeJSON(writer, request, 4_096, &input) != nil {
+		writeJSON(writer, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, _, err := h.agents.PublishPrice(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeAgentError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, value)
+}
+
+func (h *handler) agentSession(writer http.ResponseWriter, request *http.Request) (auth.Session, bool) {
+	value := request.Header.Get("authorization")
+	if len(value) < 8 || value[:7] != "Bearer " {
+		writeJSON(writer, 401, map[string]string{"error": "unauthorized"})
+		return auth.Session{}, false
+	}
+	session, err := h.auth.Session(request.Context(), value[7:])
+	if err != nil {
+		h.writeAuthenticationError(writer, err)
+		return auth.Session{}, false
+	}
+	return session, true
+}
+func (h *handler) writeAgentError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, agent.ErrForbidden):
+		writeJSON(writer, 403, map[string]string{"error": "forbidden"})
+	case errors.Is(err, agent.ErrNotFound):
+		writeJSON(writer, 404, map[string]string{"error": "agent not found"})
+	case errors.Is(err, agent.ErrStaleVersion), errors.Is(err, agent.ErrInvalidState), errors.Is(err, agent.ErrCapacityUnavailable), errors.Is(err, persistence.ErrIdempotencyConflict):
+		writeJSON(writer, 409, map[string]string{"error": "agent conflict"})
+	case errors.Is(err, agent.ErrInvalidInput), errors.Is(err, agent.ErrInvalidPrice):
+		writeJSON(writer, 400, map[string]string{"error": "invalid agent request"})
+	default:
+		h.logger.Error("agent operation failed", "error", err)
+		writeJSON(writer, 503, map[string]string{"error": "agent service temporarily unavailable"})
+	}
 }
 
 func (h *handler) health(writer http.ResponseWriter, _ *http.Request) {

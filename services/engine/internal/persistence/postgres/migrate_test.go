@@ -55,3 +55,42 @@ func TestAuthenticationMigrationEnforcesHashedSessionsAndRoleBounds(t *testing.T
 		t.Fatal("authentication schema must not persist signatures or private keys")
 	}
 }
+
+func TestAgentMigrationEnforcesLifecyclePriceAndCapacityInvariants(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000003_agents.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"activated_at timestamptz",
+		"overview_price >= 0",
+		"overview_price <= formal_package_gross_price",
+		"included_versions = 3",
+		"max_versions = 5",
+		"UNIQUE (agent_id, fencing_token)",
+		"activated agent addresses are immutable",
+		"agent price versions are immutable",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("agent migration missing %q", required)
+		}
+	}
+	lower := strings.ToLower(sql)
+	for _, forbidden := range []string{"task_bond", "agent_bond", "task_deposit", "agent_deposit"} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("agent schema must not define task-level bond/deposit field %q", forbidden)
+		}
+	}
+}
+
+func TestAgentDownMigrationPreservesImmutableHistory(t *testing.T) {
+	contents, err := os.ReadFile("migrations/000003_agents.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upper := strings.ToUpper(string(contents))
+	if strings.Contains(upper, "DROP TABLE") || strings.Contains(upper, "DELETE FROM") {
+		t.Fatal("agent rollback must preserve immutable price and audit history")
+	}
+}

@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/example/agent-platform/engine/internal/agent"
+	agentpostgres "github.com/example/agent-platform/engine/internal/agent/postgres"
 	"github.com/example/agent-platform/engine/internal/api"
 	"github.com/example/agent-platform/engine/internal/auth"
 	authpostgres "github.com/example/agent-platform/engine/internal/auth/postgres"
@@ -50,6 +52,16 @@ func main() {
 		logger.Error("authentication configuration failed", "error", err)
 		os.Exit(1)
 	}
+	agentStore, err := agentpostgres.NewStore(db)
+	if err != nil {
+		logger.Error("agent store failed", "error", err)
+		os.Exit(1)
+	}
+	agentService, err := agent.NewService(agentStore)
+	if err != nil {
+		logger.Error("agent service failed", "error", err)
+		os.Exit(1)
+	}
 	address := os.Getenv("ENGINE_ADDR")
 	if address == "" {
 		address = ":8080"
@@ -57,7 +69,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              address,
-		Handler:           api.NewHandlerWithAuth(logger, authService),
+		Handler:           api.NewHandlerWithServices(logger, authService, agentService),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
