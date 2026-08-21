@@ -7,7 +7,7 @@
 
 ## 任务
 
-- [ ] [T-201] [pending] 实现硬过滤、召回适配器、评分与降级策略
+- [x] [T-201] [done] 实现硬过滤、召回适配器、评分与降级策略
   - Repository: .
   - Covers: F-201, F-202, AC-201
   - Depends on: T-103, T-105
@@ -15,7 +15,7 @@
   - Risk: high
   - Verification: 使用确定性表驱动测试覆盖每个过滤项、得分项、阈值和依赖失败
 
-- [ ] [T-202] [pending] 实现确定性 FairShuffle 与不可变匹配快照
+- [x] [T-202] [done] 实现确定性 FairShuffle 与不可变匹配快照
   - Repository: .
   - Covers: F-202, F-203, AC-201, AC-202
   - Depends on: T-201
@@ -23,7 +23,7 @@
   - Risk: high
   - Verification: 属性测试覆盖稳定性、带权唯一、服务商上限、探索位置和修订逻辑
 
-- [ ] [T-203] [pending] 实现 Agent 执行协议与带 fencing 的调度租约
+- [x] [T-203] [done] 实现 Agent 执行协议与带 fencing 的调度租约
   - Repository: .
   - Covers: F-204, F-205, AC-203, AC-204
   - Depends on: T-104, T-202

@@ -62,6 +62,7 @@ export default function OnboardAgent() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const operationId = useRef<string | undefined>(undefined);
+  const submitInFlight = useRef(false);
   const [checks, setChecks] = useState<{ label: string; state: CheckState; note: string }[]>([
     { label: "创建 Agent 聚合", state: "idle", note: "由 Engine 校验所有者与基本资料" },
     { label: "加密保存调用凭证", state: "idle", note: "明文仅用于本次受保护写入" },
@@ -82,7 +83,8 @@ export default function OnboardAgent() {
     step === 3;
 
   const runChecks = async () => {
-    if (submitting || allPassed) return;
+    if (submitInFlight.current || allPassed) return;
+    submitInFlight.current = true;
     setSubmitting(true);
     setSubmitError(null);
     setChecks((items) => items.map((check) => ({ ...check, state: "running" })));
@@ -105,11 +107,13 @@ export default function OnboardAgent() {
       setSubmitError(message);
       setChecks((items) => items.map((check) => ({ ...check, state: "fail" })));
     } finally {
+      submitInFlight.current = false;
       setSubmitting(false);
     }
   };
 
   const resetAttempt = () => {
+    submitInFlight.current = false;
     operationId.current = undefined;
     setSubmitError(null);
     setChecks((items) => items.map((check) => ({ ...check, state: "idle" })));
@@ -117,6 +121,7 @@ export default function OnboardAgent() {
   };
 
   const allPassed = checks.every((check) => check.state === "pass");
+  const attemptLocked = Boolean(operationId.current);
 
   const finish = () => {
     setDone(true);
@@ -169,13 +174,14 @@ export default function OnboardAgent() {
       />
 
       <Panel className="p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div aria-label="Agent 接入进度" className="flex flex-wrap items-center justify-between gap-2">
           {STEPS.map((item, index) => {
             const active = step === index;
             const passed = step > index;
             return (
               <div key={item.id} className="flex min-w-[160px] flex-1 items-center gap-2">
                 <span
+                  aria-current={active ? "step" : undefined}
                   className="grid h-9 w-9 shrink-0 place-items-center rounded-xl"
                   style={{
                     background: active
@@ -217,6 +223,7 @@ export default function OnboardAgent() {
                 </label>
                 <input
                   id="agent-name"
+                  disabled={submitting || attemptLocked}
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                   placeholder="例如：DataForge"
@@ -225,11 +232,13 @@ export default function OnboardAgent() {
               </div>
               <div>
                 <div className="text-[13px] font-medium text-[var(--ap-muted)]">能力分类</div>
-                <div className="mt-2 flex flex-wrap gap-2">
+                <div role="group" aria-label="能力分类" className="mt-2 flex flex-wrap gap-2">
                   {CATEGORIES.map((item) => (
                     <button
                       key={item}
                       type="button"
+                      aria-pressed={category === item}
+                      disabled={submitting || attemptLocked}
                       onClick={() => setCategory(item)}
                       className="rounded-lg border px-3 py-2 text-[13px] transition-colors"
                       style={{
@@ -249,6 +258,7 @@ export default function OnboardAgent() {
                 </label>
                 <input
                   id="agent-tagline"
+                  disabled={submitting || attemptLocked}
                   value={tagline}
                   onChange={(event) => setTagline(event.target.value)}
                   placeholder="描述该 Agent 擅长的任务"
@@ -267,6 +277,7 @@ export default function OnboardAgent() {
                       <button
                         type="button"
                         aria-label={`移除 ${item}`}
+                        disabled={submitting || attemptLocked}
                         onClick={() => setCapabilities((items) => items.filter((capability) => capability !== item))}
                       >
                         <X size={12} />
@@ -276,6 +287,7 @@ export default function OnboardAgent() {
                   <div className="inline-flex items-center gap-1 rounded-full border border-dashed border-[var(--ap-border-strong)] px-2 py-1">
                     <input
                       aria-label="添加能力标签"
+                      disabled={submitting || attemptLocked}
                       value={capabilityInput}
                       onChange={(event) => setCapabilityInput(event.target.value)}
                       onKeyDown={(event) => {
@@ -287,7 +299,7 @@ export default function OnboardAgent() {
                       placeholder="添加标签"
                       className="w-24 bg-transparent text-[12px] text-white outline-none placeholder:text-[var(--ap-muted)]"
                     />
-                    <button type="button" aria-label="确认添加标签" onClick={addCapability} className="text-[var(--ap-cyan)]">
+                    <button type="button" aria-label="确认添加标签" disabled={submitting || attemptLocked} onClick={addCapability} className="text-[var(--ap-cyan)]">
                       <Plus size={14} />
                     </button>
                   </div>
@@ -305,6 +317,7 @@ export default function OnboardAgent() {
                   <input
                     id="agent-endpoint"
                     type="url"
+                    disabled={submitting || attemptLocked}
                     value={endpointUrl}
                     onChange={(event) => setEndpointUrl(event.target.value)}
                     placeholder="https://agent.example/health"
@@ -318,6 +331,7 @@ export default function OnboardAgent() {
                   <input
                     id="agent-concurrency"
                     inputMode="numeric"
+                    disabled={submitting || attemptLocked}
                     value={maxConcurrency}
                     onChange={(event) => setMaxConcurrency(event.target.value.replace(/\D/g, ""))}
                     className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]"
@@ -337,11 +351,13 @@ export default function OnboardAgent() {
               <SectionTitle>凭证安全</SectionTitle>
               <div>
                 <div className="text-[13px] font-medium text-[var(--ap-muted)]">鉴权方式</div>
-                <div className="mt-2 flex flex-wrap gap-2">
+                <div role="group" aria-label="鉴权方式" className="mt-2 flex flex-wrap gap-2">
                   {AUTH_TYPES.map((item) => (
                     <button
                       key={item}
                       type="button"
+                      aria-pressed={auth === item}
+                      disabled={submitting || attemptLocked}
                       onClick={() => setAuth(item)}
                       className="rounded-lg border px-3 py-2 text-[13px] transition-colors"
                       style={{
@@ -362,6 +378,8 @@ export default function OnboardAgent() {
                 <input
                   id="agent-secret"
                   type="password"
+                  autoComplete="off"
+                  disabled={submitting || attemptLocked}
                   value={secret}
                   onChange={(event) => setSecret(event.target.value)}
                   placeholder="粘贴凭证，提交后将加密存储"
@@ -371,11 +389,11 @@ export default function OnboardAgent() {
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label htmlFor="agent-overview-price" className="text-[13px] text-[var(--ap-muted)]">概览价格 (USDC)</label>
-                  <input id="agent-overview-price" inputMode="numeric" value={overviewPrice} onChange={(event) => setOverviewPrice(event.target.value.replace(/\D/g, ""))} className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]" />
+                  <input id="agent-overview-price" inputMode="numeric" disabled={submitting || attemptLocked} value={overviewPrice} onChange={(event) => setOverviewPrice(event.target.value.replace(/\D/g, ""))} className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]" />
                 </div>
                 <div>
                   <label htmlFor="agent-formal-price" className="text-[13px] text-[var(--ap-muted)]">正式套餐总价 (USDC)</label>
-                  <input id="agent-formal-price" inputMode="numeric" value={formalPrice} onChange={(event) => setFormalPrice(event.target.value.replace(/\D/g, ""))} className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]" />
+                  <input id="agent-formal-price" inputMode="numeric" disabled={submitting || attemptLocked} value={formalPrice} onChange={(event) => setFormalPrice(event.target.value.replace(/\D/g, ""))} className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]" />
                 </div>
               </div>
               <InfoNote tone="green">
@@ -397,7 +415,7 @@ export default function OnboardAgent() {
               >
                 协议校验与健康检查
               </SectionTitle>
-              <div className="space-y-3">
+              <div aria-live="polite" aria-busy={submitting} className="space-y-3">
                 {checks.map((check) => (
                   <div
                     key={check.label}
@@ -435,7 +453,7 @@ export default function OnboardAgent() {
                   </div>
                 ))}
               </div>
-              {submitError ? <div className="space-y-3"><InfoNote tone="red"><span role="alert">{submitError}</span></InfoNote>{operationId.current ? <GhostButton onClick={resetAttempt}>放弃本次操作并重新开始</GhostButton> : null}</div> : null}
+              {submitError ? <div className="space-y-3"><InfoNote tone="red"><span role="alert">{submitError}</span></InfoNote>{operationId.current ? <><p className="text-[12px] text-[var(--ap-muted)]">为保证幂等重试，当前输入已锁定。可原样重试，或放弃本次操作后修改。</p><GhostButton onClick={resetAttempt}>放弃本次操作并重新开始</GhostButton></> : null}</div> : null}
             </div>
           ) : null}
 

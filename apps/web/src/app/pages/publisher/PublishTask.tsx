@@ -31,12 +31,18 @@ export default function PublishTask() {
   const [error, setError] = useState<string | null>(null);
   const [publication, setPublication] = useState<{ taskId: string; specHash: string; acceptanceHash: string } | null>(null);
   const operationId = useRef<string | undefined>(undefined);
+  const submitInFlight = useRef(false);
   const fee = Math.round(Number(amount || 0) * 0.02);
 
   const submit = async () => {
-    if (submitting || publication) return;
+    if (submitInFlight.current || publication) return;
+    submitInFlight.current = true;
     setError(null);
-    if (!title.trim() || !desc.trim() || !criteriaText.trim() || !amount || !deadline) { setError('请完整填写标题、描述、验收标准、预算和截止日期。'); return; }
+    if (!title.trim() || !desc.trim() || !criteriaText.trim() || !amount || !deadline) {
+      submitInFlight.current = false;
+      setError('请完整填写标题、描述、验收标准、预算和截止日期。');
+      return;
+    }
     setSubmitting(true);
     try {
       const input: TaskPublishInput = {
@@ -52,11 +58,13 @@ export default function PublishTask() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '任务发布失败，请重试。');
     } finally {
+      submitInFlight.current = false;
       setSubmitting(false);
     }
   };
 
   const resetAttempt = () => {
+    submitInFlight.current = false;
     operationId.current = undefined;
     setError(null);
   };
@@ -89,11 +97,12 @@ export default function PublishTask() {
           </div>
           <div>
             <div className="text-[13px] font-medium text-[var(--ap-muted)]">任务分类</div>
-            <div className="mt-2 flex flex-wrap gap-2">
+            <div role="group" aria-label="任务分类" className="mt-2 flex flex-wrap gap-2">
               {CATEGORIES.map((c) => (
                 <button
                   key={c} onClick={() => setCat(c)}
                   type="button"
+                  aria-pressed={cat === c}
                   disabled={Boolean(operationId.current)}
                   className="rounded-lg border px-3 py-2 text-[13px] transition-colors"
                   style={{
@@ -160,7 +169,7 @@ export default function PublishTask() {
             <p className="mt-3 flex items-center gap-1.5 text-[12px] text-[var(--ap-muted)]">
               <Info size={13} /> UI 仅执行 Engine 返回的 allowed 操作，不自行推导发布资格
             </p>
-            {error ? <div className="mt-4 space-y-3"><div role="alert" className="rounded-xl border border-rose-300/30 bg-rose-300/10 px-4 py-3 text-[13px] text-rose-100">{error}</div>{operationId.current ? <GhostButton onClick={resetAttempt}>放弃本次操作并重新编辑</GhostButton> : null}</div> : null}
+            {error ? <div className="mt-4 space-y-3"><div role="alert" className="rounded-xl border border-rose-300/30 bg-rose-300/10 px-4 py-3 text-[13px] text-rose-100">{error}</div>{operationId.current ? <><p className="text-[12px] text-[var(--ap-muted)]">为保证幂等重试，当前输入已锁定。可原样重试，或放弃本次操作后修改。</p><GhostButton onClick={resetAttempt}>放弃本次操作并重新编辑</GhostButton></> : null}</div> : null}
             {publication ? <div role="status" className="mt-4 space-y-1 rounded-xl border border-emerald-300/30 bg-emerald-300/10 px-4 py-3 text-[12px] text-emerald-100"><div>任务 {publication.taskId} 已发布</div><div className="break-all">规格：{publication.specHash}</div><div className="break-all">验收：{publication.acceptanceHash}</div></div> : null}
           </Panel>
 

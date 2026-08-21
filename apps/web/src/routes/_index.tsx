@@ -21,7 +21,7 @@ import {
   Wallet,
   type LucideIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { ROLES, type RoleId } from "../app/lib/roles";
@@ -82,14 +82,17 @@ export default function Home() {
   const [role, setRole] = useState<RoleId>("publisher");
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const connectInFlight = useRef(false);
 
   async function connectWallet() {
+    if (connectInFlight.current) return;
+    connectInFlight.current = true;
     setError(null);
-    if (connecting) return;
     const ethereum = (window as typeof window & { ethereum?: WalletProvider }).ethereum;
 
     if (!ethereum) {
       setError("未检测到钱包，请先安装 MetaMask 或其他以太坊兼容钱包。");
+      connectInFlight.current = false;
       return;
     }
 
@@ -108,6 +111,7 @@ export default function Home() {
     } catch (cause) {
       setError(cause instanceof Error && cause.message ? `登录失败：${cause.message}` : "钱包连接未完成，请在钱包中确认后重试。");
     } finally {
+      connectInFlight.current = false;
       setConnecting(false);
     }
   }
@@ -215,7 +219,7 @@ export default function Home() {
               <Users aria-hidden="true" size={14} className="text-[var(--ap-cyan)]" />
               选择进入的角色
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div role="group" aria-label="登录角色" className="grid grid-cols-2 gap-3">
               {loginRoles.map(({ id, icon: Icon, description }) => {
                 const config = ROLES[id];
                 const active = role === id;
@@ -224,6 +228,8 @@ export default function Home() {
                   <button
                     key={id}
                     type="button"
+                    aria-pressed={active}
+                    disabled={connecting}
                     onClick={() => setRole(id)}
                     className="relative rounded-xl border p-3 text-left transition-colors sm:p-4"
                     style={{

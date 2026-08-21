@@ -182,3 +182,85 @@ func TestTaskDownMigrationPreservesImmutablePublicationHistory(t *testing.T) {
 		t.Fatal("task rollback must preserve immutable publication history")
 	}
 }
+
+func TestMatchingMigrationEnforcesRevisionIdentityAndImmutableSnapshots(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000007_matching_snapshots.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"UNIQUE (task_id, match_revision)",
+		"UNIQUE (task_id, task_spec_hash, algorithm_version, effective_input_hash)",
+		"seed_digest text NOT NULL",
+		"seed_key_version text NOT NULL",
+		"policy_hash text NOT NULL",
+		"probability_numerator integer",
+		"probability_denominator integer",
+		"CHECK (NOT exploration OR final_position = 3)",
+		"matching snapshots are immutable",
+		"sealed matching snapshot candidates are immutable",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("matching migration missing %q", required)
+		}
+	}
+	if strings.Contains(strings.ToLower(sql), "seed_secret") {
+		t.Fatal("matching schema must never persist shuffle seed secrets")
+	}
+}
+
+func TestMatchingDownMigrationPreservesSnapshotHistory(t *testing.T) {
+	contents, err := os.ReadFile("migrations/000007_matching_snapshots.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upper := strings.ToUpper(string(contents))
+	if strings.Contains(upper, "DROP TABLE") || strings.Contains(upper, "DELETE FROM") {
+		t.Fatal("matching rollback must preserve immutable snapshot history")
+	}
+}
+
+func TestExecutionMigrationSeparatesLogicalWorkAttemptsAndCallbackEvidence(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000008_agent_executions.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"task_spec_versions_task_version_hash_uidx",
+		"logical_executions",
+		"idempotency_key text NOT NULL UNIQUE",
+		"execution_attempts",
+		"fencing_token bigint",
+		"callback_nonce_hash text UNIQUE",
+		"execution_callback_events",
+		"nonce_hash text NOT NULL UNIQUE",
+		"logical execution specification is immutable",
+		"terminal logical execution is immutable",
+		"execution attempt identity and fencing are immutable",
+		"terminal execution attempt is immutable",
+		"execution callback events are immutable",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("execution migration missing %q", required)
+		}
+	}
+	lower := strings.ToLower(sql)
+	for _, forbidden := range []string{"signature text", "callback_nonce text", "api_key", "private_key"} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("execution schema persists secret-shaped field %q", forbidden)
+		}
+	}
+}
+
+func TestExecutionDownMigrationPreservesCallbackEvidence(t *testing.T) {
+	contents, err := os.ReadFile("migrations/000008_agent_executions.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upper := strings.ToUpper(string(contents))
+	if strings.Contains(upper, "DROP TABLE") || strings.Contains(upper, "DELETE FROM") {
+		t.Fatal("execution rollback must preserve callback evidence")
+	}
+}

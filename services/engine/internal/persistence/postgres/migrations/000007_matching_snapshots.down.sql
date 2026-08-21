@@ -1,0 +1,2 @@
+-- Matching snapshots are immutable audit history. Rollback intentionally keeps
+-- the tables, constraints, triggers, and all historical rows intact.

@@ -1,0 +1,2 @@
+-- Logical executions, attempts, and callback events are billing/dispute evidence.
+-- Rollback intentionally preserves the full immutable history.

@@ -56,7 +56,7 @@
   - Risk: medium
   - Verification: BFF 契约测试证明浏览器隔离及不可执行原因来自 Engine
 
-- [ ] [T-107] [running] 接入可访问的身份、Agent 和任务 Web 流程
+- [x] [T-107] [done] 接入可访问的身份、Agent 和任务 Web 流程
   - Repository: .
   - Covers: F-101, F-103, F-105, F-106, AC-101, AC-103, AC-105
   - Depends on: T-102, T-104, T-106
