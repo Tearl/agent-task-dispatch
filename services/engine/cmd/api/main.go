@@ -20,6 +20,8 @@ import (
 	"github.com/example/agent-platform/engine/internal/credential"
 	credentialpostgres "github.com/example/agent-platform/engine/internal/credential/postgres"
 	persistencepostgres "github.com/example/agent-platform/engine/internal/persistence/postgres"
+	enginetask "github.com/example/agent-platform/engine/internal/task"
+	taskpostgres "github.com/example/agent-platform/engine/internal/task/postgres"
 	_ "github.com/lib/pq"
 )
 
@@ -91,6 +93,16 @@ func main() {
 		logger.Error("credential service failed", "error", err)
 		os.Exit(1)
 	}
+	taskStore, err := taskpostgres.NewStore(db)
+	if err != nil {
+		logger.Error("task store failed", "error", err)
+		os.Exit(1)
+	}
+	taskService, err := enginetask.NewService(taskStore)
+	if err != nil {
+		logger.Error("task service failed", "error", err)
+		os.Exit(1)
+	}
 	address := os.Getenv("ENGINE_ADDR")
 	if address == "" {
 		address = ":8080"
@@ -98,7 +110,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              address,
-		Handler:           api.NewHandlerWithCredentials(logger, authService, agentService, credentialService),
+		Handler:           api.NewHandlerWithTaskService(logger, authService, agentService, credentialService, taskService),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,

@@ -40,7 +40,7 @@
   - Risk: high
   - Verification: 覆盖凭证写入、所有权边界、管理员拒绝、响应快照与日志脱敏
 
-- [ ] [T-105] [pending] 实现任务草稿与不可变规格发布
+- [x] [T-105] [done] 实现任务草稿与不可变规格发布
   - Repository: .
   - Covers: F-102, F-105, F-107, AC-102, AC-105, AC-106
   - Depends on: T-101, T-102

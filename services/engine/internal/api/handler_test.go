@@ -20,6 +20,7 @@ import (
 	engineagent "github.com/example/agent-platform/engine/internal/agent"
 	engineauth "github.com/example/agent-platform/engine/internal/auth"
 	enginecredential "github.com/example/agent-platform/engine/internal/credential"
+	enginetask "github.com/example/agent-platform/engine/internal/task"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -215,6 +216,78 @@ func (*apiAgentStore) ReserveCapacity(context.Context, string, string, time.Time
 	return engineagent.CapacityLease{}, nil
 }
 func (*apiAgentStore) ReleaseCapacity(context.Context, string, int64) error { return nil }
+
+type apiTaskStore struct {
+	createCalls int
+	mutation    enginetask.Mutation
+}
+
+func (s *apiTaskStore) Create(_ context.Context, mutation enginetask.Mutation, input enginetask.DraftInput, id string) (enginetask.Task, bool, error) {
+	s.createCalls++
+	s.mutation = mutation
+	return enginetask.Task{ID: id, PublisherID: mutation.ActorID, Status: enginetask.StatusDraft, Title: input.Title, AggregateVersion: 1}, false, nil
+}
+func (*apiTaskStore) UpdateDraft(context.Context, enginetask.Mutation, string, enginetask.UpdateDraftInput) (enginetask.Task, bool, error) {
+	return enginetask.Task{}, false, enginetask.ErrStaleVersion
+}
+func (*apiTaskStore) Publish(context.Context, enginetask.Mutation, string, enginetask.PublishInput) (enginetask.Publication, bool, error) {
+	return enginetask.Publication{}, false, enginetask.ErrInvalidState
+}
+func (*apiTaskStore) Get(context.Context, string, string) (enginetask.Task, error) {
+	return enginetask.Task{}, enginetask.ErrNotFound
+}
+
+func TestTaskTransportRequiresSessionIdempotencyAndMapsDomainErrors(t *testing.T) {
+	store := &apiTaskStore{}
+	taskService, err := enginetask.NewService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	authService, err := engineauth.NewService(staticSessionStore{session: engineauth.Session{UserID: "publisher", Roles: []string{"publisher"}, ExpiresAt: now.Add(time.Hour)}}, engineauth.EthereumVerifier{}, engineauth.Config{Domain: "app.example", ChainID: "1", Purpose: "login"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandlerWithTaskService(slog.New(slog.NewTextHandler(io.Discard, nil)), authService, nil, nil, taskService)
+	draft := enginetask.DraftInput{Title: "Research", Description: "Research the market", ExpertType: "research", Language: "en", OverviewBudget: "1", FormalBudget: "10", ExternalCostCap: "0", Deadline: now.Add(time.Hour), Inputs: []string{"data"}, AllowedTools: []string{"search"}, Exclusions: []string{"PII"}, DeliveryFormat: "markdown", AcceptanceCriteria: []enginetask.AcceptanceCriterion{{ID: "quality", Title: "Quality", Description: "Accurate", Weight: 100}}}
+	body, _ := json.Marshal(draft)
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/v1/tasks", bytes.NewReader(body)))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status: %d", unauthorized.Code)
+	}
+	missingKeyRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks", bytes.NewReader(body))
+	missingKeyRequest.Header.Set("authorization", "Bearer token")
+	missingKey := httptest.NewRecorder()
+	handler.ServeHTTP(missingKey, missingKeyRequest)
+	if missingKey.Code != http.StatusBadRequest {
+		t.Fatalf("missing key status: %d %s", missingKey.Code, missingKey.Body.String())
+	}
+	createRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks", bytes.NewReader(body))
+	createRequest.Header.Set("authorization", "Bearer token")
+	createRequest.Header.Set("Idempotency-Key", "create-task")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, createRequest)
+	if created.Code != http.StatusCreated || store.createCalls != 1 || store.mutation.ActorID != "publisher" {
+		t.Fatalf("create: status=%d calls=%d mutation=%#v body=%s", created.Code, store.createCalls, store.mutation, created.Body.String())
+	}
+	publishBody := bytes.NewBufferString(`{"expectedVersion":1}`)
+	publishRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/task-1/publish", publishBody)
+	publishRequest.Header.Set("authorization", "Bearer token")
+	publishRequest.Header.Set("Idempotency-Key", "publish-task")
+	published := httptest.NewRecorder()
+	handler.ServeHTTP(published, publishRequest)
+	if published.Code != http.StatusConflict {
+		t.Fatalf("publish conflict status: %d %s", published.Code, published.Body.String())
+	}
+	getRequest := httptest.NewRequest(http.MethodGet, "/v1/tasks/other-task", nil)
+	getRequest.Header.Set("authorization", "Bearer token")
+	notFound := httptest.NewRecorder()
+	handler.ServeHTTP(notFound, getRequest)
+	if notFound.Code != http.StatusNotFound {
+		t.Fatalf("get not found status: %d", notFound.Code)
+	}
+}
 
 func TestAgentTransportAuthenticatesValidatesAndMapsConflicts(t *testing.T) {
 	store := &apiAgentStore{}

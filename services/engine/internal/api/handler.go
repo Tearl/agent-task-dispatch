@@ -12,6 +12,7 @@ import (
 	"github.com/example/agent-platform/engine/internal/auth"
 	"github.com/example/agent-platform/engine/internal/credential"
 	"github.com/example/agent-platform/engine/internal/persistence"
+	enginetask "github.com/example/agent-platform/engine/internal/task"
 )
 
 type handler struct {
@@ -19,6 +20,7 @@ type handler struct {
 	auth        *auth.Service
 	agents      *agent.Service
 	credentials *credential.Service
+	tasks       *enginetask.Service
 }
 
 type nonceRequest struct {
@@ -48,7 +50,11 @@ func NewHandlerWithServices(logger *slog.Logger, authService *auth.Service, agen
 }
 
 func NewHandlerWithCredentials(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service) http.Handler {
-	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService}
+	return NewHandlerWithTaskService(logger, authService, agentService, credentialService, nil)
+}
+
+func NewHandlerWithTaskService(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service) http.Handler {
+	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService, tasks: taskService}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /v1/auth/nonce", h.createNonce)
@@ -67,8 +73,97 @@ func NewHandlerWithCredentials(logger *slog.Logger, authService *auth.Service, a
 	if credentialService != nil {
 		mux.HandleFunc("POST /v1/agents/{id}/credentials", h.rotateAgentCredential)
 	}
+	if taskService != nil {
+		mux.HandleFunc("POST /v1/tasks", h.createTask)
+		mux.HandleFunc("GET /v1/tasks/{id}", h.getTask)
+		mux.HandleFunc("PUT /v1/tasks/{id}/draft", h.updateTaskDraft)
+		mux.HandleFunc("POST /v1/tasks/{id}/publish", h.publishTask)
+	}
 
 	return requestLogging(logger, mux)
+}
+
+func (h *handler) createTask(writer http.ResponseWriter, request *http.Request) {
+	var input enginetask.DraftInput
+	if decodeJSON(writer, request, 131_072, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, _, err := h.tasks.Create(request.Context(), session, request.Header.Get("Idempotency-Key"), input)
+	if err != nil {
+		h.writeTaskError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, value)
+}
+
+func (h *handler) getTask(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.tasks.Get(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeTaskError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) updateTaskDraft(writer http.ResponseWriter, request *http.Request) {
+	var input enginetask.UpdateDraftInput
+	if decodeJSON(writer, request, 131_072, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, _, err := h.tasks.UpdateDraft(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeTaskError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) publishTask(writer http.ResponseWriter, request *http.Request) {
+	var input enginetask.PublishInput
+	if decodeJSON(writer, request, 4_096, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, _, err := h.tasks.Publish(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeTaskError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, value)
+}
+
+func (h *handler) writeTaskError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, enginetask.ErrForbidden):
+		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "forbidden"})
+	case errors.Is(err, enginetask.ErrNotFound):
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "task not found"})
+	case errors.Is(err, enginetask.ErrStaleVersion), errors.Is(err, enginetask.ErrInvalidState), errors.Is(err, persistence.ErrIdempotencyConflict):
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "task conflict"})
+	case errors.Is(err, enginetask.ErrInvalidInput):
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid task request"})
+	default:
+		h.logger.Error("task operation failed", "error", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "task service temporarily unavailable"})
+	}
 }
 
 func (h *handler) rotateAgentCredential(writer http.ResponseWriter, request *http.Request) {

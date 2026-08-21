@@ -135,3 +135,37 @@ func TestAgentCredentialDownMigrationPreservesCiphertextHistory(t *testing.T) {
 		t.Fatal("credential rollback must preserve encrypted history")
 	}
 }
+
+func TestTaskMigrationFreezesHashedSpecAndWeightedAcceptanceVersions(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000005_tasks.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"content_hash text NOT NULL",
+		"task_spec_versions_immutable",
+		"acceptance_versions_immutable",
+		"total_weight integer NOT NULL CHECK (total_weight = 100)",
+		"tasks_current_spec_fk",
+		"tasks_current_acceptance_fk",
+		"published task content is immutable",
+		"valid_task_acceptance_criteria",
+		"current_spec_version IS NOT DISTINCT FROM current_acceptance_version",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("task migration missing %q", required)
+		}
+	}
+}
+
+func TestTaskDownMigrationPreservesImmutablePublicationHistory(t *testing.T) {
+	contents, err := os.ReadFile("migrations/000005_tasks.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upper := strings.ToUpper(string(contents))
+	if strings.Contains(upper, "DROP TABLE") || strings.Contains(upper, "DELETE FROM") {
+		t.Fatal("task rollback must preserve immutable publication history")
+	}
+}
