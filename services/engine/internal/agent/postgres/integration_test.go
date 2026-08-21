@@ -70,6 +70,13 @@ func TestPostgresAgentOwnershipLifecyclePricesIdempotencyAndCapacity(t *testing.
 	if err != nil || replay || created.AggregateVersion != 1 || created.Status != agent.StatusDraft {
 		t.Fatalf("create: agent=%#v replay=%v err=%v", created, replay, err)
 	}
+	actions, err := service.AvailableActions(ctx, ownerA, created.ID)
+	if err != nil || actions.AggregateVersion != 1 || len(actions.Actions) != 10 || actions.Actions[6].Allowed || len(actions.Actions[6].Reasons) != 3 || actions.Actions[9].Allowed {
+		t.Fatalf("draft available actions: %#v err=%v", actions, err)
+	}
+	if _, err = service.AvailableActions(ctx, ownerB, created.ID); !errors.Is(err, agent.ErrNotFound) {
+		t.Fatalf("other owner available actions: %v", err)
+	}
 	replayed, replay, err := service.Create(ctx, ownerA, "create-agent", input)
 	if err != nil || !replay || replayed.ID != created.ID || replayed.AggregateVersion != 1 {
 		t.Fatalf("create replay: agent=%#v replay=%v err=%v", replayed, replay, err)
@@ -88,6 +95,10 @@ func TestPostgresAgentOwnershipLifecyclePricesIdempotencyAndCapacity(t *testing.
 	neverActive, _, err = service.Transition(ctx, ownerA, "pause-never-active", neverActive.ID, agent.LifecycleInput{Status: agent.StatusPaused, ExpectedVersion: 1})
 	if err != nil || neverActive.ActivatedAt != nil {
 		t.Fatalf("pause before activation: agent=%#v err=%v", neverActive, err)
+	}
+	pausedActions, err := service.AvailableActions(ctx, ownerA, neverActive.ID)
+	if err != nil || len(pausedActions.Actions) != 10 || !pausedActions.Actions[9].Allowed {
+		t.Fatalf("paused return-to-draft action: %#v err=%v", pausedActions, err)
 	}
 	editableProfile := profileFrom(neverActive, 2)
 	editableProfile.ControllerAddress = "0x3333333333333333333333333333333333333333"
@@ -246,6 +257,10 @@ func TestPostgresAgentOwnershipLifecyclePricesIdempotencyAndCapacity(t *testing.
 	}
 	if len(leases) != input.MaxConcurrency {
 		t.Fatalf("capacity oversubscribed or undersubscribed: got %d leases, want %d", len(leases), input.MaxConcurrency)
+	}
+	capacityView, err := service.View(ctx, ownerA, created.ID)
+	if err != nil || capacityView.Agent.ActiveCapacity != len(leases) || capacityView.AvailableActions.Actions[8].Allowed || len(capacityView.AvailableActions.Actions[8].Reasons) != 1 || capacityView.AvailableActions.Actions[8].Reasons[0].Code != "active_capacity_nonzero" {
+		t.Fatalf("lease-consistent Agent view: %#v err=%v", capacityView, err)
 	}
 	shrinkProfile := profileFrom(active, 7)
 	shrinkProfile.MaxConcurrency = 1

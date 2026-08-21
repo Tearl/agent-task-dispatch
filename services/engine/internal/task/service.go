@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/example/agent-platform/engine/internal/action"
 	"github.com/example/agent-platform/engine/internal/auth"
 )
 
@@ -121,6 +122,11 @@ type Publication struct {
 	Acceptance AcceptanceVersion `json:"acceptance"`
 }
 
+type View struct {
+	Task             Task            `json:"task"`
+	AvailableActions action.Response `json:"availableActions"`
+}
+
 type Mutation struct {
 	ActorID        string
 	IdempotencyKey string
@@ -134,6 +140,7 @@ type Store interface {
 	UpdateDraft(context.Context, Mutation, string, UpdateDraftInput) (Task, bool, error)
 	Publish(context.Context, Mutation, string, PublishInput) (Publication, bool, error)
 	Get(context.Context, string, string) (Task, error)
+	GetForActions(context.Context, string, string) (Task, time.Time, error)
 }
 
 type Service struct {
@@ -205,6 +212,42 @@ func (s *Service) Get(ctx context.Context, session auth.Session, id string) (Tas
 		return Task{}, ErrNotFound
 	}
 	return s.store.Get(ctx, session.UserID, id)
+}
+
+func (s *Service) AvailableActions(ctx context.Context, session auth.Session, id string) (action.Response, error) {
+	view, err := s.View(ctx, session, id)
+	return view.AvailableActions, err
+}
+
+func (s *Service) View(ctx context.Context, session auth.Session, id string) (View, error) {
+	if !publisherAuthorized(session) {
+		return View{}, ErrForbidden
+	}
+	if id == "" {
+		return View{}, ErrNotFound
+	}
+	value, databaseNow, err := s.store.GetForActions(ctx, session.UserID, id)
+	if err != nil {
+		return View{}, err
+	}
+	editReasons := []action.Reason{}
+	if value.Status != StatusDraft {
+		editReasons = append(editReasons, action.Because("task_not_draft", "Only draft tasks can be edited or published."))
+	}
+	publishReasons := append([]action.Reason(nil), editReasons...)
+	if !value.Deadline.After(databaseNow) {
+		publishReasons = append(publishReasons, action.Because("deadline_expired", "Set a future deadline before publishing the task."))
+	}
+	return View{
+		Task: value,
+		AvailableActions: action.Response{
+			ResourceType: "task", ResourceID: value.ID, AggregateVersion: value.AggregateVersion,
+			Actions: []action.Decision{
+				action.Decide("update_draft", editReasons...),
+				action.Decide("publish", publishReasons...),
+			},
+		},
+	}, nil
 }
 
 func (s *Service) mutation(session auth.Session, key string, input any) (Mutation, error) {

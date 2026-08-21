@@ -97,7 +97,7 @@ func NewService(store Store, encryptor Encryptor) (*Service, error) {
 }
 
 func (s *Service) Rotate(ctx context.Context, session auth.Session, idempotencyKey, agentID string, input RotateInput) (Metadata, bool, error) {
-	if !slices.Contains(session.Roles, "agent_provider") || slices.Contains(session.Roles, "admin") || slices.Contains(session.Roles, "arbitrator") {
+	if !CanRotate(session) {
 		return Metadata{}, false, ErrForbidden
 	}
 	if idempotencyKey == "" || len(idempotencyKey) > 200 || agentID == "" || input.ExpectedVersion < 1 || !slices.Contains([]string{TypeAPIKey, TypeBearerToken, TypeOAuthClientSecret}, input.CredentialType) || strings.TrimSpace(input.Label) == "" || len(input.Label) > 100 || input.Secret == "" || len(input.Secret) > 16_384 {
@@ -127,6 +127,10 @@ func (s *Service) Rotate(ctx context.Context, session auth.Session, idempotencyK
 	}
 	mutation := Mutation{ActorID: session.UserID, IdempotencyKey: idempotencyKey, RequestHash: hex.EncodeToString(requestHash[:]), EventID: eventID, Now: s.now().UTC()}
 	return s.store.Rotate(ctx, mutation, agentID, StoreInput{CredentialType: input.CredentialType, Label: input.Label, ExpectedVersion: input.ExpectedVersion}, envelope)
+}
+
+func CanRotate(session auth.Session) bool {
+	return slices.Contains(session.Roles, "agent_provider") && !slices.Contains(session.Roles, "admin") && !slices.Contains(session.Roles, "arbitrator")
 }
 
 type AESGCMEncryptor struct {

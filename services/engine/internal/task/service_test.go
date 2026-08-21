@@ -16,6 +16,9 @@ type testStore struct {
 	lastMutation Mutation
 	createReplay bool
 	updateReplay bool
+	actionTask   Task
+	databaseNow  time.Time
+	actionErr    error
 }
 
 func (s *testStore) Create(_ context.Context, mutation Mutation, input DraftInput, id string) (Task, bool, error) {
@@ -34,6 +37,9 @@ func (s *testStore) Publish(_ context.Context, mutation Mutation, id string, inp
 	return Publication{Task: Task{ID: id, PublisherID: mutation.ActorID, Status: StatusPendingEscrow, AggregateVersion: input.ExpectedVersion + 1}}, false, nil
 }
 func (*testStore) Get(context.Context, string, string) (Task, error) { return Task{}, nil }
+func (s *testStore) GetForActions(context.Context, string, string) (Task, time.Time, error) {
+	return s.actionTask, s.databaseNow, s.actionErr
+}
 
 func TestTaskOperationsRequirePublisherRoleAndIdempotency(t *testing.T) {
 	store := &testStore{}
@@ -158,6 +164,46 @@ func TestPublicationContentHashesAreDeterministicAndSeparated(t *testing.T) {
 	changed, _, _ := PublicationVersions(value, 1, now)
 	if changed.ContentHash == spec1.ContentHash {
 		t.Fatal("changed spec retained old content hash")
+	}
+}
+
+func TestTaskAvailableActionsComeFromStoredStateAndDatabaseTime(t *testing.T) {
+	databaseNow := time.Date(2026, 8, 21, 4, 0, 0, 0, time.UTC)
+	store := &testStore{databaseNow: databaseNow, actionTask: Task{ID: "task-1", PublisherID: "publisher", Status: StatusDraft, AggregateVersion: 4, Deadline: databaseNow.Add(time.Hour)}}
+	service, _ := NewService(store)
+	publisher := auth.Session{UserID: "publisher", Roles: []string{"publisher"}}
+	response, err := service.AvailableActions(context.Background(), publisher, "task-1")
+	if err != nil || response.ResourceType != "task" || response.AggregateVersion != 4 || len(response.Actions) != 2 {
+		t.Fatalf("available actions: %#v err=%v", response, err)
+	}
+	for _, decision := range response.Actions {
+		if !decision.Allowed || len(decision.Reasons) != 0 {
+			t.Fatalf("future draft action blocked: %#v", decision)
+		}
+	}
+	store.actionTask.Status = StatusPendingEscrow
+	store.actionTask.Deadline = databaseNow.Add(-time.Second)
+	response, err = service.AvailableActions(context.Background(), publisher, "task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Actions[0].Allowed || len(response.Actions[0].Reasons) != 1 || response.Actions[0].Reasons[0].Code != "task_not_draft" {
+		t.Fatalf("invalid update decision: %#v", response.Actions[0])
+	}
+	if response.Actions[1].Allowed || len(response.Actions[1].Reasons) != 2 || response.Actions[1].Reasons[0].Code != "task_not_draft" || response.Actions[1].Reasons[1].Code != "deadline_expired" {
+		t.Fatalf("invalid publish decision: %#v", response.Actions[1])
+	}
+	store.actionTask.Status = StatusDraft
+	response, err = service.AvailableActions(context.Background(), publisher, "task-1")
+	if err != nil || !response.Actions[0].Allowed || response.Actions[1].Allowed || len(response.Actions[1].Reasons) != 1 || response.Actions[1].Reasons[0].Code != "deadline_expired" {
+		t.Fatalf("expired draft recovery decisions: %#v err=%v", response.Actions, err)
+	}
+	if _, err = service.AvailableActions(context.Background(), auth.Session{UserID: "provider", Roles: []string{"agent_provider"}}, "task-1"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("provider actions: %v", err)
+	}
+	view, err := service.View(context.Background(), publisher, "task-1")
+	if err != nil || view.Task.ID != "task-1" || view.Task.AggregateVersion != view.AvailableActions.AggregateVersion {
+		t.Fatalf("single-snapshot task view: %#v err=%v", view, err)
 	}
 }
 

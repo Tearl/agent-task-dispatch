@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/example/agent-platform/engine/internal/action"
 	"github.com/example/agent-platform/engine/internal/auth"
+	"github.com/example/agent-platform/engine/internal/credential"
 )
 
 var (
@@ -85,6 +87,11 @@ type CapacityLease struct {
 	ExpiresAt     time.Time `json:"expiresAt"`
 }
 
+type View struct {
+	Agent            Agent           `json:"agent"`
+	AvailableActions action.Response `json:"availableActions"`
+}
+
 type CreateInput struct {
 	Name                     string   `json:"name"`
 	Category                 string   `json:"category"`
@@ -137,6 +144,7 @@ type Store interface {
 	UpdateCapacity(context.Context, Mutation, string, CapacityInput) (Agent, bool, error)
 	PublishPrice(context.Context, Mutation, string, PriceInput) (PriceVersion, bool, error)
 	Get(context.Context, string, string) (Agent, error)
+	GetForActions(context.Context, string, string) (Agent, time.Time, error)
 	ReserveCapacity(context.Context, string, string, time.Time) (CapacityLease, error)
 	ReleaseCapacity(context.Context, string, int64) error
 }
@@ -249,6 +257,82 @@ func (s *Service) Get(ctx context.Context, session auth.Session, id string) (Age
 		return Agent{}, ErrForbidden
 	}
 	return s.store.Get(ctx, session.UserID, id)
+}
+
+func (s *Service) AvailableActions(ctx context.Context, session auth.Session, id string) (action.Response, error) {
+	view, err := s.View(ctx, session, id)
+	return view.AvailableActions, err
+}
+
+func (s *Service) View(ctx context.Context, session auth.Session, id string) (View, error) {
+	if !hasRole(session, "agent_provider") {
+		return View{}, ErrForbidden
+	}
+	value, now, err := s.store.GetForActions(ctx, session.UserID, id)
+	if err != nil {
+		return View{}, err
+	}
+	notRetired := []action.Reason{}
+	if value.Status == StatusRetired {
+		notRetired = append(notRetired, action.Because("agent_retired", "Retired agents are immutable."))
+	}
+	addressReasons := append([]action.Reason(nil), notRetired...)
+	if value.ActivatedAt != nil {
+		addressReasons = append(addressReasons, action.Because("addresses_frozen", "Controller and payout addresses are frozen after first activation."))
+	}
+	if value.Status != StatusDraft && value.Status != StatusPaused {
+		addressReasons = append(addressReasons, action.Because("address_state_not_editable", "Addresses can only be changed while draft or paused."))
+	}
+	activateReasons := []action.Reason{}
+	if value.Status != StatusDraft && value.Status != StatusPaused {
+		activateReasons = append(activateReasons, action.Because("activation_transition_not_allowed", "Only draft or paused agents can become active."))
+	}
+	if value.CurrentPriceVersion == nil {
+		activateReasons = append(activateReasons, action.Because("price_required", "A published price version is required before activation."))
+	}
+	if value.Health != HealthHealthy {
+		activateReasons = append(activateReasons, action.Because("healthy_status_required", "A healthy status is required before activation."))
+	}
+	if value.HealthValidUntil == nil || !now.Before(*value.HealthValidUntil) {
+		activateReasons = append(activateReasons, action.Because("health_check_expired", "A current health check is required before activation."))
+	}
+	pauseReasons := []action.Reason{}
+	if value.Status != StatusDraft && value.Status != StatusActive {
+		pauseReasons = append(pauseReasons, action.Because("pause_transition_not_allowed", "Only draft or active agents can become paused."))
+	}
+	returnToDraftReasons := []action.Reason{}
+	if value.Status != StatusPaused {
+		returnToDraftReasons = append(returnToDraftReasons, action.Because("draft_transition_not_allowed", "Only paused agents can return to draft."))
+	}
+	retireReasons := []action.Reason{}
+	if value.Status == StatusRetired {
+		retireReasons = append(retireReasons, action.Because("agent_retired", "The agent is already retired."))
+	}
+	if value.ActiveCapacity > 0 {
+		retireReasons = append(retireReasons, action.Because("active_capacity_nonzero", "Release active capacity before retiring the agent."))
+	}
+	credentialReasons := append([]action.Reason(nil), notRetired...)
+	if !credential.CanRotate(session) {
+		credentialReasons = append(credentialReasons, action.Because("credential_role_forbidden", "Admin and arbitrator sessions cannot rotate Agent credentials."))
+	}
+	return View{
+		Agent: value,
+		AvailableActions: action.Response{
+			ResourceType: "agent", ResourceID: value.ID, AggregateVersion: value.AggregateVersion,
+			Actions: []action.Decision{
+				action.Decide("update_profile", notRetired...),
+				action.Decide("update_addresses", addressReasons...),
+				action.Decide("update_health", notRetired...),
+				action.Decide("update_capacity", notRetired...),
+				action.Decide("publish_price", notRetired...),
+				action.Decide("rotate_credential", credentialReasons...),
+				action.Decide("activate", activateReasons...),
+				action.Decide("pause", pauseReasons...),
+				action.Decide("retire", retireReasons...),
+				action.Decide("return_to_draft", returnToDraftReasons...),
+			},
+		},
+	}, nil
 }
 func (s *Service) ReserveCapacity(ctx context.Context, agentID, reservationID string, ttl time.Duration) (CapacityLease, error) {
 	if reservationID == "" || ttl <= 0 || ttl > time.Hour {

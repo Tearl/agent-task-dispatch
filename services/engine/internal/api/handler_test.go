@@ -187,6 +187,7 @@ func (staticSessionStore) RevokeSession(context.Context, string, time.Time) erro
 type apiAgentStore struct {
 	createCalls int
 	mutation    engineagent.Mutation
+	agent       engineagent.Agent
 }
 
 func (s *apiAgentStore) Create(_ context.Context, mutation engineagent.Mutation, input engineagent.CreateInput, id string) (engineagent.Agent, bool, error) {
@@ -209,8 +210,17 @@ func (*apiAgentStore) UpdateCapacity(context.Context, engineagent.Mutation, stri
 func (*apiAgentStore) PublishPrice(context.Context, engineagent.Mutation, string, engineagent.PriceInput) (engineagent.PriceVersion, bool, error) {
 	return engineagent.PriceVersion{}, false, nil
 }
-func (*apiAgentStore) Get(context.Context, string, string) (engineagent.Agent, error) {
-	return engineagent.Agent{}, engineagent.ErrNotFound
+func (s *apiAgentStore) Get(context.Context, string, string) (engineagent.Agent, error) {
+	if s.agent.ID == "" {
+		return engineagent.Agent{}, engineagent.ErrNotFound
+	}
+	return s.agent, nil
+}
+func (s *apiAgentStore) GetForActions(context.Context, string, string) (engineagent.Agent, time.Time, error) {
+	if s.agent.ID == "" {
+		return engineagent.Agent{}, time.Time{}, engineagent.ErrNotFound
+	}
+	return s.agent, time.Now().UTC(), nil
 }
 func (*apiAgentStore) ReserveCapacity(context.Context, string, string, time.Time) (engineagent.CapacityLease, error) {
 	return engineagent.CapacityLease{}, nil
@@ -220,6 +230,8 @@ func (*apiAgentStore) ReleaseCapacity(context.Context, string, int64) error { re
 type apiTaskStore struct {
 	createCalls int
 	mutation    enginetask.Mutation
+	task        enginetask.Task
+	databaseNow time.Time
 }
 
 func (s *apiTaskStore) Create(_ context.Context, mutation enginetask.Mutation, input enginetask.DraftInput, id string) (enginetask.Task, bool, error) {
@@ -235,6 +247,12 @@ func (*apiTaskStore) Publish(context.Context, enginetask.Mutation, string, engin
 }
 func (*apiTaskStore) Get(context.Context, string, string) (enginetask.Task, error) {
 	return enginetask.Task{}, enginetask.ErrNotFound
+}
+func (s *apiTaskStore) GetForActions(context.Context, string, string) (enginetask.Task, time.Time, error) {
+	if s.task.ID == "" {
+		return enginetask.Task{}, time.Time{}, enginetask.ErrNotFound
+	}
+	return s.task, s.databaseNow, nil
 }
 
 func TestTaskTransportRequiresSessionIdempotencyAndMapsDomainErrors(t *testing.T) {
@@ -286,6 +304,78 @@ func TestTaskTransportRequiresSessionIdempotencyAndMapsDomainErrors(t *testing.T
 	handler.ServeHTTP(notFound, getRequest)
 	if notFound.Code != http.StatusNotFound {
 		t.Fatalf("get not found status: %d", notFound.Code)
+	}
+}
+
+func TestAvailableActionsTransportReturnsEngineDomainDecisions(t *testing.T) {
+	now := time.Now().UTC()
+	agentStore := &apiAgentStore{agent: engineagent.Agent{ID: "agent-1", OwnerID: "owner", Status: engineagent.StatusDraft, Health: engineagent.HealthUnknown, AggregateVersion: 2}}
+	taskStore := &apiTaskStore{databaseNow: now, task: enginetask.Task{ID: "task-1", PublisherID: "owner", Status: enginetask.StatusDraft, AggregateVersion: 3, Deadline: now.Add(time.Hour)}}
+	agentService, _ := engineagent.NewService(agentStore)
+	taskService, _ := enginetask.NewService(taskStore)
+	authService, err := engineauth.NewService(staticSessionStore{session: engineauth.Session{UserID: "owner", Roles: []string{"publisher", "agent_provider"}, ExpiresAt: now.Add(time.Hour)}}, engineauth.EthereumVerifier{}, engineauth.Config{Domain: "app.example", ChainID: "1", Purpose: "login"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandlerWithTaskService(slog.New(slog.NewTextHandler(io.Discard, nil)), authService, agentService, nil, taskService)
+	for _, test := range []struct {
+		path          string
+		resourceType  string
+		blockedAction string
+	}{
+		{path: "/v1/agents/agent-1/available-actions", resourceType: "agent", blockedAction: "activate"},
+		{path: "/v1/tasks/task-1/available-actions", resourceType: "task"},
+	} {
+		request := httptest.NewRequest(http.MethodGet, test.path, nil)
+		request.Header.Set("authorization", "Bearer token")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", test.path, recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			ResourceType string `json:"resourceType"`
+			Actions      []struct {
+				Action  string `json:"action"`
+				Allowed bool   `json:"allowed"`
+				Reasons []struct {
+					Code string `json:"code"`
+				} `json:"reasons"`
+			} `json:"actions"`
+		}
+		if err = json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || response.ResourceType != test.resourceType || len(response.Actions) == 0 {
+			t.Fatalf("%s response: %#v err=%v", test.path, response, err)
+		}
+		if test.blockedAction != "" {
+			found := false
+			for _, decision := range response.Actions {
+				if decision.Action == test.blockedAction {
+					found = !decision.Allowed && len(decision.Reasons) > 0
+				}
+			}
+			if !found {
+				t.Fatalf("%s missing Engine blocking reason: %#v", test.path, response.Actions)
+			}
+		}
+	}
+	for _, test := range []struct {
+		path     string
+		resource string
+	}{
+		{path: "/v1/agents/agent-1/view", resource: "agent"},
+		{path: "/v1/tasks/task-1/view", resource: "task"},
+	} {
+		request := httptest.NewRequest(http.MethodGet, test.path, nil)
+		request.Header.Set("authorization", "Bearer token")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", test.path, recorder.Code, recorder.Body.String())
+		}
+		var view map[string]json.RawMessage
+		if err = json.Unmarshal(recorder.Body.Bytes(), &view); err != nil || len(view[test.resource]) == 0 || len(view["availableActions"]) == 0 {
+			t.Fatalf("%s invalid view: %#v err=%v", test.path, view, err)
+		}
 	}
 }
 

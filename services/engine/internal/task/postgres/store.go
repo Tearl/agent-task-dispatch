@@ -169,6 +169,15 @@ func (s *Store) Get(ctx context.Context, publisherID, id string) (enginetask.Tas
 	return result, err
 }
 
+func (s *Store) GetForActions(ctx context.Context, publisherID, id string) (enginetask.Task, time.Time, error) {
+	var databaseNow time.Time
+	result, err := scanTaskWithTime(s.db.QueryRowContext(ctx, taskSelectWithTime+` WHERE task_id=$1 AND publisher_id=$2`, id, publisherID), &databaseNow)
+	if errors.Is(err, sql.ErrNoRows) {
+		return result, databaseNow, enginetask.ErrNotFound
+	}
+	return result, databaseNow, err
+}
+
 type work func(*sql.Tx) (any, error)
 
 func (s *Store) execute(ctx context.Context, mutation enginetask.Mutation, scope string, fn work) (json.RawMessage, bool, error) {
@@ -275,16 +284,26 @@ func databaseTime(ctx context.Context, tx *sql.Tx) (time.Time, error) {
 	return now, nil
 }
 
-const taskSelect = `SELECT task_id,publisher_id,status,title,description,expert_type,language,overview_budget::text,formal_budget::text,external_cost_cap::text,deadline,inputs,allowed_tools,exclusions,delivery_format,draft_acceptance,aggregate_version,current_spec_version,current_acceptance_version,published_at,created_at,updated_at FROM tasks`
+const taskColumns = `task_id,publisher_id,status,title,description,expert_type,language,overview_budget::text,formal_budget::text,external_cost_cap::text,deadline,inputs,allowed_tools,exclusions,delivery_format,draft_acceptance,aggregate_version,current_spec_version,current_acceptance_version,published_at,created_at,updated_at`
+const taskSelect = `SELECT ` + taskColumns + ` FROM tasks`
+const taskSelectWithTime = `SELECT ` + taskColumns + `,clock_timestamp() FROM tasks`
 
 type scanner interface{ Scan(...any) error }
 
 func scanTask(row scanner) (value enginetask.Task, err error) {
+	return scanTaskWithTime(row, nil)
+}
+
+func scanTaskWithTime(row scanner, databaseNow *time.Time) (value enginetask.Task, err error) {
 	var inputs, tools, exclusions pq.StringArray
 	var criteria []byte
 	var specVersion, acceptanceVersion sql.NullInt64
 	var publishedAt sql.NullTime
-	err = row.Scan(&value.ID, &value.PublisherID, &value.Status, &value.Title, &value.Description, &value.ExpertType, &value.Language, &value.OverviewBudget, &value.FormalBudget, &value.ExternalCostCap, &value.Deadline, &inputs, &tools, &exclusions, &value.DeliveryFormat, &criteria, &value.AggregateVersion, &specVersion, &acceptanceVersion, &publishedAt, &value.CreatedAt, &value.UpdatedAt)
+	destinations := []any{&value.ID, &value.PublisherID, &value.Status, &value.Title, &value.Description, &value.ExpertType, &value.Language, &value.OverviewBudget, &value.FormalBudget, &value.ExternalCostCap, &value.Deadline, &inputs, &tools, &exclusions, &value.DeliveryFormat, &criteria, &value.AggregateVersion, &specVersion, &acceptanceVersion, &publishedAt, &value.CreatedAt, &value.UpdatedAt}
+	if databaseNow != nil {
+		destinations = append(destinations, databaseNow)
+	}
+	err = row.Scan(destinations...)
 	if err != nil {
 		return value, err
 	}

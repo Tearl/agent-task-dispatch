@@ -15,6 +15,9 @@ type testStore struct {
 	lastMutation    Mutation
 	healthMutations []Mutation
 	healthInputs    []HealthInput
+	getAgent        Agent
+	getErr          error
+	databaseNow     time.Time
 }
 
 func (s *testStore) Create(_ context.Context, mutation Mutation, _ CreateInput, id string) (Agent, bool, error) {
@@ -41,7 +44,10 @@ func (s *testStore) PublishPrice(_ context.Context, mutation Mutation, _ string,
 	s.lastMutation = mutation
 	return PriceVersion{}, false, nil
 }
-func (*testStore) Get(context.Context, string, string) (Agent, error) { return Agent{}, nil }
+func (s *testStore) Get(context.Context, string, string) (Agent, error) { return s.getAgent, s.getErr }
+func (s *testStore) GetForActions(context.Context, string, string) (Agent, time.Time, error) {
+	return s.getAgent, s.databaseNow, s.getErr
+}
 func (*testStore) ReserveCapacity(context.Context, string, string, time.Time) (CapacityLease, error) {
 	return CapacityLease{}, nil
 }
@@ -228,6 +234,66 @@ func TestHealthRejectsUntrustedFutureAndStaleTimestamps(t *testing.T) {
 	}
 	if len(store.healthInputs) != 0 {
 		t.Fatalf("invalid health timestamp reached the store: %#v", store.healthInputs)
+	}
+}
+
+func TestAgentAvailableActionsIncludeAuthoritativeBlockingReasons(t *testing.T) {
+	now := time.Date(2026, 8, 21, 4, 0, 0, 0, time.UTC)
+	store := &testStore{databaseNow: now, getAgent: Agent{ID: "agent-1", OwnerID: "provider", Status: StatusDraft, Health: HealthUnknown, AggregateVersion: 7}}
+	service, _ := NewService(store)
+	service.now = func() time.Time { return now }
+	provider := auth.Session{UserID: "provider", Roles: []string{"agent_provider"}}
+	response, err := service.AvailableActions(context.Background(), provider, "agent-1")
+	if err != nil || response.ResourceType != "agent" || response.AggregateVersion != 7 || len(response.Actions) != 10 {
+		t.Fatalf("available actions: %#v err=%v", response, err)
+	}
+	if response.Actions[9].Allowed || len(response.Actions[9].Reasons) != 1 || response.Actions[9].Reasons[0].Code != "draft_transition_not_allowed" {
+		t.Fatalf("draft return decision: %#v", response.Actions[9])
+	}
+	activate := response.Actions[6]
+	if activate.Allowed || len(activate.Reasons) != 3 || activate.Reasons[0].Code != "price_required" || activate.Reasons[1].Code != "healthy_status_required" || activate.Reasons[2].Code != "health_check_expired" {
+		t.Fatalf("activation reasons: %#v", activate)
+	}
+	priceVersion := 1
+	healthValidUntil := now.Add(time.Minute)
+	store.getAgent.Status = StatusPaused
+	store.getAgent.Health = HealthHealthy
+	store.getAgent.HealthValidUntil = &healthValidUntil
+	store.getAgent.CurrentPriceVersion = &priceVersion
+	service.now = func() time.Time { return now.Add(24 * time.Hour) }
+	response, err = service.AvailableActions(context.Background(), provider, "agent-1")
+	if err != nil || !response.Actions[6].Allowed || !response.Actions[9].Allowed {
+		t.Fatalf("database-current health should allow activation: %#v err=%v", response.Actions[6], err)
+	}
+	store.getAgent.Status = StatusPaused
+	store.getAgent.ActivatedAt = &now
+	response, err = service.AvailableActions(context.Background(), provider, "agent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addresses := response.Actions[1]
+	if addresses.Allowed || len(addresses.Reasons) != 1 || addresses.Reasons[0].Code != "addresses_frozen" {
+		t.Fatalf("address reasons: %#v", addresses)
+	}
+	dualRole := auth.Session{UserID: "provider", Roles: []string{"agent_provider", "admin"}}
+	response, err = service.AvailableActions(context.Background(), dualRole, "agent-1")
+	if err != nil || response.Actions[5].Allowed || len(response.Actions[5].Reasons) != 1 || response.Actions[5].Reasons[0].Code != "credential_role_forbidden" {
+		t.Fatalf("credential role decision: %#v err=%v", response.Actions[5], err)
+	}
+	store.getAgent.Status = StatusRetired
+	store.getAgent.ActiveCapacity = 1
+	response, err = service.AvailableActions(context.Background(), provider, "agent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Actions[0].Allowed || response.Actions[8].Allowed || len(response.Actions[8].Reasons) != 2 || response.Actions[9].Allowed {
+		t.Fatalf("retired decisions: %#v", response.Actions)
+	}
+	store.getAgent.Status = StatusActive
+	store.getAgent.ActiveCapacity = 1
+	view, err := service.View(context.Background(), provider, "agent-1")
+	if err != nil || view.Agent.ActiveCapacity != 1 || view.AvailableActions.Actions[8].Allowed || view.AvailableActions.Actions[8].Reasons[0].Code != "active_capacity_nonzero" || view.AvailableActions.Actions[9].Allowed {
+		t.Fatalf("single-snapshot capacity view: %#v err=%v", view, err)
 	}
 }
 

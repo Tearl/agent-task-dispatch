@@ -69,6 +69,8 @@ func NewHandlerWithTaskService(logger *slog.Logger, authService *auth.Service, a
 		mux.HandleFunc("POST /v1/agents/{id}/health", h.updateAgentHealth)
 		mux.HandleFunc("POST /v1/agents/{id}/capacity", h.updateAgentCapacity)
 		mux.HandleFunc("POST /v1/agents/{id}/prices", h.publishAgentPrice)
+		mux.HandleFunc("GET /v1/agents/{id}/available-actions", h.availableAgentActions)
+		mux.HandleFunc("GET /v1/agents/{id}/view", h.agentView)
 	}
 	if credentialService != nil {
 		mux.HandleFunc("POST /v1/agents/{id}/credentials", h.rotateAgentCredential)
@@ -78,9 +80,63 @@ func NewHandlerWithTaskService(logger *slog.Logger, authService *auth.Service, a
 		mux.HandleFunc("GET /v1/tasks/{id}", h.getTask)
 		mux.HandleFunc("PUT /v1/tasks/{id}/draft", h.updateTaskDraft)
 		mux.HandleFunc("POST /v1/tasks/{id}/publish", h.publishTask)
+		mux.HandleFunc("GET /v1/tasks/{id}/available-actions", h.availableTaskActions)
+		mux.HandleFunc("GET /v1/tasks/{id}/view", h.taskView)
 	}
 
 	return requestLogging(logger, mux)
+}
+
+func (h *handler) availableAgentActions(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.agents.AvailableActions(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeAgentError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) availableTaskActions(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.tasks.AvailableActions(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeTaskError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) agentView(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.agents.View(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeAgentError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) taskView(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.tasks.View(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeTaskError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
 }
 
 func (h *handler) createTask(writer http.ResponseWriter, request *http.Request) {

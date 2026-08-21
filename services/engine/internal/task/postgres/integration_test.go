@@ -85,10 +85,21 @@ func TestPostgresTaskPublicationOwnershipHashesConcurrencyAndRedelivery(t *testi
 	if _, _, err = service.Publish(ctx, owner, "expired-publish", expiredTaskID, enginetask.PublishInput{ExpectedVersion: 1}); !errors.Is(err, enginetask.ErrInvalidInput) {
 		t.Fatalf("expired publish: %v", err)
 	}
+	expiredActions, err := service.AvailableActions(ctx, owner, expiredTaskID)
+	if err != nil || len(expiredActions.Actions) != 2 || !expiredActions.Actions[0].Allowed || expiredActions.Actions[1].Allowed || len(expiredActions.Actions[1].Reasons) != 1 || expiredActions.Actions[1].Reasons[0].Code != "deadline_expired" {
+		t.Fatalf("expired available actions: %#v err=%v", expiredActions, err)
+	}
 	assertCount(t, db, `SELECT count(*) FROM task_spec_versions WHERE task_id=$1`, expiredTaskID, 0)
 	created, replay, err := service.Create(ctx, owner, "create", draft)
 	if err != nil || replay || created.Status != enginetask.StatusDraft || created.AggregateVersion != 1 {
 		t.Fatalf("create: value=%#v replay=%v err=%v", created, replay, err)
+	}
+	draftActions, err := service.AvailableActions(ctx, owner, created.ID)
+	if err != nil || len(draftActions.Actions) != 2 || !draftActions.Actions[0].Allowed || !draftActions.Actions[1].Allowed {
+		t.Fatalf("draft available actions: %#v err=%v", draftActions, err)
+	}
+	if _, err = service.AvailableActions(ctx, other, created.ID); !errors.Is(err, enginetask.ErrNotFound) {
+		t.Fatalf("other publisher available actions: %v", err)
 	}
 	createdReplay, replay, err := service.Create(ctx, owner, "create", draft)
 	if err != nil || !replay || createdReplay.ID != created.ID {
@@ -134,6 +145,14 @@ func TestPostgresTaskPublicationOwnershipHashesConcurrencyAndRedelivery(t *testi
 	publication := publications[0]
 	if publication.Task.Status != enginetask.StatusPendingEscrow || publication.Task.AggregateVersion != 3 || publication.Spec.Version != 1 || publication.Acceptance.Version != 1 || publication.Acceptance.TotalWeight != 100 || publication.Spec.ContentHash == publication.Acceptance.ContentHash {
 		t.Fatalf("invalid publication: %#v", publication)
+	}
+	publishedActions, err := service.AvailableActions(ctx, owner, created.ID)
+	if err != nil || len(publishedActions.Actions) != 2 || publishedActions.Actions[0].Allowed || len(publishedActions.Actions[0].Reasons) != 1 || publishedActions.Actions[0].Reasons[0].Code != "task_not_draft" {
+		t.Fatalf("published available actions: %#v err=%v", publishedActions, err)
+	}
+	publishedView, err := service.View(ctx, owner, created.ID)
+	if err != nil || publishedView.Task.AggregateVersion != publishedView.AvailableActions.AggregateVersion || publishedView.Task.Status != enginetask.StatusPendingEscrow {
+		t.Fatalf("single-snapshot task view: %#v err=%v", publishedView, err)
 	}
 	if _, _, err = service.UpdateDraft(ctx, owner, "after-publish", created.ID, enginetask.UpdateDraftInput{DraftInput: draft, ExpectedVersion: 3}); !errors.Is(err, enginetask.ErrInvalidState) {
 		t.Fatalf("published draft update: %v", err)

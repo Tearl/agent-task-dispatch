@@ -48,7 +48,7 @@
   - Risk: high
   - Verification: 覆盖状态迁移、所有权、哈希、乐观并发、幂等与重投
 
-- [ ] [T-106] [pending] 提供 BFF 聚合与 available-actions 契约
+- [x] [T-106] [done] 提供 BFF 聚合与 available-actions 契约
   - Repository: .
   - Covers: F-106, AC-105
   - Depends on: T-103, T-105
