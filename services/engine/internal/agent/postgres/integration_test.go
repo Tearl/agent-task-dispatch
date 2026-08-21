@@ -347,6 +347,20 @@ func TestPostgresAgentOwnershipLifecyclePricesIdempotencyAndCapacity(t *testing.
 	if _, _, err = service.UpdateHealth(ctx, ownerA, "retired-health", created.ID, agent.HealthInput{Health: agent.HealthHealthy, ExpectedVersion: 9, CheckedAt: time.Now().UTC()}); !errors.Is(err, agent.ErrInvalidState) {
 		t.Fatalf("retired agent changed: %v", err)
 	}
+	endpointAgent, _, err := service.Create(ctx, ownerA, "create-endpoint-agent", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpointAgent, _, err = service.UpdateHealth(ctx, ownerA, "endpoint-agent-health", endpointAgent.ID, agent.HealthInput{Health: agent.HealthHealthy, ExpectedVersion: 1})
+	if err != nil || endpointAgent.Health != agent.HealthHealthy {
+		t.Fatalf("endpoint Agent health setup: agent=%#v err=%v", endpointAgent, err)
+	}
+	endpointProfile := profileFrom(endpointAgent, 2)
+	endpointProfile.EndpointURL = "https://replacement-agent.example/health"
+	endpointAgent, _, err = service.UpdateProfile(ctx, ownerA, "change-endpoint", endpointAgent.ID, endpointProfile)
+	if err != nil || endpointAgent.Health != agent.HealthUnknown || endpointAgent.HealthCheckedAt != nil || endpointAgent.HealthValidUntil != nil {
+		t.Fatalf("endpoint change did not invalidate health: agent=%#v err=%v", endpointAgent, err)
+	}
 	assertCount(t, db, `SELECT count(*) FROM domain_events WHERE aggregate_id=$1`, created.ID, 9)
 	assertCount(t, db, `SELECT count(*) FROM audit_events WHERE resource_id=$1`, created.ID, 9)
 	assertCount(t, db, `SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name IN ('agents','agent_price_versions','agent_capacity_leases') AND (column_name LIKE '%bond%' OR column_name LIKE '%deposit%')`, nil, 0)
@@ -361,6 +375,7 @@ func integrationCreateInput() agent.CreateInput {
 		Languages:                []string{"zh-CN", "en"},
 		EstimatedDurationSeconds: 300,
 		AuthorBio:                "Provider",
+		EndpointURL:              "https://agent.example/health",
 		ControllerAddress:        "0x1111111111111111111111111111111111111111",
 		PayoutAddress:            "0x2222222222222222222222222222222222222222",
 		MaxConcurrency:           2,
@@ -376,6 +391,7 @@ func profileFrom(value agent.Agent, expectedVersion int64) agent.ProfileInput {
 		Languages:                value.Languages,
 		EstimatedDurationSeconds: value.EstimatedDurationSeconds,
 		AuthorBio:                value.AuthorBio,
+		EndpointURL:              value.EndpointURL,
 		ControllerAddress:        value.ControllerAddress,
 		PayoutAddress:            value.PayoutAddress,
 		MaxConcurrency:           value.MaxConcurrency,

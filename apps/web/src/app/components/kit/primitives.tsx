@@ -128,17 +128,23 @@ export function CtaButton({
   className = "",
   full = false,
   icon: Icon,
+  disabled = false,
+  busy = false,
 }: {
   children: ReactNode;
   onClick?: () => void;
   className?: string;
   full?: boolean;
   icon?: LucideIcon;
+  disabled?: boolean;
+  busy?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      aria-busy={busy}
       className={`ap-cta inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-[14px] ${full ? "w-full" : ""} ${className}`}
     >
       {Icon ? <Icon size={16} /> : null}
@@ -153,17 +159,20 @@ export function GhostButton({
   className = "",
   icon: Icon,
   active = false,
+  disabled = false,
 }: {
   children: ReactNode;
   onClick?: () => void;
   className?: string;
   icon?: LucideIcon;
   active?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={`inline-flex items-center justify-center gap-2 rounded-xl border px-3.5 py-2.5 text-[14px] transition-colors ${className}`}
       style={{
         borderColor: active ? "var(--ap-border-strong)" : "var(--ap-border)",

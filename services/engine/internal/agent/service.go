@@ -18,13 +18,14 @@ import (
 )
 
 var (
-	ErrForbidden           = errors.New("agent operation forbidden")
-	ErrNotFound            = errors.New("agent not found")
-	ErrStaleVersion        = errors.New("stale agent aggregate version")
-	ErrInvalidState        = errors.New("invalid agent state transition")
-	ErrInvalidInput        = errors.New("invalid agent input")
-	ErrInvalidPrice        = errors.New("invalid agent price")
-	ErrCapacityUnavailable = errors.New("agent capacity unavailable")
+	ErrForbidden              = errors.New("agent operation forbidden")
+	ErrNotFound               = errors.New("agent not found")
+	ErrStaleVersion           = errors.New("stale agent aggregate version")
+	ErrInvalidState           = errors.New("invalid agent state transition")
+	ErrInvalidInput           = errors.New("invalid agent input")
+	ErrInvalidPrice           = errors.New("invalid agent price")
+	ErrCapacityUnavailable    = errors.New("agent capacity unavailable")
+	ErrHealthCheckUnavailable = errors.New("agent health checker unavailable")
 )
 
 const (
@@ -52,6 +53,7 @@ type Agent struct {
 	Languages                []string   `json:"languages"`
 	EstimatedDurationSeconds int64      `json:"estimatedDurationSeconds"`
 	AuthorBio                string     `json:"authorBio"`
+	EndpointURL              string     `json:"endpointUrl"`
 	ControllerAddress        string     `json:"controllerAddress"`
 	PayoutAddress            string     `json:"payoutAddress"`
 	Status                   string     `json:"status"`
@@ -100,6 +102,7 @@ type CreateInput struct {
 	Languages                []string `json:"languages"`
 	EstimatedDurationSeconds int64    `json:"estimatedDurationSeconds"`
 	AuthorBio                string   `json:"authorBio"`
+	EndpointURL              string   `json:"endpointUrl"`
 	ControllerAddress        string   `json:"controllerAddress"`
 	PayoutAddress            string   `json:"payoutAddress"`
 	MaxConcurrency           int      `json:"maxConcurrency"`
@@ -116,6 +119,9 @@ type HealthInput struct {
 	Health          string    `json:"health"`
 	ExpectedVersion int64     `json:"expectedVersion"`
 	CheckedAt       time.Time `json:"checkedAt"`
+}
+type HealthCheckInput struct {
+	ExpectedVersion int64 `json:"expectedVersion"`
 }
 type CapacityInput struct {
 	MaxConcurrency  int   `json:"maxConcurrency"`
@@ -149,16 +155,25 @@ type Store interface {
 	ReleaseCapacity(context.Context, string, int64) error
 }
 
+type HealthChecker interface {
+	Check(context.Context, string) error
+}
+
 type Service struct {
-	store Store
-	now   func() time.Time
+	store         Store
+	healthChecker HealthChecker
+	now           func() time.Time
 }
 
 func NewService(store Store) (*Service, error) {
+	return NewServiceWithHealthChecker(store, nil)
+}
+
+func NewServiceWithHealthChecker(store Store, healthChecker HealthChecker) (*Service, error) {
 	if store == nil {
 		return nil, errors.New("agent store is required")
 	}
-	return &Service{store: store, now: time.Now}, nil
+	return &Service{store: store, healthChecker: healthChecker, now: time.Now}, nil
 }
 
 func (s *Service) Create(ctx context.Context, session auth.Session, key string, input CreateInput) (Agent, bool, error) {
@@ -225,6 +240,33 @@ func (s *Service) UpdateHealth(ctx context.Context, session auth.Session, key, i
 		return Agent{}, false, ErrInvalidInput
 	}
 	return s.store.UpdateHealth(ctx, m, id, input)
+}
+
+// CheckHealth records only an Engine-observed protocol result. The caller can
+// request a check, but cannot supply either the result or its timestamp.
+func (s *Service) CheckHealth(ctx context.Context, session auth.Session, key, id string, input HealthCheckInput) (Agent, bool, error) {
+	if !hasRole(session, "agent_provider") {
+		return Agent{}, false, ErrForbidden
+	}
+	if input.ExpectedVersion < 1 {
+		return Agent{}, false, ErrInvalidInput
+	}
+	if s.healthChecker == nil {
+		return Agent{}, false, ErrHealthCheckUnavailable
+	}
+	m, err := s.mutation(session, key, input)
+	if err != nil {
+		return Agent{}, false, err
+	}
+	value, err := s.store.Get(ctx, session.UserID, id)
+	if err != nil {
+		return Agent{}, false, err
+	}
+	health := HealthHealthy
+	if err = s.healthChecker.Check(ctx, value.EndpointURL); err != nil {
+		health = HealthUnhealthy
+	}
+	return s.store.UpdateHealth(ctx, m, id, HealthInput{Health: health, ExpectedVersion: input.ExpectedVersion, CheckedAt: m.Now})
 }
 func (s *Service) UpdateCapacity(ctx context.Context, session auth.Session, key, id string, input CapacityInput) (Agent, bool, error) {
 	if !hasRole(session, "agent_provider") {
@@ -363,7 +405,7 @@ func (s *Service) mutation(session auth.Session, key string, input any) (Mutatio
 	return Mutation{ActorID: session.UserID, IdempotencyKey: key, RequestHash: hex.EncodeToString(sum[:]), EventID: eventID, Now: s.now().UTC()}, nil
 }
 func validateCreate(i CreateInput) error {
-	if strings.TrimSpace(i.Name) == "" || len(i.Name) > 200 || strings.TrimSpace(i.Category) == "" || len(i.Category) > 100 || strings.TrimSpace(i.Capabilities) == "" || len(i.Capabilities) > 5000 || i.EstimatedDurationSeconds < 1 || i.MaxConcurrency < 1 || i.MaxConcurrency > 10000 || !auth.IsWalletAddress(strings.ToLower(i.ControllerAddress)) || !auth.IsWalletAddress(strings.ToLower(i.PayoutAddress)) || len(i.Tags) > 50 || len(i.Languages) == 0 || len(i.Languages) > 20 {
+	if strings.TrimSpace(i.Name) == "" || len(i.Name) > 200 || strings.TrimSpace(i.Category) == "" || len(i.Category) > 100 || strings.TrimSpace(i.Capabilities) == "" || len(i.Capabilities) > 5000 || !ValidEndpointURL(i.EndpointURL) || i.EstimatedDurationSeconds < 1 || i.MaxConcurrency < 1 || i.MaxConcurrency > 10000 || !auth.IsWalletAddress(strings.ToLower(i.ControllerAddress)) || !auth.IsWalletAddress(strings.ToLower(i.PayoutAddress)) || len(i.Tags) > 50 || len(i.Languages) == 0 || len(i.Languages) > 20 {
 		return ErrInvalidInput
 	}
 	return nil

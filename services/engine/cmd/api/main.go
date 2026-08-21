@@ -73,7 +73,8 @@ func main() {
 		logger.Error("agent store failed", "error", err)
 		os.Exit(1)
 	}
-	agentService, err := agent.NewService(agentStore)
+	allowPrivateAgentHealth := os.Getenv("AGENT_HEALTH_ALLOW_PRIVATE_NETWORKS") == "true"
+	agentService, err := agent.NewServiceWithHealthChecker(agentStore, agent.NewProtocolHealthChecker(allowPrivateAgentHealth))
 	if err != nil {
 		logger.Error("agent service failed", "error", err)
 		os.Exit(1)

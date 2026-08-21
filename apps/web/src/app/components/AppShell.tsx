@@ -13,8 +13,9 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router";
+import { toast } from "sonner";
 
-import { CLIENT_ROLES, ROLES, SHARED_NAV, type RoleId } from "../lib/roles";
+import { ROLES, SHARED_NAV, type RoleId } from "../lib/roles";
 import { shortAddr, useSession } from "../lib/session";
 
 function Brand({ accent }: { accent: string }) {
@@ -48,7 +49,7 @@ function RoleBadge({ roleId }: { roleId: RoleId }) {
 }
 
 function TopRoleSwitcher({ roleId }: { roleId: RoleId }) {
-  const { switchRole } = useSession();
+  const { switchRole, authorizedRoles } = useSession();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -90,7 +91,7 @@ function TopRoleSwitcher({ roleId }: { roleId: RoleId }) {
           className="ap-glass-strong absolute right-0 top-12 z-30 w-56 rounded-xl p-1.5 shadow-2xl"
         >
           <div className="px-2.5 py-1.5 text-[11px] text-[var(--ap-muted)]">切换角色工作台</div>
-          {CLIENT_ROLES.map((nextRole) => {
+          {authorizedRoles.map((nextRole) => {
             const nextConfig = ROLES[nextRole];
             const active = roleId === nextRole;
 
@@ -232,13 +233,17 @@ function TopBar({
   const navigate = useNavigate();
   const { address, disconnect, adminLogout } = useSession();
 
-  const logout = () => {
+  const logout = async () => {
     if (variant === "admin") {
       adminLogout();
       navigate("/admin/login");
     } else {
-      disconnect();
-      navigate("/");
+      try {
+        await disconnect();
+        navigate("/");
+      } catch {
+        toast.error("会话撤销失败，已保持当前登录状态，请重试。");
+      }
     }
   };
 

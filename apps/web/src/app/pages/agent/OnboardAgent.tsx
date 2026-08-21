@@ -14,7 +14,7 @@ import {
   Webhook,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
@@ -28,13 +28,15 @@ import {
   Pill,
   SectionTitle,
 } from "../../components/kit/primitives";
+import { onboardAgent, validateAgentOnboardingInput, type AgentOnboardingInput } from "../../lib/platform-api";
+import { useSession } from "../../lib/session";
 
 const CATEGORIES = ["数据分析", "翻译", "图像生成", "代码开发", "市场研究", "智能审计"];
 const AUTH_TYPES = ["API Key", "Bearer Token", "OAuth 2.0"];
 
 const STEPS = [
   { id: 0, label: "基本信息", icon: Cpu },
-  { id: 1, label: "调用配置", icon: Boxes },
+  { id: 1, label: "运行容量", icon: Boxes },
   { id: 2, label: "凭证安全", icon: KeyRound },
   { id: 3, label: "协议校验与健康检查", icon: ShieldCheck },
 ];
@@ -43,22 +45,28 @@ type CheckState = "idle" | "running" | "pass" | "fail";
 
 export default function OnboardAgent() {
   const navigate = useNavigate();
+  const { address } = useSession();
   const [step, setStep] = useState(0);
   const [done, setDone] = useState(false);
   const [name, setName] = useState("");
   const [category, setCategory] = useState("数据分析");
   const [tagline, setTagline] = useState("");
-  const [endpoint, setEndpoint] = useState("https://");
-  const [webhook, setWebhook] = useState("");
+  const [endpointUrl, setEndpointUrl] = useState("");
   const [capabilities, setCapabilities] = useState<string[]>(["结构化输出"]);
   const [capabilityInput, setCapabilityInput] = useState("");
   const [auth, setAuth] = useState("API Key");
   const [secret, setSecret] = useState("");
+  const [maxConcurrency, setMaxConcurrency] = useState("20");
+  const [overviewPrice, setOverviewPrice] = useState("100");
+  const [formalPrice, setFormalPrice] = useState("500");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const operationId = useRef<string | undefined>(undefined);
   const [checks, setChecks] = useState<{ label: string; state: CheckState; note: string }[]>([
-    { label: "OpenAPI 3.1 协议校验", state: "idle", note: "校验接口 Schema 与必填字段" },
-    { label: "连通性与鉴权测试", state: "idle", note: "向端点发送带签名的探针请求" },
-    { label: "健康检查（探活）", state: "idle", note: "连续 3 次心跳，统计 P95 延迟" },
-    { label: "沙箱试运行", state: "idle", note: "提交一个样例任务验证输入输出" },
+    { label: "创建 Agent 聚合", state: "idle", note: "由 Engine 校验所有者与基本资料" },
+    { label: "加密保存调用凭证", state: "idle", note: "明文仅用于本次受保护写入" },
+    { label: "发布价格与健康状态", state: "idle", note: "价格约束与健康新鲜度由 Engine 校验" },
+    { label: "上线资格与状态迁移", state: "idle", note: "仅执行 Engine 返回的 allowed 操作" },
   ]);
 
   const addCapability = () => {
@@ -69,21 +77,43 @@ export default function OnboardAgent() {
 
   const canNext =
     (step === 0 && Boolean(name.trim()) && Boolean(tagline.trim())) ||
-    (step === 1 && endpoint.length > 8) ||
-    (step === 2 && secret.trim().length > 0) ||
+    (step === 1 && endpointUrl.startsWith("https://") && Number.isInteger(Number(maxConcurrency)) && Number(maxConcurrency) > 0) ||
+    (step === 2 && secret.trim().length > 0 && /^\d+$/.test(overviewPrice) && /^\d+$/.test(formalPrice)) ||
     step === 3;
 
   const runChecks = async () => {
-    for (let index = 0; index < checks.length; index += 1) {
-      setChecks((items) =>
-        items.map((check, checkIndex) => (checkIndex === index ? { ...check, state: "running" } : check)),
-      );
-      await new Promise((resolve) => setTimeout(resolve, 700));
-      setChecks((items) =>
-        items.map((check, checkIndex) => (checkIndex === index ? { ...check, state: "pass" } : check)),
-      );
+    if (submitting || allPassed) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    setChecks((items) => items.map((check) => ({ ...check, state: "running" })));
+    try {
+      const input: AgentOnboardingInput = {
+        operationId: operationId.current ?? crypto.randomUUID(),
+        name: name.trim(), category, tagline: tagline.trim(), endpointUrl: endpointUrl.trim(), capabilities,
+        controllerAddress: address, maxConcurrency: Number(maxConcurrency),
+        credentialType: auth === "Bearer Token" ? "bearer_token" : auth === "OAuth 2.0" ? "oauth_client_secret" : "api_key",
+        secret, overviewPrice, formalPrice,
+      };
+      validateAgentOnboardingInput(input);
+      operationId.current = input.operationId;
+      await onboardAgent(input);
+      setSecret("");
+      setChecks((items) => items.map((check) => ({ ...check, state: "pass" })));
+      toast.success("Engine 已确认全部上线条件，Agent 已激活");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Agent 接入失败，请重试。";
+      setSubmitError(message);
+      setChecks((items) => items.map((check) => ({ ...check, state: "fail" })));
+    } finally {
+      setSubmitting(false);
     }
-    toast.success("全部校验通过，Agent 已可上线接单");
+  };
+
+  const resetAttempt = () => {
+    operationId.current = undefined;
+    setSubmitError(null);
+    setChecks((items) => items.map((check) => ({ ...check, state: "idle" })));
+    setStep(0);
   };
 
   const allPassed = checks.every((check) => check.state === "pass");
@@ -102,16 +132,12 @@ export default function OnboardAgent() {
           </div>
           <h2 className="mt-5 text-[22px] text-white">接入成功</h2>
           <p className="mt-2 text-[14px] text-[var(--ap-muted)]">
-            {name || "新 Agent"} 已通过协议校验与健康检查，现已上线，可被平台智能匹配。
+            {name || "新 Agent"} 已通过 Engine 上线资格校验，现已激活。
           </p>
           <div className="mt-6 flex flex-col items-center gap-2 text-[13px] text-[var(--ap-text-2)]">
             <span className="inline-flex items-center gap-2">
               <Cpu size={15} className="text-[var(--ap-violet)]" />
               {name || "新 Agent"} · {category}
-            </span>
-            <span className="inline-flex items-center gap-2">
-              <Boxes size={15} className="text-[var(--ap-cyan)]" />
-              {endpoint}
             </span>
             <Pill tone="green" dot>
               在线 · 100%
@@ -134,7 +160,7 @@ export default function OnboardAgent() {
     <Page>
       <PageHeader
         title="接入新 Agent"
-        subtitle="填写基本信息、调用配置与凭证，通过协议校验和健康检查后即可上线"
+        subtitle="填写基本信息、运行容量、价格与凭证，并由 Engine 确认上线资格"
         actions={
           <GhostButton icon={ArrowLeft} onClick={() => navigate("/agent/integration")}>
             取消
@@ -272,37 +298,18 @@ export default function OnboardAgent() {
 
           {step === 1 ? (
             <div className="space-y-5">
-              <SectionTitle>调用配置</SectionTitle>
-              <div>
-                <label htmlFor="agent-endpoint" className="text-[13px] text-[var(--ap-muted)]">
-                  调用端点 (HTTPS)
-                </label>
-                <input
-                  id="agent-endpoint"
-                  value={endpoint}
-                  onChange={(event) => setEndpoint(event.target.value)}
-                  placeholder="https://api.your-agent.ai/v1/invoke"
-                  className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 font-mono text-[13px] text-white outline-none focus:border-[var(--ap-border-strong)]"
-                />
-              </div>
-              <div>
-                <label htmlFor="agent-webhook" className="text-[13px] text-[var(--ap-muted)]">
-                  Webhook 回调地址（可选）
-                </label>
-                <input
-                  id="agent-webhook"
-                  value={webhook}
-                  onChange={(event) => setWebhook(event.target.value)}
-                  placeholder="https://your.app/webhook"
-                  className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 font-mono text-[13px] text-white outline-none focus:border-[var(--ap-border-strong)]"
-                />
-              </div>
+              <SectionTitle>运行容量</SectionTitle>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="min-w-0">
-                  <div className="text-[13px] font-medium text-[var(--ap-muted)]">协议规范</div>
-                  <div className="mt-2 rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-[var(--ap-text-2)]">
-                    OpenAPI 3.1
-                  </div>
+                  <label htmlFor="agent-endpoint" className="text-[13px] text-[var(--ap-muted)]">协议健康检查 URL</label>
+                  <input
+                    id="agent-endpoint"
+                    type="url"
+                    value={endpointUrl}
+                    onChange={(event) => setEndpointUrl(event.target.value)}
+                    placeholder="https://agent.example/health"
+                    className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]"
+                  />
                 </div>
                 <div className="min-w-0">
                   <label htmlFor="agent-concurrency" className="text-[13px] text-[var(--ap-muted)]">
@@ -310,14 +317,16 @@ export default function OnboardAgent() {
                   </label>
                   <input
                     id="agent-concurrency"
-                    defaultValue="20"
+                    inputMode="numeric"
+                    value={maxConcurrency}
+                    onChange={(event) => setMaxConcurrency(event.target.value.replace(/\D/g, ""))}
                     className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]"
                   />
                 </div>
               </div>
               <InfoNote tone="cyan">
                 <span className="inline-flex items-center gap-1.5">
-                  <Info size={14} /> 端点须支持 HTTPS 与签名验证，平台将以脱敏方式记录调用日志。
+                  <Info size={14} /> Engine 将连接该 HTTPS 地址并校验协议版本；浏览器不能自行声明健康。
                 </span>
               </InfoNote>
             </div>
@@ -359,6 +368,16 @@ export default function OnboardAgent() {
                   className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 font-mono text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]"
                 />
               </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="agent-overview-price" className="text-[13px] text-[var(--ap-muted)]">概览价格 (USDC)</label>
+                  <input id="agent-overview-price" inputMode="numeric" value={overviewPrice} onChange={(event) => setOverviewPrice(event.target.value.replace(/\D/g, ""))} className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]" />
+                </div>
+                <div>
+                  <label htmlFor="agent-formal-price" className="text-[13px] text-[var(--ap-muted)]">正式套餐总价 (USDC)</label>
+                  <input id="agent-formal-price" inputMode="numeric" value={formalPrice} onChange={(event) => setFormalPrice(event.target.value.replace(/\D/g, ""))} className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]" />
+                </div>
+              </div>
               <InfoNote tone="green">
                 <span className="inline-flex items-center gap-1.5">
                   <ShieldCheck size={14} /> 凭证以加密形式存储，平台与管理员均无法查看明文，仅在调用时脱敏使用。
@@ -371,8 +390,8 @@ export default function OnboardAgent() {
             <div className="space-y-5">
               <SectionTitle
                 right={
-                  <GhostButton icon={ShieldCheck} onClick={runChecks} active={allPassed}>
-                    {checks.some((check) => check.state === "running") ? "校验中…" : allPassed ? "重新校验" : "开始校验"}
+                  <GhostButton icon={ShieldCheck} onClick={runChecks} active={allPassed} disabled={submitting || allPassed}>
+                    {submitting ? "提交与校验中…" : allPassed ? "Engine 已确认" : "开始接入"}
                   </GhostButton>
                 }
               >
@@ -416,6 +435,7 @@ export default function OnboardAgent() {
                   </div>
                 ))}
               </div>
+              {submitError ? <div className="space-y-3"><InfoNote tone="red"><span role="alert">{submitError}</span></InfoNote>{operationId.current ? <GhostButton onClick={resetAttempt}>放弃本次操作并重新开始</GhostButton> : null}</div> : null}
             </div>
           ) : null}
 
@@ -423,7 +443,8 @@ export default function OnboardAgent() {
             <GhostButton
               icon={ArrowLeft}
               onClick={() => setStep((value) => Math.max(0, value - 1))}
-              className={step === 0 ? "pointer-events-none opacity-40" : ""}
+              disabled={step === 0 || submitting || Boolean(operationId.current)}
+              className={step === 0 ? "opacity-40" : ""}
             >
               上一步
             </GhostButton>
@@ -432,7 +453,8 @@ export default function OnboardAgent() {
                 onClick={() => {
                   if (canNext) setStep((value) => value + 1);
                 }}
-                className={!canNext ? "pointer-events-none opacity-50" : ""}
+                disabled={!canNext}
+                className={!canNext ? "opacity-50" : ""}
               >
                 下一步 <ArrowRight size={16} />
               </CtaButton>
@@ -440,7 +462,8 @@ export default function OnboardAgent() {
               <CtaButton
                 icon={CheckCircle2}
                 onClick={finish}
-                className={!allPassed ? "pointer-events-none opacity-50" : ""}
+                disabled={!allPassed || submitting}
+                className={!allPassed ? "opacity-50" : ""}
               >
                 完成接入并上线
               </CtaButton>
@@ -462,7 +485,7 @@ export default function OnboardAgent() {
             </div>
             <p className="mt-3 text-[13px] text-[var(--ap-text-2)]">{tagline || "暂无简介"}</p>
             <div className="mt-4 space-y-2 text-[13px]">
-              <Row label="调用端点" value={endpoint.length > 8 ? endpoint : "未配置"} />
+              <Row label="并发上限" value={maxConcurrency || "—"} />
               <Row label="鉴权方式" value={auth} />
               <Row label="能力标签" value={capabilities.join("、") || "—"} />
               <Row label="履约保证金" value="0 USDC" tag="零履约金" />

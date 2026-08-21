@@ -188,7 +188,12 @@ type apiAgentStore struct {
 	createCalls int
 	mutation    engineagent.Mutation
 	agent       engineagent.Agent
+	healthInput engineagent.HealthInput
 }
+
+type passingHealthChecker struct{}
+
+func (passingHealthChecker) Check(context.Context, string) error { return nil }
 
 func (s *apiAgentStore) Create(_ context.Context, mutation engineagent.Mutation, input engineagent.CreateInput, id string) (engineagent.Agent, bool, error) {
 	s.createCalls++
@@ -201,8 +206,9 @@ func (*apiAgentStore) UpdateProfile(context.Context, engineagent.Mutation, strin
 func (*apiAgentStore) Transition(context.Context, engineagent.Mutation, string, engineagent.LifecycleInput) (engineagent.Agent, bool, error) {
 	return engineagent.Agent{}, false, engineagent.ErrStaleVersion
 }
-func (*apiAgentStore) UpdateHealth(context.Context, engineagent.Mutation, string, engineagent.HealthInput) (engineagent.Agent, bool, error) {
-	return engineagent.Agent{}, false, nil
+func (s *apiAgentStore) UpdateHealth(_ context.Context, _ engineagent.Mutation, _ string, input engineagent.HealthInput) (engineagent.Agent, bool, error) {
+	s.healthInput = input
+	return engineagent.Agent{ID: "agent-1", Health: input.Health, AggregateVersion: input.ExpectedVersion + 1}, false, nil
 }
 func (*apiAgentStore) UpdateCapacity(context.Context, engineagent.Mutation, string, engineagent.CapacityInput) (engineagent.Agent, bool, error) {
 	return engineagent.Agent{}, false, nil
@@ -390,7 +396,7 @@ func TestAgentTransportAuthenticatesValidatesAndMapsConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := NewHandlerWithServices(slog.New(slog.NewTextHandler(io.Discard, nil)), authService, agentService)
-	body := `{"name":"Research Agent","category":"research","tags":["analysis"],"capabilities":"research","languages":["en"],"estimatedDurationSeconds":300,"authorBio":"provider","controllerAddress":"0x1111111111111111111111111111111111111111","payoutAddress":"0x2222222222222222222222222222222222222222","maxConcurrency":2}`
+	body := `{"name":"Research Agent","category":"research","tags":["analysis"],"capabilities":"research","languages":["en"],"estimatedDurationSeconds":300,"authorBio":"provider","endpointUrl":"https://agent.example/health","controllerAddress":"0x1111111111111111111111111111111111111111","payoutAddress":"0x2222222222222222222222222222222222222222","maxConcurrency":2}`
 
 	unauthorized := httptest.NewRecorder()
 	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/v1/agents", bytes.NewBufferString(body)))
@@ -420,6 +426,37 @@ func TestAgentTransportAuthenticatesValidatesAndMapsConflicts(t *testing.T) {
 	handler.ServeHTTP(unknown, unknownRequest)
 	if unknown.Code != http.StatusBadRequest || store.createCalls != 1 {
 		t.Fatalf("unknown field: status=%d calls=%d", unknown.Code, store.createCalls)
+	}
+}
+
+func TestAgentHealthTransportDoesNotAcceptBrowserSuppliedResult(t *testing.T) {
+	store := &apiAgentStore{agent: engineagent.Agent{ID: "agent-1", OwnerID: "owner", EndpointURL: "https://agent.example/health", AggregateVersion: 3}}
+	agentService, err := engineagent.NewServiceWithHealthChecker(store, passingHealthChecker{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authService, err := engineauth.NewService(staticSessionStore{session: engineauth.Session{UserID: "owner", Roles: []string{"agent_provider"}}}, engineauth.EthereumVerifier{}, engineauth.Config{Domain: "app.example", ChainID: "1", Purpose: "login"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandlerWithServices(slog.New(slog.NewTextHandler(io.Discard, nil)), authService, agentService)
+	for _, body := range []string{`{"health":"healthy","expectedVersion":3}`, `{"health":"unhealthy","expectedVersion":3}`} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/agents/agent-1/health", bytes.NewBufferString(body))
+		request.Header.Set("authorization", "Bearer session-token")
+		request.Header.Set("Idempotency-Key", "health-untrusted")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("browser health result accepted: %d %s", recorder.Code, recorder.Body.String())
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/agents/agent-1/health", bytes.NewBufferString(`{"expectedVersion":3}`))
+	request.Header.Set("authorization", "Bearer session-token")
+	request.Header.Set("Idempotency-Key", "health-check-3")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || store.healthInput.Health != engineagent.HealthHealthy || store.healthInput.ExpectedVersion != 3 {
+		t.Fatalf("Engine health check not recorded: status=%d input=%#v body=%s", recorder.Code, store.healthInput, recorder.Body.String())
 	}
 }
 

@@ -5,6 +5,13 @@ export type EngineAggregateResult = {
   body: Record<string, unknown>;
 };
 
+export type EngineMutationInput = {
+  path: string;
+  body: string;
+  idempotencyKey: string;
+  sessionToken: string;
+};
+
 export class InvalidResourceIdError extends Error {}
 export class InvalidEngineResponseError extends Error {}
 
@@ -59,6 +66,37 @@ export async function aggregateEngineResource(
     throw new InvalidEngineResponseError("invalid engine view snapshot");
   }
   return { status: 200, body: { [singular]: resource, availableActions } };
+}
+
+export async function forwardEngineMutation(
+  input: EngineMutationInput,
+  options: { fetch?: typeof fetch; engineBaseUrl?: string } = {},
+): Promise<EngineAggregateResult> {
+  if (!validMutationPath(input.path)) throw new InvalidResourceIdError("invalid mutation path");
+  if (!input.sessionToken) return { status: 401, body: { error: "unauthorized" } };
+  if (!input.idempotencyKey || input.idempotencyKey.length > 200) return { status: 400, body: { error: "invalid idempotency key" } };
+  const request = options.fetch ?? fetch;
+  const baseUrl = options.engineBaseUrl ?? resolveEngineBaseUrl();
+  const response = await request(`${baseUrl}${input.path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${input.sessionToken}`,
+      "content-type": "application/json",
+      "idempotency-key": input.idempotencyKey,
+    },
+    body: input.body,
+    cache: "no-store",
+  });
+  if (!response.ok) return engineError(response);
+  const value = sanitizePayload(await readEngineJSON(response));
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new InvalidEngineResponseError("invalid engine mutation response");
+  return { status: response.status, body: value as Record<string, unknown> };
+}
+
+function validMutationPath(path: string): boolean {
+  if (path === "/v1/agents" || path === "/v1/tasks") return true;
+  return /^\/v1\/agents\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:credentials|health|prices|lifecycle)$/.test(path)
+    || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/publish$/.test(path);
 }
 
 async function engineError(response: Response): Promise<EngineAggregateResult> {

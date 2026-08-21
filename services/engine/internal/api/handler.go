@@ -320,7 +320,7 @@ func (h *handler) transitionAgent(writer http.ResponseWriter, request *http.Requ
 	writeJSON(writer, 200, value)
 }
 func (h *handler) updateAgentHealth(writer http.ResponseWriter, request *http.Request) {
-	var input agent.HealthInput
+	var input agent.HealthCheckInput
 	if decodeJSON(writer, request, 4_096, &input) != nil {
 		writeJSON(writer, 400, map[string]string{"error": "invalid request body"})
 		return
@@ -329,7 +329,7 @@ func (h *handler) updateAgentHealth(writer http.ResponseWriter, request *http.Re
 	if !ok {
 		return
 	}
-	value, _, err := h.agents.UpdateHealth(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	value, _, err := h.agents.CheckHealth(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
 	if err != nil {
 		h.writeAgentError(writer, err)
 		return

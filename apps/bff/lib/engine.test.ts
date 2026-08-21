@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { aggregateEngineResource, InvalidEngineResponseError, InvalidResourceIdError, resolveEngineBaseUrl } from "./engine.ts";
+import { aggregateEngineResource, forwardEngineMutation, InvalidEngineResponseError, InvalidResourceIdError, resolveEngineBaseUrl } from "./engine.ts";
 
 test("BFF aggregation calls only internal Engine endpoints and strips sensitive fields", async () => {
   const calls: Array<{ url: string; authorization: string | null }> = [];
@@ -63,6 +63,21 @@ test("Agent capacity and retire decision come from one Engine view request", asy
   assert.equal(calls, 1);
   assert.equal((result.body.agent as { activeCapacity: number }).activeCapacity, 1);
   assert.deepEqual((result.body.availableActions as { actions: unknown[] }).actions, [{ action: "retire", allowed: false, reasons: [{ code: "active_capacity_nonzero", message: "Release capacity" }] }]);
+});
+
+test("protected mutations forward session and idempotency without exposing secrets", async () => {
+  const calls: Array<{ url: string; authorization: string | null; idempotencyKey: string | null; body: string }> = [];
+  const result = await forwardEngineMutation({ path: "/v1/agents/agent-1/credentials", body: JSON.stringify({ secret: "never-log" }), idempotencyKey: "operation-1", sessionToken: "session-secret" }, {
+    engineBaseUrl: "http://engine.internal:8080",
+    fetch: async (input, init) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(input), authorization: headers.get("authorization"), idempotencyKey: headers.get("idempotency-key"), body: String(init?.body) });
+      return Response.json({ agentId: "agent-1", version: 1, fingerprint: "safe", secret: "must-strip" }, { status: 201 });
+    },
+  });
+  assert.deepEqual(calls, [{ url: "http://engine.internal:8080/v1/agents/agent-1/credentials", authorization: "Bearer session-secret", idempotencyKey: "operation-1", body: '{"secret":"never-log"}' }]);
+  assert.deepEqual(result, { status: 201, body: { agentId: "agent-1", version: 1, fingerprint: "safe" } });
+  await assert.rejects(() => forwardEngineMutation({ path: "/v1/agents/../admin", body: "{}", idempotencyKey: "x", sessionToken: "session" }), InvalidResourceIdError);
 });
 
 test("public environment and browser source cannot select or call the internal Engine", async () => {

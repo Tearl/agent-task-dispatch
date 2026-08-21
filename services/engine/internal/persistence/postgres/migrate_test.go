@@ -95,6 +95,19 @@ func TestAgentDownMigrationPreservesImmutableHistory(t *testing.T) {
 	}
 }
 
+func TestAgentEndpointMigrationIsAdditiveAndBounded(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000006_agent_endpoint.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{"ADD COLUMN IF NOT EXISTS endpoint_url", "NOT NULL DEFAULT ''", "length(endpoint_url) <= 2048"} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("Agent endpoint migration missing %q", required)
+		}
+	}
+}
+
 func TestAgentCredentialMigrationStoresOnlyEncryptedImmutableVersions(t *testing.T) {
 	contents, err := migrationFiles.ReadFile("migrations/000004_agent_credentials.up.sql")
 	if err != nil {

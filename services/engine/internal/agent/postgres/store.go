@@ -24,7 +24,7 @@ func NewStore(db *sql.DB) (*Store, error) {
 
 func (s *Store) Create(ctx context.Context, m agent.Mutation, input agent.CreateInput, id string) (result agent.Agent, replay bool, err error) {
 	body, replay, err := s.execute(ctx, m, "agents.create:"+m.ActorID, func(tx *sql.Tx) (any, error) {
-		_, err := tx.ExecContext(ctx, `INSERT INTO agents (agent_id,owner_id,name,category,tags,capabilities,languages,estimated_duration_seconds,author_bio,controller_address,payout_address,max_concurrency,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,lower($10),lower($11),$12,$13,$13)`, id, m.ActorID, input.Name, input.Category, pq.Array(input.Tags), input.Capabilities, pq.Array(input.Languages), input.EstimatedDurationSeconds, input.AuthorBio, input.ControllerAddress, input.PayoutAddress, input.MaxConcurrency, m.Now)
+		_, err := tx.ExecContext(ctx, `INSERT INTO agents (agent_id,owner_id,name,category,tags,capabilities,languages,estimated_duration_seconds,author_bio,endpoint_url,controller_address,payout_address,max_concurrency,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,lower($11),lower($12),$13,$14,$14)`, id, m.ActorID, input.Name, input.Category, pq.Array(input.Tags), input.Capabilities, pq.Array(input.Languages), input.EstimatedDurationSeconds, input.AuthorBio, input.EndpointURL, input.ControllerAddress, input.PayoutAddress, input.MaxConcurrency, m.Now)
 		if err != nil {
 			return nil, fmt.Errorf("create agent: %w", err)
 		}
@@ -51,6 +51,7 @@ func (s *Store) UpdateProfile(ctx context.Context, m agent.Mutation, id string, 
 			return nil, err
 		}
 		addressesChanged := current.ControllerAddress != lower(input.ControllerAddress) || current.PayoutAddress != lower(input.PayoutAddress)
+		endpointChanged := current.EndpointURL != input.EndpointURL
 		if current.Status == agent.StatusRetired {
 			return nil, agent.ErrInvalidState
 		}
@@ -64,7 +65,7 @@ func (s *Store) UpdateProfile(ctx context.Context, m agent.Mutation, id string, 
 		if input.MaxConcurrency < activeCapacity {
 			return nil, agent.ErrInvalidState
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE agents SET name=$1,category=$2,tags=$3,capabilities=$4,languages=$5,estimated_duration_seconds=$6,author_bio=$7,controller_address=lower($8),payout_address=lower($9),max_concurrency=$10,active_capacity=$11,aggregate_version=aggregate_version+1,updated_at=$12 WHERE agent_id=$13`, input.Name, input.Category, pq.Array(input.Tags), input.Capabilities, pq.Array(input.Languages), input.EstimatedDurationSeconds, input.AuthorBio, input.ControllerAddress, input.PayoutAddress, input.MaxConcurrency, activeCapacity, m.Now, id)
+		_, err = tx.ExecContext(ctx, `UPDATE agents SET name=$1,category=$2,tags=$3,capabilities=$4,languages=$5,estimated_duration_seconds=$6,author_bio=$7,endpoint_url=$8,controller_address=lower($9),payout_address=lower($10),max_concurrency=$11,active_capacity=$12,health=CASE WHEN $13 THEN 'unknown' ELSE health END,health_checked_at=CASE WHEN $13 THEN NULL ELSE health_checked_at END,health_valid_until=CASE WHEN $13 THEN NULL ELSE health_valid_until END,aggregate_version=aggregate_version+1,updated_at=$14 WHERE agent_id=$15`, input.Name, input.Category, pq.Array(input.Tags), input.Capabilities, pq.Array(input.Languages), input.EstimatedDurationSeconds, input.AuthorBio, input.EndpointURL, input.ControllerAddress, input.PayoutAddress, input.MaxConcurrency, activeCapacity, endpointChanged, m.Now, id)
 		if err != nil {
 			return nil, fmt.Errorf("update agent profile: %w", err)
 		}
@@ -474,10 +475,10 @@ func lower(value string) string {
 	return string(result)
 }
 
-const agentSelect = `SELECT agent_id,owner_id,name,category,tags,capabilities,languages,estimated_duration_seconds,author_bio,controller_address,payout_address,status,health,health_checked_at,health_valid_until,max_concurrency,active_capacity,aggregate_version,activated_at,current_price_version,current_credential_version,created_at,updated_at FROM agents`
+const agentSelect = `SELECT agent_id,owner_id,name,category,tags,capabilities,languages,estimated_duration_seconds,author_bio,endpoint_url,controller_address,payout_address,status,health,health_checked_at,health_valid_until,max_concurrency,active_capacity,aggregate_version,activated_at,current_price_version,current_credential_version,created_at,updated_at FROM agents`
 
-const agentSelectWithLiveCapacity = `SELECT a.agent_id,a.owner_id,a.name,a.category,a.tags,a.capabilities,a.languages,a.estimated_duration_seconds,a.author_bio,a.controller_address,a.payout_address,a.status,a.health,a.health_checked_at,a.health_valid_until,a.max_concurrency,(SELECT count(*)::integer FROM agent_capacity_leases l WHERE l.agent_id=a.agent_id AND l.released_at IS NULL AND l.expires_at>now()),a.aggregate_version,a.activated_at,a.current_price_version,a.current_credential_version,a.created_at,a.updated_at FROM agents a`
-const agentSelectWithLiveCapacityAndTime = `SELECT a.agent_id,a.owner_id,a.name,a.category,a.tags,a.capabilities,a.languages,a.estimated_duration_seconds,a.author_bio,a.controller_address,a.payout_address,a.status,a.health,a.health_checked_at,a.health_valid_until,a.max_concurrency,(SELECT count(*)::integer FROM agent_capacity_leases l WHERE l.agent_id=a.agent_id AND l.released_at IS NULL AND l.expires_at>statement_timestamp()),a.aggregate_version,a.activated_at,a.current_price_version,a.current_credential_version,a.created_at,a.updated_at,statement_timestamp() FROM agents a`
+const agentSelectWithLiveCapacity = `SELECT a.agent_id,a.owner_id,a.name,a.category,a.tags,a.capabilities,a.languages,a.estimated_duration_seconds,a.author_bio,a.endpoint_url,a.controller_address,a.payout_address,a.status,a.health,a.health_checked_at,a.health_valid_until,a.max_concurrency,(SELECT count(*)::integer FROM agent_capacity_leases l WHERE l.agent_id=a.agent_id AND l.released_at IS NULL AND l.expires_at>now()),a.aggregate_version,a.activated_at,a.current_price_version,a.current_credential_version,a.created_at,a.updated_at FROM agents a`
+const agentSelectWithLiveCapacityAndTime = `SELECT a.agent_id,a.owner_id,a.name,a.category,a.tags,a.capabilities,a.languages,a.estimated_duration_seconds,a.author_bio,a.endpoint_url,a.controller_address,a.payout_address,a.status,a.health,a.health_checked_at,a.health_valid_until,a.max_concurrency,(SELECT count(*)::integer FROM agent_capacity_leases l WHERE l.agent_id=a.agent_id AND l.released_at IS NULL AND l.expires_at>statement_timestamp()),a.aggregate_version,a.activated_at,a.current_price_version,a.current_credential_version,a.created_at,a.updated_at,statement_timestamp() FROM agents a`
 
 type scanner interface{ Scan(...any) error }
 
@@ -489,7 +490,7 @@ func scanAgentWithTime(row scanner, databaseNow *time.Time) (value agent.Agent, 
 	var tags, languages pq.StringArray
 	var healthChecked, healthValid, activated sql.NullTime
 	var price, credentialVersion sql.NullInt64
-	destinations := []any{&value.ID, &value.OwnerID, &value.Name, &value.Category, &tags, &value.Capabilities, &languages, &value.EstimatedDurationSeconds, &value.AuthorBio, &value.ControllerAddress, &value.PayoutAddress, &value.Status, &value.Health, &healthChecked, &healthValid, &value.MaxConcurrency, &value.ActiveCapacity, &value.AggregateVersion, &activated, &price, &credentialVersion, &value.CreatedAt, &value.UpdatedAt}
+	destinations := []any{&value.ID, &value.OwnerID, &value.Name, &value.Category, &tags, &value.Capabilities, &languages, &value.EstimatedDurationSeconds, &value.AuthorBio, &value.EndpointURL, &value.ControllerAddress, &value.PayoutAddress, &value.Status, &value.Health, &healthChecked, &healthValid, &value.MaxConcurrency, &value.ActiveCapacity, &value.AggregateVersion, &activated, &price, &credentialVersion, &value.CreatedAt, &value.UpdatedAt}
 	if databaseNow != nil {
 		destinations = append(destinations, databaseNow)
 	}

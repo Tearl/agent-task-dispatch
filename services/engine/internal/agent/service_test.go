@@ -20,6 +20,21 @@ type testStore struct {
 	databaseNow     time.Time
 }
 
+type testHealthChecker struct {
+	calls   []string
+	results []error
+}
+
+func (c *testHealthChecker) Check(_ context.Context, endpoint string) error {
+	c.calls = append(c.calls, endpoint)
+	if len(c.results) == 0 {
+		return nil
+	}
+	result := c.results[0]
+	c.results = c.results[1:]
+	return result
+}
+
 func (s *testStore) Create(_ context.Context, mutation Mutation, _ CreateInput, id string) (Agent, bool, error) {
 	s.createCalls++
 	s.lastMutation = mutation
@@ -237,6 +252,48 @@ func TestHealthRejectsUntrustedFutureAndStaleTimestamps(t *testing.T) {
 	}
 }
 
+func TestCheckHealthUsesOnlyEngineObservedProtocolResult(t *testing.T) {
+	store := &testStore{getAgent: Agent{ID: "agent-1", OwnerID: "provider", EndpointURL: "https://agent.example/health", AggregateVersion: 3}}
+	checker := &testHealthChecker{results: []error{nil, errors.New("unreachable")}}
+	service, err := NewServiceWithHealthChecker(store, checker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := auth.Session{UserID: "provider", Roles: []string{"agent_provider"}}
+	input := HealthCheckInput{ExpectedVersion: 3}
+	if _, _, err = service.CheckHealth(context.Background(), session, "check-1", "agent-1", input); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = service.CheckHealth(context.Background(), session, "check-1", "agent-1", input); err != nil {
+		t.Fatal(err)
+	}
+	if len(checker.calls) != 2 || checker.calls[0] != store.getAgent.EndpointURL {
+		t.Fatalf("unexpected protocol checks: %#v", checker.calls)
+	}
+	if len(store.healthInputs) != 2 || store.healthInputs[0].Health != HealthHealthy || store.healthInputs[1].Health != HealthUnhealthy {
+		t.Fatalf("Engine did not derive health results: %#v", store.healthInputs)
+	}
+	if store.healthMutations[0].RequestHash != store.healthMutations[1].RequestHash {
+		t.Fatalf("same check request produced unstable idempotency hashes: %#v", store.healthMutations)
+	}
+}
+
+func TestCheckHealthRejectsUntrustedCallersAndMissingChecker(t *testing.T) {
+	store := &testStore{getAgent: Agent{ID: "agent-1", EndpointURL: "https://agent.example/health"}}
+	checker := &testHealthChecker{}
+	service, _ := NewServiceWithHealthChecker(store, checker)
+	if _, _, err := service.CheckHealth(context.Background(), auth.Session{UserID: "publisher", Roles: []string{"publisher"}}, "check", "agent-1", HealthCheckInput{ExpectedVersion: 1}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("publisher health check: %v", err)
+	}
+	if len(checker.calls) != 0 {
+		t.Fatal("forbidden request reached health checker")
+	}
+	withoutChecker, _ := NewService(store)
+	if _, _, err := withoutChecker.CheckHealth(context.Background(), auth.Session{UserID: "provider", Roles: []string{"agent_provider"}}, "check", "agent-1", HealthCheckInput{ExpectedVersion: 1}); !errors.Is(err, ErrHealthCheckUnavailable) {
+		t.Fatalf("missing checker: %v", err)
+	}
+}
+
 func TestAgentAvailableActionsIncludeAuthoritativeBlockingReasons(t *testing.T) {
 	now := time.Date(2026, 8, 21, 4, 0, 0, 0, time.UTC)
 	store := &testStore{databaseNow: now, getAgent: Agent{ID: "agent-1", OwnerID: "provider", Status: StatusDraft, Health: HealthUnknown, AggregateVersion: 7}}
@@ -306,6 +363,7 @@ func validCreateInput() CreateInput {
 		Languages:                []string{"zh-CN", "en"},
 		EstimatedDurationSeconds: 300,
 		AuthorBio:                "Provider",
+		EndpointURL:              "https://agent.example/health",
 		ControllerAddress:        "0x1111111111111111111111111111111111111111",
 		PayoutAddress:            "0x2222222222222222222222222222222222222222",
 		MaxConcurrency:           2,

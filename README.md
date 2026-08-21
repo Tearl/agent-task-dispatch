@@ -63,6 +63,18 @@ Local endpoints:
 - BFF health: <http://localhost:3000/api/health>
 - LocalStack: <http://localhost:4566>
 
+`pnpm --filter web start` serves the production React Router build and proxies
+same-origin `/api/*` requests to the server-only `BFF_URL` origin (default
+`http://localhost:3000`). Keep browser code on relative `/api` URLs so session
+cookies remain first-party; `VITE_BFF_URL` is used only by the Vite development
+proxy.
+
+Agent onboarding stores an HTTPS health endpoint. Engine probes it directly
+with a three-second timeout and expects a bounded JSON response:
+`{"status":"healthy","protocolVersion":"1"}`. Redirects and private-network
+targets are rejected by default; `AGENT_HEALTH_ALLOW_PRIVATE_NETWORKS=true` is
+for explicit local testing only and must remain disabled in production.
+
 ## Quality commands
 
 ```bash

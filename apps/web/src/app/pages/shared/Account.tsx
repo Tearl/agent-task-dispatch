@@ -6,7 +6,7 @@ import {
 import { Page } from '../../components/AppShell';
 import { PageHeader, Panel, SectionTitle, Pill, GhostButton, InfoNote } from '../../components/kit/primitives';
 import { useSession, shortAddr } from '../../lib/session';
-import { ROLES, CLIENT_ROLES } from '../../lib/roles';
+import { ROLES } from '../../lib/roles';
 
 const SESSIONS = [
   { device: 'Chrome · macOS', loc: '上海', current: true, time: '当前会话' },
@@ -21,7 +21,7 @@ const SECURITY = [
 ];
 
 export default function Account() {
-  const { address, role, switchRole, disconnect } = useSession();
+  const { address, role, switchRole, disconnect, authorizedRoles } = useSession();
   const nav = useNavigate();
   return (
     <Page>
@@ -44,14 +44,14 @@ export default function Account() {
             </div>
             <div className="mt-4 flex gap-2">
               <GhostButton icon={KeyRound} onClick={() => toast.success('已发起签名验证')}>重新签名</GhostButton>
-              <GhostButton icon={LogOut} onClick={() => { disconnect(); nav('/'); }}>断开连接</GhostButton>
+              <GhostButton icon={LogOut} onClick={async () => { try { await disconnect(); nav('/'); } catch { toast.error('会话撤销失败，已保持当前登录状态，请重试。'); } }}>断开连接</GhostButton>
             </div>
           </Panel>
 
           <Panel className="p-6">
             <SectionTitle>角色切换</SectionTitle>
             <div className="space-y-2">
-              {CLIENT_ROLES.map((r) => {
+              {authorizedRoles.map((r) => {
                 const cfg = ROLES[r];
                 const active = role === r;
                 return (

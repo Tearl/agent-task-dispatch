@@ -26,6 +26,7 @@ import { useNavigate } from "react-router";
 
 import { ROLES, type RoleId } from "../app/lib/roles";
 import { useSession } from "../app/lib/session";
+import { authenticateWallet, clientRolesForEngineRoles, type WalletProvider } from "../app/lib/platform-api";
 import type { Route } from "./+types/_index";
 
 export function meta({}: Route.MetaArgs) {
@@ -34,10 +35,6 @@ export function meta({}: Route.MetaArgs) {
     { name: "description", content: "发布需求、智能匹配、链上托管、安全交付。" },
   ];
 }
-
-type EthereumProvider = {
-  request(input: { method: string }): Promise<unknown>;
-};
 
 type Capability = {
   icon: LucideIcon;
@@ -84,10 +81,12 @@ export default function Home() {
   const { connect, switchRole } = useSession();
   const [role, setRole] = useState<RoleId>("publisher");
   const [error, setError] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
 
   async function connectWallet() {
     setError(null);
-    const ethereum = (window as typeof window & { ethereum?: EthereumProvider }).ethereum;
+    if (connecting) return;
+    const ethereum = (window as typeof window & { ethereum?: WalletProvider }).ethereum;
 
     if (!ethereum) {
       setError("未检测到钱包，请先安装 MetaMask 或其他以太坊兼容钱包。");
@@ -95,14 +94,21 @@ export default function Home() {
     }
 
     try {
-      const accounts = (await ethereum.request({ method: "eth_requestAccounts" })) as string[];
-      const account = accounts[0];
-      if (!account) throw new Error("wallet returned no account");
-      connect(account);
-      switchRole(role);
-      navigate(ROLES[role].home);
-    } catch {
-      setError("钱包连接未完成，请在钱包中确认后重试。");
+      setConnecting(true);
+      const session = await authenticateWallet(ethereum);
+      const roles = clientRolesForEngineRoles(session.roles);
+      const nextRole = connect(session, role);
+      if (role === "admin" || !roles.includes(role)) {
+        setError(`该钱包未获授权使用「${ROLES[role].name}」。可用角色：${roles.map((item) => ROLES[item].name).join("、") || "无"}。`);
+        return;
+      }
+      if (!nextRole) throw new Error("session has no client role");
+      switchRole(nextRole);
+      navigate(ROLES[nextRole].home);
+    } catch (cause) {
+      setError(cause instanceof Error && cause.message ? `登录失败：${cause.message}` : "钱包连接未完成，请在钱包中确认后重试。");
+    } finally {
+      setConnecting(false);
     }
   }
 
@@ -250,10 +256,12 @@ export default function Home() {
           <button
             type="button"
             onClick={connectWallet}
+            disabled={connecting}
+            aria-busy={connecting}
             className="ap-cta mt-5 flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-[16px] font-medium focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--ap-cyan)]"
           >
             <Wallet aria-hidden="true" size={19} />
-            以「{ROLES[role].name}」身份登录
+            {connecting ? "等待钱包签名…" : `以「${ROLES[role].name}」身份登录`}
           </button>
           <p className="mt-3 text-center text-[13px] text-[var(--ap-muted)]">
             支持 MetaMask 等以太坊兼容钱包 · 登录后可在右上角切换角色
