@@ -103,3 +103,32 @@ test("task publication submits the independently confirmed acceptance criteria",
   assert.match(task, /htmlFor="task-criteria"/);
   assert.doesNotMatch(task, /criteria: analysis\?\.acceptanceCriteria/);
 });
+
+test("finance pages expose submitted, confirmation, refundable and terminal states accessibly", async () => {
+  const [publisher,agent,reconciliation,adminLogin,adminLayout]=await Promise.all([
+    readFile(new URL("../pages/publisher/Funds.tsx",import.meta.url),"utf8"),
+    readFile(new URL("../pages/agent/Earnings.tsx",import.meta.url),"utf8"),
+    readFile(new URL("../pages/admin/Reconciliation.tsx",import.meta.url),"utf8"),
+    readFile(new URL("../pages/AdminLogin.tsx",import.meta.url),"utf8"),
+    readFile(new URL("../layouts/AdminLayout.tsx",import.meta.url),"utf8"),
+  ]);
+  for(const page of [publisher,agent,reconciliation]) assert.match(page,/role="alert"/);
+  assert.match(publisher,/submission === "submitted"/); assert.match(publisher,/confirmation/); assert.match(publisher,/refundStatus/); assert.match(publisher,/task\.terminal/);
+  assert.match(agent,/formalClaimable/); assert.match(agent,/chainClaimable/); assert.match(agent,/controller/); assert.match(agent,/payout/);
+  assert.match(reconciliation,/账本预期/); assert.match(reconciliation,/链上观测/); assert.doesNotMatch(reconciliation,/事件重放/);
+  assert.match(adminLogin,/authenticateWallet/); assert.match(adminLogin,/revokeSession/); assert.doesNotMatch(adminLogin,/adminLogin|动态验证码/);
+  assert.match(adminLayout,/authorizedRoles\.includes\("admin"\)/);
+});
+
+test("matching comparison uses authoritative snapshots and exposes degraded and pending states", async () => {
+  const page = await readFile(new URL("../pages/publisher/AgentRecommendations.tsx", import.meta.url), "utf8");
+  assert.match(page, /readMatchingView/);
+  assert.match(page, /snapshot\?\.degradations/);
+  assert.match(page, /aria-label="Agent 候选比较"/);
+  assert.match(page, /aria-pressed=\{active\}/);
+  assert.match(page, /status !== "valid"/);
+  assert.match(page, /billingStatus !== "captured"/);
+  assert.match(page, /检查链上确认/);
+  assert.match(page, /operationID\.current/);
+  assert.doesNotMatch(page, /from "\.\.\/\.\.\/lib\/mock"/);
+});

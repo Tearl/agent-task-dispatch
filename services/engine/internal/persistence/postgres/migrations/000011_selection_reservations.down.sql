@@ -1,0 +1,2 @@
+-- Selection reservations, assignments and their events are financial/domain audit history.
+-- Rollback is intentionally non-destructive; disable writers and deploy a forward migration.

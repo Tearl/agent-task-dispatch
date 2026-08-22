@@ -1,168 +1,119 @@
-import {
-  ArrowLeft,
-  ArrowRight,
-  Bot,
-  Check,
-  CheckCircle2,
-  Clock,
-  Eye,
-  FileCheck2,
-  Info,
-  Route,
-  ShieldCheck,
-  Sparkles,
-  Target,
-  TrendingUp,
-} from "lucide-react";
-import { useMemo, useState } from "react";
-import { useLocation, useNavigate } from "react-router";
-import { toast } from "sonner";
+import { AlertTriangle, Check, Clock, Eye, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import { Page } from "../../components/AppShell";
-import { Bar, GhostButton, InfoNote, PageHeader, Panel, Pill } from "../../components/kit/primitives";
-import { AGENTS, type AgentCandidate } from "../../lib/mock";
-import { buildTaskAnalysis, type PublisherFlowState, type TaskAnalysis } from "../../lib/publisher-flow";
-
-const FALLBACK_PROMPT = "抓取 3 个竞品官网的价格并整理成结构化表格";
-type RecommendedAgent = AgentCandidate & { match: number; reasons: string[] };
+import { Bar, GhostButton, InfoNote, PageHeader, Panel, Pill, SectionTitle } from "../../components/kit/primitives";
+import { PlatformAPIError, readMatchingView, readSelection, reconcileSelection, reserveSelection, submitSelectionTransaction, type MatchingView, type SelectionIntent, type WalletProvider } from "../../lib/platform-api";
+import type { PublisherFlowState } from "../../lib/publisher-flow";
 
 export default function AgentRecommendations() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [params] = useSearchParams();
   const flowState = (location.state ?? {}) as PublisherFlowState;
-  const prompt = flowState.prompt?.trim() || FALLBACK_PROMPT;
-  const analysis = flowState.analysis ?? buildTaskAnalysis(prompt, flowState.category, flowState.depth);
-  const revision = flowState.analysisRevision ?? 1;
-  const recommendations = useMemo(() => rankAgents(analysis), [analysis]);
-  const [selected, setSelected] = useState<string | null>(flowState.selectedAgentId ?? null);
-  const [overviewAgentId, setOverviewAgentId] = useState<string | null>(null);
-  const overviewAgent = recommendations.find((agent) => agent.id === overviewAgentId);
+  const taskID = params.get("taskId") ?? flowState.taskId ?? "";
+  const [view, setView] = useState<MatchingView | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [intent, setIntent] = useState<SelectionIntent | null>(null);
+  const [localTx, setLocalTx] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const operationID = useRef<string | undefined>(undefined);
 
-  const backToAnalysis = () => {
-    navigate("/publisher/matching", { state: { ...flowState, prompt, analysis, analysisRevision: revision, selectedAgentId: undefined } satisfies PublisherFlowState });
+  const load = async () => {
+    if (!taskID) return;
+    setError(null);
+    try {
+      const value = await readMatchingView(taskID);
+      setView(value);
+      if (value.reservation) setSelected(value.reservation.agentId);
+      if (value.reservation?.id) setIntent(await readSelection(taskID, value.reservation.id));
+    } catch (cause) {
+      setError(message(cause));
+    }
   };
 
-  const continueToEscrow = () => {
-    if (!selected) {
-      toast.error("请先选择一个 Agent");
+  useEffect(() => { void load(); }, [taskID]);
+
+  const submit = async () => {
+    if (!taskID || !view?.batch || !selected || busy) return;
+    const candidate = view.snapshot?.candidates.find((item) => item.agentId === selected);
+    if (!candidate?.overview || candidate.overview.status !== "valid" || candidate.overview.billingStatus !== "captured") {
+      setError("只有已通过客观校验且完成概览计费的候选可以选择。");
       return;
     }
-    navigate("/publisher/publish", {
-      state: { ...flowState, prompt, analysis, analysisRevision: revision, selectedAgentId: selected } satisfies PublisherFlowState,
-    });
+    const ethereum = (window as typeof window & { ethereum?: WalletProvider }).ethereum;
+    if (!ethereum) { setError("未检测到以太坊兼容钱包。"); return; }
+    setBusy(true); setError(null);
+    try {
+      const current = intent ?? await reserveSelection(taskID, view.batch.id, candidate.overview.slotId, operationID.current ??= crypto.randomUUID());
+      setIntent(current);
+      const txHash = current.reservation.transactionHash ?? (localTx || await submitSelectionTransaction(ethereum, current));
+      setLocalTx(txHash);
+      try {
+        const result = await reconcileSelection(taskID, current.reservation.id, txHash);
+        setIntent({ ...current, reservation: result.reservation, platformSignature: result.reservation.status === "reserved" ? current.platformSignature : "" });
+        await load();
+      } catch (cause) {
+        if (!(cause instanceof PlatformAPIError) || cause.status !== 425) throw cause;
+        setError("交易已提交，权威链投影尚未达到确认深度。稍后点击“检查链上确认”。");
+      }
+    } catch (cause) {
+      setError(message(cause));
+    } finally { setBusy(false); }
   };
 
-  return (
-    <Page>
-      <PageHeader
-        title="Agent 推荐"
-        subtitle={`基于已确认的任务分析 R${revision} 生成候选 Agent，可先查看各自的执行概览再做选择`}
-        actions={<GhostButton icon={ArrowLeft} onClick={backToAnalysis}>返回修改任务分析</GhostButton>}
-      />
+  if (!taskID) return <Page><PageHeader title="Agent 推荐" subtitle="从已发布任务进入稳定匹配快照" /><InfoNote tone="amber"><span role="alert">缺少 taskId。请先发布任务，再从发布结果进入匹配。</span></InfoNote></Page>;
+  if (!view && !error) return <Page><div role="status" className="py-24 text-center text-[var(--ap-muted)]">正在读取权威匹配快照…</div></Page>;
+  if (!view) return <Page><div role="alert" className="rounded-xl border border-rose-300/30 bg-rose-300/10 p-4 text-rose-100">{error}<div className="mt-3"><GhostButton icon={RefreshCw} onClick={() => void load()}>重试</GhostButton></div></div></Page>;
 
-      <div className="flex items-center gap-3 rounded-2xl border border-[var(--ap-border)] bg-[rgba(10,18,38,0.45)] px-4 py-3">
-        <FlowStep active done icon={Sparkles} label="AI 任务分析" />
-        <span className="h-px flex-1 bg-[var(--ap-border-strong)]" />
-        <FlowStep active icon={Bot} label="Agent 推荐" />
-        <span className="h-px flex-1 bg-[var(--ap-border)]" />
-        <FlowStep icon={ShieldCheck} label="确认并托管" />
-      </div>
+  const candidates = view.snapshot?.candidates ?? [];
+  const txHash = intent?.reservation.transactionHash ?? localTx;
+  const reservationStatus = intent?.reservation.status ?? view.reservation?.status;
+  return <Page>
+    <PageHeader title="Agent 推荐与概览比较" subtitle={`${view.task.title} · ${view.snapshot ? `不可变快照 R${view.snapshot.revision}` : "等待匹配快照"}`} actions={<GhostButton icon={RefreshCw} onClick={() => void load()}>刷新状态</GhostButton>} />
 
-      <Panel className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2"><Pill tone="green" dot>任务分析已确认</Pill><span className="text-[11px] text-[var(--ap-muted)]">版本 R{revision}</span></div>
-          <h2 className="mt-3 truncate text-[17px] text-[var(--ap-text)]">{analysis.title}</h2>
-          <p className="mt-1 line-clamp-2 max-w-4xl text-[12px] leading-relaxed text-[var(--ap-muted)]">{analysis.summary}</p>
-        </div>
-        <div className="flex shrink-0 gap-2"><Pill tone="gray">{analysis.category}</Pill><Pill tone="cyan">预算 {analysis.budget} USDC</Pill><Pill tone="violet">{analysis.deliveryDays} 天</Pill></div>
-      </Panel>
+    {!view.snapshot ? <InfoNote tone="cyan"><span role="status">任务已经发布，但权威匹配快照尚未生成。刷新只读取 Latest，不会触发重新排序或增加修订。</span></InfoNote> : null}
+    {view.snapshot?.degradations.map((item) => <div key={`${item.dependency}:${item.code}`} role="status" className="flex gap-2 rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-[13px] text-amber-100"><AlertTriangle size={16} className="shrink-0" /><span><b>{item.dependency}</b> · {item.code}：{item.message}</span></div>)}
 
-      <section className="space-y-4">
-        <div className="flex items-end justify-between gap-4">
-          <div><h2 className="text-[20px] text-[var(--ap-text)]">推荐候选</h2><p className="mt-1 text-[12px] text-[var(--ap-muted)]">查看概览版可比较不同 Agent 对同一任务的执行思路</p></div>
-          <Pill tone="cyan" dot>{recommendations.length} 个候选</Pill>
-        </div>
-        <div className="grid gap-4 xl:grid-cols-3">
-          {recommendations.map((agent, index) => (
-            <AgentCard
-              key={agent.id}
-              agent={agent}
-              best={index === 0}
-              active={selected === agent.id}
-              overviewActive={overviewAgentId === agent.id}
-              budget={analysis.budget}
-              onSelect={() => setSelected(agent.id)}
-              onOverview={() => setOverviewAgentId(agent.id)}
-            />
-          ))}
-        </div>
-      </section>
+    {view.snapshot ? <Panel className="p-5">
+      <SectionTitle right={<Pill tone="cyan">{view.snapshot.algorithmVersion}</Pill>}>快照审计</SectionTitle>
+      <div className="grid gap-3 text-[12px] sm:grid-cols-2 lg:grid-cols-4"><Audit label="修订" value={`R${view.snapshot.revision}`} /><Audit label="候选数量" value={String(candidates.length)} /><Audit label="探索位" value={view.snapshot.explorationTriggered ? "已触发，仅第三位" : "未触发"} /><Audit label="Seed 摘要" value={short(view.snapshot.seedDigest)} /></div>
+    </Panel> : null}
 
-      {overviewAgent ? <AgentOverview agent={overviewAgent} analysis={analysis} revision={revision} onSelect={() => setSelected(overviewAgent.id)} selected={selected === overviewAgent.id} /> : (
-        <Panel className="grid min-h-40 place-items-center border-dashed p-6 text-center">
-          <div><Eye size={22} className="mx-auto text-[var(--ap-cyan)]" /><div className="mt-3 text-[14px] text-[var(--ap-text)]">选择任一候选的“查看概览版”</div><p className="mt-1 text-[12px] text-[var(--ap-muted)]">这里会展示该 Agent 针对当前任务的执行方案预览</p></div>
-        </Panel>
-      )}
+    <section className="grid gap-4 xl:grid-cols-3" aria-label="Agent 候选比较">
+      {view.snapshot && candidates.length === 0 ? <div role="status" className="xl:col-span-3 rounded-xl border border-[var(--ap-border)] p-6 text-center text-[var(--ap-muted)]">当前快照没有达到质量门槛的候选，系统不会用低分 Agent 补位。</div> : null}
+      {candidates.map((candidate) => {
+        const active = selected === candidate.agentId;
+        const selectable = candidate.overview?.status === "valid" && candidate.overview.billingStatus === "captured";
+        return <article key={candidate.agentId} className={`rounded-2xl border p-5 ${active ? "border-cyan-300/50 bg-cyan-300/5" : "border-[var(--ap-border)] bg-[rgba(10,18,38,.58)]"}`}>
+          <div className="flex items-start justify-between gap-3"><div><div className="flex flex-wrap items-center gap-2 text-[16px] text-white">{candidate.name || candidate.agentId}{candidate.exploration ? <Pill tone="violet">探索位</Pill> : null}</div><div className="mt-1 text-[11px] text-[var(--ap-muted)]">第 {candidate.position} 位 · {candidate.category}</div></div><button type="button" aria-pressed={active} disabled={!selectable || Boolean(view.reservation)} onClick={() => setSelected(candidate.agentId)} className="grid h-8 w-8 place-items-center rounded-full border border-[var(--ap-border-strong)] disabled:opacity-40">{active ? <Check size={15} /> : null}</button></div>
+          <div className="mt-5 flex items-end justify-between"><div><div className="text-[10px] text-[var(--ap-muted)]">权威排名分</div><div className="text-[28px] text-[var(--ap-cyan)]">{candidate.score.ranking}<span className="text-[11px] text-[var(--ap-muted)]"> / 100</span></div></div><Pill tone={selectable ? "green" : "amber"}>{overviewLabel(candidate.overview)}</Pill></div>
+          <Bar value={candidate.score.ranking} />
+          <dl className="mt-4 grid grid-cols-2 gap-2 text-[11px]"><Metric label="任务匹配" value={candidate.score.taskMatch} /><Metric label="信誉" value={candidate.score.reputation} /><Metric label="价格/时间" value={candidate.score.priceTime} /><Metric label="可用性" value={candidate.score.availability} /></dl>
+          <div className="mt-4 flex flex-wrap gap-2">{candidate.tags.map((tag) => <Pill key={tag} tone="gray">{tag}</Pill>)}</div>
+          <div className="mt-4 space-y-2 border-t border-[var(--ap-border)] pt-4 text-[12px]"><Line label="概览价" value={candidate.overviewPrice} /><Line label="正式毛价" value={candidate.formalPrice} /><Line label="预计耗时" value={duration(candidate.estimatedDurationSeconds)} /></div>
+          {candidate.overview?.validationCodes.length ? <div role="status" className="mt-3 text-[11px] text-amber-200">校验：{candidate.overview.validationCodes.join("、")}</div> : null}
+          {candidate.overview?.contentHash ? <div className="mt-2 break-all text-[10px] text-[var(--ap-muted)]"><Eye size={12} className="mr-1 inline" />内容哈希 {candidate.overview.contentHash}</div> : null}
+        </article>;
+      })}
+    </section>
 
-      <Panel strong className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
-        <div><div className="text-[11px] text-[var(--ap-muted)]">当前选择</div><div className="mt-1 text-[14px] text-[var(--ap-text)]">{selected ? recommendations.find((agent) => agent.id === selected)?.name : "尚未选择 Agent"}</div></div>
-        <button type="button" disabled={!selected} onClick={continueToEscrow} className="ap-cta inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-[14px] disabled:cursor-not-allowed disabled:opacity-40">确认 Agent，进入资金托管 <ArrowRight size={16} /></button>
-      </Panel>
-    </Page>
-  );
-}
-
-function AgentCard({ agent, best, active, overviewActive, budget, onSelect, onOverview }: { agent: RecommendedAgent; best: boolean; active: boolean; overviewActive: boolean; budget: number; onSelect: () => void; onOverview: () => void }) {
-  return (
-    <article className={`ap-hoverable flex h-full flex-col rounded-2xl border p-5 transition-all ${active ? "border-[var(--ap-border-strong)] bg-[rgba(34,211,238,.075)] shadow-[0_0_32px_rgba(34,211,238,.08)]" : "border-[var(--ap-border)] bg-[rgba(10,18,38,.58)]"}`}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3"><span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-[#67e8f9] to-[#0891b2] text-[16px] font-semibold text-[#04121c]">{agent.name[0]}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="text-[16px] text-white">{agent.name}</span>{best ? <Pill tone="cyan">最佳匹配</Pill> : null}</div><p className="mt-1 truncate text-[11px] text-[var(--ap-muted)]">{agent.category} · {agent.tagline}</p></div></div>
-        <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-full border ${active ? "border-cyan-300 bg-cyan-300 text-[#06131b]" : "border-[var(--ap-border-strong)]"}`}>{active ? <Check size={14} /> : null}</span>
-      </div>
-      <div className="mt-5 flex items-end justify-between"><div><div className="text-[10px] text-[var(--ap-muted)]">综合匹配分</div><div className="mt-1 text-[28px] leading-none text-[var(--ap-cyan)]">{agent.match}<span className="ml-1 text-[11px] text-[var(--ap-muted)]">/ 100</span></div></div><Pill tone={agent.price <= budget ? "green" : "amber"}>{agent.price} USDC</Pill></div>
-      <div className="mt-3"><Bar value={agent.match} /></div>
-      <div className="mt-4 grid grid-cols-2 gap-2"><Metric icon={Clock} label="预计交付" value={agent.eta} /><Metric icon={TrendingUp} label="成功率" value={`${agent.success}%`} /></div>
-      <ul className="mt-4 flex-1 space-y-2">{agent.reasons.slice(0, 3).map((reason) => <li key={reason} className="flex items-start gap-2 text-[11.5px] leading-relaxed text-[var(--ap-text-2)]"><CheckCircle2 size={13} className="mt-0.5 shrink-0 text-[var(--ap-success)]" />{reason}</li>)}</ul>
-      <div className="mt-5 grid grid-cols-2 gap-2 border-t border-[var(--ap-border)] pt-4"><button type="button" onClick={onOverview} className={`inline-flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2.5 text-[12px] ${overviewActive ? "border-cyan-300/50 bg-cyan-300/10 text-[var(--ap-cyan)]" : "border-[var(--ap-border)] text-[var(--ap-text-2)]"}`}><Eye size={14} />查看概览版</button><button type="button" onClick={onSelect} className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-[12px] ${active ? "bg-cyan-300 text-[#06131b]" : "ap-cta"}`}>{active ? <Check size={14} /> : null}{active ? "已选择" : "选择 Agent"}</button></div>
-    </article>
-  );
-}
-
-function AgentOverview({ agent, analysis, revision, onSelect, selected }: { agent: RecommendedAgent; analysis: TaskAnalysis; revision: number; onSelect: () => void; selected: boolean }) {
-  const milestones = buildMilestones(agent, analysis);
-  return (
-    <Panel strong className="overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--ap-border)] bg-[linear-gradient(120deg,rgba(34,211,238,.12),rgba(139,92,246,.08))] px-6 py-4"><div><div className="flex items-center gap-2"><Pill tone="cyan" dot>Agent 执行概览版</Pill><span className="text-[11px] text-[var(--ap-muted)]">基于任务分析 R{revision}</span></div><h2 className="mt-2 text-[19px] text-white">{agent.name} · {analysis.title}</h2></div><button type="button" onClick={onSelect} className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-[13px] ${selected ? "border border-cyan-300/40 bg-cyan-300/10 text-[var(--ap-cyan)]" : "ap-cta"}`}>{selected ? <Check size={15} /> : null}{selected ? "已选择该 Agent" : "选择该 Agent"}</button></div>
-      <div className="grid gap-6 p-6 xl:grid-cols-[1.05fr_1.35fr_.8fr]">
-        <OverviewSection icon={Target} title="任务理解"><p>{agent.name} 将围绕“{analysis.summary.replace(/\n/g, " ")}”执行，并以已确认的交付物和验收标准作为范围边界。</p><div className="mt-3 flex flex-wrap gap-2">{analysis.tags.map((tag) => <Pill key={tag} tone="violet">{tag}</Pill>)}</div></OverviewSection>
-        <OverviewSection icon={Route} title="执行步骤"><ol className="space-y-3">{milestones.map((item, index) => <li key={item} className="flex gap-3"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-cyan-300/10 text-[11px] text-[var(--ap-cyan)]">{index + 1}</span><span>{item}</span></li>)}</ol></OverviewSection>
-        <OverviewSection icon={FileCheck2} title="产出与报价"><ul className="space-y-2">{analysis.deliverables.slice(0, 4).map((item) => <li key={item} className="flex items-start gap-2"><CheckCircle2 size={13} className="mt-0.5 shrink-0 text-[var(--ap-success)]" />{item}</li>)}</ul><div className="mt-4 rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,.4)] p-3"><div className="flex justify-between"><span className="text-[var(--ap-muted)]">报价</span><span className="text-[var(--ap-cyan)]">{agent.price} USDC</span></div><div className="mt-2 flex justify-between"><span className="text-[var(--ap-muted)]">周期</span><span>{agent.eta}</span></div></div></OverviewSection>
-      </div>
-      <div className="border-t border-[var(--ap-border)] px-6 py-4"><InfoNote tone="amber"><span className="inline-flex items-start gap-2"><Info size={14} className="mt-0.5 shrink-0" />该概览用于候选比较，最终执行范围以托管前确认的任务、Agent 报价和验收标准为准。</span></InfoNote></div>
+    <Panel strong className="p-5">
+      <div className="flex flex-wrap items-center justify-between gap-4"><div><div className="text-[11px] text-[var(--ap-muted)]">选择状态</div><div role="status" className="mt-1 text-[14px] text-[var(--ap-text)]">{reservationStatus ? `${reservationStatus}${txHash ? ` · ${short(txHash)}` : ""}` : selected ? `已选择 ${candidates.find((item)=>item.agentId===selected)?.name}` : "请选择一个有效概览"}</div></div><button type="button" disabled={!selected || busy || ["confirmed","failed","expired","orphaned"].includes(reservationStatus ?? "")} onClick={() => void submit()} className="ap-cta inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-[14px] disabled:opacity-40"><ShieldCheck size={16} />{busy ? "处理中…" : txHash ? "检查链上确认" : intent ? "提交链上选择" : "预留并选择 Agent"}</button></div>
+      {error ? <div role="alert" className="mt-4 rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-[12px] text-amber-100">{error}</div> : null}
+      <div className="mt-4 flex items-start gap-2 text-[11px] text-[var(--ap-muted)]"><Sparkles size={14} className="mt-0.5" />重复点击复用同一操作 ID、预留和交易哈希；只有权威 canonical 事件确认后才创建 assignment。</div>
     </Panel>
-  );
+    <GhostButton icon={Clock} onClick={() => navigate("/publisher/tasks")}>返回任务列表</GhostButton>
+  </Page>;
 }
 
-function rankAgents(analysis: TaskAnalysis): RecommendedAgent[] {
-  return AGENTS.map((agent) => {
-    let score = agent.match;
-    const reasons = [...agent.reasons];
-    if (agent.category === analysis.category) { score += 3; reasons.unshift("任务类型与核心能力直接匹配"); } else score -= 4;
-    if (agent.price <= analysis.budget) { score += 1; reasons.unshift("套餐报价符合当前建议预算"); } else score -= Math.min(12, Math.ceil((agent.price - analysis.budget) / 100));
-    const etaDays = Number(agent.eta.match(/[\d.]+/)?.[0] ?? 0);
-    if (etaDays && etaDays <= analysis.deliveryDays) { score += 1; reasons.unshift("预计交付周期满足当前要求"); } else score -= 3;
-    return { ...agent, match: Math.max(60, Math.min(100, score)), reasons: [...new Set(reasons)] };
-  }).sort((left, right) => right.match - left.match);
-}
-
-function buildMilestones(agent: RecommendedAgent, analysis: TaskAnalysis) {
-  return [
-    `确认输入资料、数据范围和 ${analysis.acceptanceCriteria.length} 项验收标准`,
-    `由 ${agent.name} 按“${analysis.category}”能力链执行并进行中间质量校验`,
-    `在 ${agent.eta} 内提交 ${analysis.deliverables.length} 类交付物与可复验说明`,
-  ];
-}
-
-function OverviewSection({ icon: Icon, title, children }: { icon: typeof Target; title: string; children: React.ReactNode }) { return <section><div className="mb-3 flex items-center gap-2 text-[13px] text-[var(--ap-text)]"><Icon size={15} className="text-[var(--ap-cyan)]" />{title}</div><div className="text-[12px] leading-relaxed text-[var(--ap-text-2)]">{children}</div></section>; }
-function Metric({ icon: Icon, label, value }: { icon: typeof Clock; label: string; value: string }) { return <div className="rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,.36)] px-3 py-2.5"><span className="flex items-center gap-1.5 text-[10px] text-[var(--ap-muted)]"><Icon size={12} className="text-[var(--ap-cyan)]" />{label}</span><span className="mt-1 block text-[12px] text-[var(--ap-text)]">{value}</span></div>; }
-function FlowStep({ icon: Icon, label, active = false, done = false }: { icon: typeof Sparkles; label: string; active?: boolean; done?: boolean }) { return <div className={`flex shrink-0 items-center gap-2 text-[12px] ${active ? "text-[var(--ap-cyan)]" : "text-[var(--ap-muted)]"}`}><span className={`grid h-7 w-7 place-items-center rounded-full border ${active ? "border-cyan-300/40 bg-cyan-300/10" : "border-[var(--ap-border)]"}`}>{done ? <Check size={13} /> : <Icon size={13} />}</span><span className="hidden sm:inline">{label}</span></div>; }
+function message(cause: unknown) { return cause instanceof Error ? cause.message : "读取匹配流程失败，请重试。"; }
+function short(value: string) { return value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value; }
+function duration(seconds: number) { const hours=Math.ceil(seconds/3600); return hours<24?`${hours} 小时`:`${Math.ceil(hours/24)} 天`; }
+type CandidateOverview = NonNullable<NonNullable<MatchingView["snapshot"]>["candidates"][number]["overview"]>;
+function overviewLabel(value: CandidateOverview | undefined) { if (!value) return "概览待创建"; if(value.status==="valid"&&value.billingStatus==="captured")return "概览有效"; return `${value.status} / ${value.billingStatus}`; }
+function Audit({label,value}:{label:string;value:string}) { return <div className="rounded-xl border border-[var(--ap-border)] p-3"><dt className="text-[10px] text-[var(--ap-muted)]">{label}</dt><dd className="mt-1 text-[13px] text-[var(--ap-text)]">{value}</dd></div>; }
+function Metric({label,value}:{label:string;value:number}) { return <div className="rounded-lg bg-white/5 p-2"><dt className="text-[var(--ap-muted)]">{label}</dt><dd className="mt-1 text-[var(--ap-text)]">{value}</dd></div>; }
+function Line({label,value}:{label:string;value:string}) { return <div className="flex justify-between"><span className="text-[var(--ap-muted)]">{label}</span><span>{value}</span></div>; }

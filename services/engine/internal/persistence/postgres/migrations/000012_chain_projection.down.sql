@@ -1,0 +1,2 @@
+-- Chain blocks, transactions, events, state transitions and reconciliation evidence
+-- are audit history. Rollback is intentionally non-destructive.

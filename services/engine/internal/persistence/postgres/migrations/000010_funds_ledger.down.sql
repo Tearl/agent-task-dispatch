@@ -1,0 +1,3 @@
+-- Fund accounts, allocations, journals, and entries are settlement and dispute
+-- evidence. Rollback intentionally preserves all tables and rows; application
+-- compatibility is rolled back separately.

@@ -309,6 +309,8 @@ func validOverviewSpec() Spec {
 		Stage:              StageOverview,
 		TaskID:             "task-1",
 		TaskSpecHash:       "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		InputRef:           "brief://task-1/spec-1",
+		InputHash:          "sha256:3333333333333333333333333333333333333333333333333333333333333333",
 		AgentID:            "agent-1",
 		AgentEndpoint:      "https://agent.example",
 		ResponsibilityCode: "overview_candidate",

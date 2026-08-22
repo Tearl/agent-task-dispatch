@@ -69,6 +69,9 @@ type FormalBinding struct {
 	Version          int    `json:"version"`
 	AggregateVersion int64  `json:"aggregateVersion"`
 	WorkNonce        int64  `json:"workNonce"`
+	ScopeSpecHash    string `json:"scopeSpecHash,omitempty"`
+	ChangeOrderID    string `json:"changeOrderId,omitempty"`
+	Responsibility   string `json:"responsibility,omitempty"`
 }
 
 type Spec struct {
@@ -76,6 +79,8 @@ type Spec struct {
 	Stage              string           `json:"stage"`
 	TaskID             string           `json:"taskId"`
 	TaskSpecHash       string           `json:"taskSpecHash"`
+	InputRef           string           `json:"inputRef"`
+	InputHash          string           `json:"inputHash"`
 	AgentID            string           `json:"agentId"`
 	AgentEndpoint      string           `json:"agentEndpoint"`
 	ResponsibilityCode string           `json:"responsibilityCode"`
@@ -124,6 +129,8 @@ type Envelope struct {
 	AgentID            string           `json:"agentId"`
 	TaskID             string           `json:"taskId"`
 	TaskSpecHash       string           `json:"taskSpecHash"`
+	InputRef           string           `json:"inputRef"`
+	InputHash          string           `json:"inputHash"`
 	ResponsibilityCode string           `json:"responsibilityCode"`
 	CostCap            string           `json:"costCap"`
 	ToolPolicy         ToolPolicy       `json:"toolPolicy"`

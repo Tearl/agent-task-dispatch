@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    margin: 0;
+    background-color: #050714;
+    color: white;
+    font-family: system-ui, -apple-system, sans-serif;
+    overflow-x: hidden;
+  }
+}
+
+@layer utilities {
+  .bg-grid-pattern {
+    background-image: 
+      linear-gradient(rgba(0, 240, 255, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 240, 255, 0.05) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  .clip-notch {
+    clip-path: polygon(
+      0% 5%, 5% 0%, 95% 0%, 100% 5%, 
+      100% 95%, 95% 100%, 5% 100%, 0% 95%
+    );
+  }
+
+  .glow-text {
+    text-shadow: 0 0 10px currentColor;
+  }
+}

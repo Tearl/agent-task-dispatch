@@ -11,7 +11,11 @@ import (
 	"github.com/example/agent-platform/engine/internal/agent"
 	"github.com/example/agent-platform/engine/internal/auth"
 	"github.com/example/agent-platform/engine/internal/credential"
+	"github.com/example/agent-platform/engine/internal/delivery"
+	"github.com/example/agent-platform/engine/internal/financeview"
+	"github.com/example/agent-platform/engine/internal/matchingview"
 	"github.com/example/agent-platform/engine/internal/persistence"
+	"github.com/example/agent-platform/engine/internal/selection"
 	enginetask "github.com/example/agent-platform/engine/internal/task"
 )
 
@@ -21,6 +25,10 @@ type handler struct {
 	agents      *agent.Service
 	credentials *credential.Service
 	tasks       *enginetask.Service
+	selections  *selection.Service
+	finance     *financeview.Service
+	matching    *matchingview.Service
+	deliveries  *delivery.Service
 }
 
 type nonceRequest struct {
@@ -54,7 +62,23 @@ func NewHandlerWithCredentials(logger *slog.Logger, authService *auth.Service, a
 }
 
 func NewHandlerWithTaskService(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service) http.Handler {
-	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService, tasks: taskService}
+	return NewHandlerWithSelection(logger, authService, agentService, credentialService, taskService, nil)
+}
+
+func NewHandlerWithSelection(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service) http.Handler {
+	return NewHandlerWithFinance(logger, authService, agentService, credentialService, taskService, selectionService, nil)
+}
+
+func NewHandlerWithFinance(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service) http.Handler {
+	return NewHandlerWithMatchingView(logger, authService, agentService, credentialService, taskService, selectionService, financeService, nil)
+}
+
+func NewHandlerWithMatchingView(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service, matchingService *matchingview.Service) http.Handler {
+	return NewHandlerWithDelivery(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingService, nil)
+}
+
+func NewHandlerWithDelivery(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service, matchingService *matchingview.Service, deliveryService *delivery.Service) http.Handler {
+	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService, tasks: taskService, selections: selectionService, finance: financeService, matching: matchingService, deliveries: deliveryService}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /v1/auth/nonce", h.createNonce)
@@ -83,8 +107,324 @@ func NewHandlerWithTaskService(logger *slog.Logger, authService *auth.Service, a
 		mux.HandleFunc("GET /v1/tasks/{id}/available-actions", h.availableTaskActions)
 		mux.HandleFunc("GET /v1/tasks/{id}/view", h.taskView)
 	}
+	if selectionService != nil {
+		mux.HandleFunc("POST /v1/tasks/{id}/selection-reservations", h.reserveSelection)
+		mux.HandleFunc("GET /v1/tasks/{id}/selection-reservations/{reservationId}", h.getSelection)
+		mux.HandleFunc("POST /v1/tasks/{id}/selection-reservations/{reservationId}/reconcile", h.reconcileSelection)
+	}
+	if financeService != nil {
+		mux.HandleFunc("GET /v1/finance/publisher", h.publisherFinance)
+		mux.HandleFunc("GET /v1/finance/agent", h.agentFinance)
+		mux.HandleFunc("GET /v1/finance/reconciliation", h.reconciliationFinance)
+	}
+	if matchingService != nil {
+		mux.HandleFunc("GET /v1/tasks/{id}/matching-view", h.matchingView)
+	}
+	if deliveryService != nil {
+		mux.HandleFunc("POST /v1/tasks/{id}/formal-packages/start", h.startFormalVersion)
+		mux.HandleFunc("POST /v1/tasks/{id}/formal-feedback", h.submitFormalFeedback)
+		mux.HandleFunc("GET /v1/tasks/{id}/formal-package", h.formalPackage)
+		mux.HandleFunc("POST /v1/tasks/{id}/formal-change-orders", h.proposeFormalChangeOrder)
+		mux.HandleFunc("POST /v1/tasks/{id}/formal-change-orders/{changeOrderId}/decision", h.decideFormalChangeOrder)
+		mux.HandleFunc("POST /v1/tasks/{id}/formal-change-orders/{changeOrderId}/accept", h.acceptFormalChangeOrder)
+		mux.HandleFunc("POST /v1/tasks/{id}/formal-change-orders/{changeOrderId}/activate", h.activateFormalChangeOrder)
+	}
 
 	return requestLogging(logger, mux)
+}
+
+func (h *handler) proposeFormalChangeOrder(writer http.ResponseWriter, request *http.Request) {
+	var input delivery.ProposeChangeOrderInput
+	if decodeJSON(writer, request, 512_000, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, replay, err := h.deliveries.ProposeChangeOrder(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeDeliveryError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) decideFormalChangeOrder(writer http.ResponseWriter, request *http.Request) {
+	var input delivery.DecideChangeOrderInput
+	if decodeJSON(writer, request, 16_384, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, replay, err := h.deliveries.DecideChangeOrder(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), request.PathValue("changeOrderId"), input)
+	if err != nil {
+		h.writeDeliveryError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) acceptFormalChangeOrder(writer http.ResponseWriter, request *http.Request) {
+	h.changeOrderVersionTransition(writer, request, "accept")
+}
+func (h *handler) activateFormalChangeOrder(writer http.ResponseWriter, request *http.Request) {
+	h.changeOrderVersionTransition(writer, request, "activate")
+}
+func (h *handler) changeOrderVersionTransition(writer http.ResponseWriter, request *http.Request, operation string) {
+	var input delivery.ChangeOrderVersionInput
+	if decodeJSON(writer, request, 8_192, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	var value delivery.ChangeOrder
+	var replay bool
+	var err error
+	if operation == "accept" {
+		value, replay, err = h.deliveries.AcceptChangeOrder(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), request.PathValue("changeOrderId"), input)
+	} else {
+		value, replay, err = h.deliveries.ActivateChangeOrder(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), request.PathValue("changeOrderId"), input)
+	}
+	if err != nil {
+		h.writeDeliveryError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) submitFormalFeedback(writer http.ResponseWriter, request *http.Request) {
+	var input delivery.FeedbackInput
+	if decodeJSON(writer, request, 512_000, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, replay, err := h.deliveries.SubmitFeedback(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeDeliveryError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) startFormalVersion(writer http.ResponseWriter, request *http.Request) {
+	var input delivery.StartInput
+	if decodeJSON(writer, request, 8_192, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, replay, err := h.deliveries.Start(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeDeliveryError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) formalPackage(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.deliveries.Get(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeDeliveryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) writeDeliveryError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, delivery.ErrForbidden):
+		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "forbidden"})
+	case errors.Is(err, delivery.ErrNotFound):
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "formal package not found"})
+	case errors.Is(err, delivery.ErrInvalidInput):
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid formal delivery request"})
+	case errors.Is(err, delivery.ErrDependencyPending):
+		writeJSON(writer, http.StatusTooEarly, map[string]string{"error": "formal revision authorization pending"})
+	case errors.Is(err, delivery.ErrInvalidState), errors.Is(err, delivery.ErrStaleVersion), errors.Is(err, delivery.ErrContentConflict), errors.Is(err, persistence.ErrIdempotencyConflict):
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "formal delivery conflict"})
+	default:
+		h.logger.Error("formal delivery operation failed", "error", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "formal delivery service temporarily unavailable"})
+	}
+}
+
+func (h *handler) matchingView(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.matching.Get(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, matchingview.ErrForbidden):
+			writeJSON(writer, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		case errors.Is(err, matchingview.ErrNotFound):
+			writeJSON(writer, http.StatusNotFound, map[string]string{"error": "matching task not found"})
+		default:
+			h.logger.Error("matching view failed", "error", err)
+			writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "matching view temporarily unavailable"})
+		}
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) publisherFinance(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.finance.Publisher(request.Context(), session)
+	if err != nil {
+		h.writeFinanceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) agentFinance(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.finance.Agent(request.Context(), session)
+	if err != nil {
+		h.writeFinanceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) reconciliationFinance(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.finance.Reconciliation(request.Context(), session)
+	if err != nil {
+		h.writeFinanceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) writeFinanceError(writer http.ResponseWriter, err error) {
+	if errors.Is(err, financeview.ErrForbidden) {
+		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+	h.logger.Error("finance view failed", "error", err)
+	writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "finance view temporarily unavailable"})
+}
+
+func (h *handler) reserveSelection(writer http.ResponseWriter, request *http.Request) {
+	var input selection.Request
+	if decodeJSON(writer, request, 4_096, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, replay, err := h.selections.Reserve(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeSelectionError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) getSelection(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.selections.Get(request.Context(), session, request.PathValue("id"), request.PathValue("reservationId"))
+	if err != nil {
+		h.writeSelectionError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) reconcileSelection(writer http.ResponseWriter, request *http.Request) {
+	var input selection.ReconcileRequest
+	if decodeJSON(writer, request, 4_096, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	reservation, assignment, err := h.selections.Reconcile(request.Context(), session, request.PathValue("id"), request.PathValue("reservationId"), input)
+	if err != nil {
+		h.writeSelectionError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"reservation": reservation, "assignment": assignment})
+}
+
+func (h *handler) writeSelectionError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, selection.ErrForbidden):
+		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "forbidden"})
+	case errors.Is(err, selection.ErrNotFound):
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "selection reservation not found"})
+	case errors.Is(err, selection.ErrInvalidInput):
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid selection request"})
+	case errors.Is(err, selection.ErrDependencyPending):
+		writeJSON(writer, http.StatusTooEarly, map[string]string{"error": "chain confirmation pending"})
+	case errors.Is(err, selection.ErrInvalidState), errors.Is(err, selection.ErrContentConflict), errors.Is(err, selection.ErrProofMismatch), errors.Is(err, selection.ErrCapacityUnavailable), errors.Is(err, persistence.ErrIdempotencyConflict):
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "selection conflict"})
+	default:
+		h.logger.Error("selection operation failed", "error", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "selection service temporarily unavailable"})
+	}
 }
 
 func (h *handler) availableAgentActions(writer http.ResponseWriter, request *http.Request) {

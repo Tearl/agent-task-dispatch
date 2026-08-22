@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ActionBlockedError, authenticateWallet, clientRolesForEngineRoles, createAndPublishTask, onboardAgent, requireAllowed, revokeSession } from "./platform-api.ts";
+import { ActionBlockedError, authenticateWallet, clientRolesForEngineRoles, createAndPublishTask, onboardAgent, readAgentFinance, readPublisherFinance, readReconciliationFinance, requireAllowed, revokeSession, submitSelectionTransaction, type SelectionIntent } from "./platform-api.ts";
 
 test("wallet authentication requests a nonce, signs it, and creates an HttpOnly-backed session", async () => {
   const walletCalls: unknown[] = [];
@@ -20,8 +20,35 @@ test("wallet authentication requests a nonce, signs it, and creates an HttpOnly-
 });
 
 test("client roles are derived only from authoritative session roles", () => {
-  assert.deepEqual(clientRolesForEngineRoles(["publisher", "agent_provider", "admin"]), ["publisher", "agent"]);
+  assert.deepEqual(clientRolesForEngineRoles(["publisher", "agent_provider", "admin"]), ["publisher", "agent", "admin"]);
   assert.deepEqual(clientRolesForEngineRoles([]), []);
+});
+
+test("finance reads stay same-origin and preserve orthogonal presentation states", async () => {
+  const calls:string[]=[];
+  const request:typeof fetch=async(input)=>{calls.push(String(input));return Response.json({asOf:"2026-08-22T00:00:00Z",totals:{},tasks:[{chain:{submission:"submitted",confirmation:"pending"},refundStatus:"available",terminal:false}],ledger:[],positions:[],records:[],runs:[]})};
+  const publisher=await readPublisherFinance(request);
+  await readAgentFinance(request); await readReconciliationFinance(request);
+  assert.deepEqual(calls,["/api/finance/publisher","/api/finance/agent","/api/finance/reconciliation"]);
+  assert.deepEqual(publisher.tasks[0]?.chain,{submission:"submitted",confirmation:"pending"});
+  assert.equal(publisher.tasks[0]?.refundStatus,"available"); assert.equal(publisher.tasks[0]?.terminal,false);
+});
+
+test("selection transaction encodes the frozen proof and never asks the wallet to sign new fields", async () => {
+  const calls: unknown[] = [];
+  const word = `0x${"11".repeat(32)}`;
+  const intent: SelectionIntent = { reservation: { id: "sha256:r", publisherWallet: "0x2222222222222222222222222222222222222222", taskId: "task-1", batchId: "sha256:b", slotId: "sha256:s", agentId: "agent-1", chainId: "1", contractAddress: "0x3333333333333333333333333333333333333333", formalPayable: "90", status: "reserved", proof: { taskId: word, assignmentId: word, agentController: "0x4444444444444444444444444444444444444444", payout: "0x5555555555555555555555555555555555555555", overviewId: word, allocationId: word, quoteHash: word, taskSpecHash: word, matchRevision: 1, priceVersion: 1, overviewPrice: "10", formalGrossPrice: "100", overviewCredit: "10", policyHash: word, nonce: word, deadline: 2_000_000_000 } }, platformSignature: `0x${"66".repeat(65)}` };
+  const hash = await submitSelectionTransaction({ request: async (input) => { calls.push(input); return input.method === "eth_chainId" ? "0x1" : `0x${"77".repeat(32)}`; } }, intent);
+  assert.equal(hash, `0x${"77".repeat(32)}`);
+  assert.deepEqual(calls[0], { method: "eth_chainId" });
+  const call = calls[1] as { method: string; params: Array<{ data: string; to: string }> };
+  assert.equal(call.method, "eth_sendTransaction");
+  assert.equal(call.params[0]?.to, intent.reservation.contractAddress);
+  assert.match(call.params[0]?.data ?? "", /^0xa2dfc191[0-9a-f]+$/);
+  const data = call.params[0]?.data ?? "";
+  assert.equal(data.slice(10 + 16 * 64, 10 + 17 * 64), (17 * 32).toString(16).padStart(64, "0"));
+  assert.equal(data.slice(10 + 17 * 64, 10 + 18 * 64), (65).toString(16).padStart(64, "0"));
+  assert.equal(data.length, 2 + 8 + 21 * 64);
 });
 
 test("wallet errors stop before nonce issuance", async () => {

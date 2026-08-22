@@ -421,7 +421,8 @@ function recommend(task, revision, policy):
 | FairShuffle | `fair-shuffle-v1` 已实现 | 企业关联账户仍需统一服务商主体模型 |
 | 推荐 UI | 原型可用 | 当前使用静态数据和浏览器本地排序 |
 | Agent 执行协议 | `agent-execution-v1` 已实现 | 已覆盖 HTTPS 调用、签名回调、逻辑/网络尝试分层、成本停止与 fencing；生产组装由概览编排接入 |
-| 审计与可复现 | 匹配快照与执行回调证据已实现 | 概览客观校验、allocation 结算与选择审计由后续任务补齐 |
+| 概览编排 | `overview-orchestration-v1` 已实现领域与持久化层 | 已覆盖三路 fan-out、脱敏简报引用、客观校验、计费投影和一次补位，并已接入 T-401 `AllocationGateway` |
+| 审计与可复现 | 匹配快照、执行回调、概览事件和 allocation 复式账本已实现 | 选择审计由 T-205 补齐 |
 
 ## 10. 实施建议
 
@@ -431,9 +432,10 @@ function recommend(task, revision, policy):
 2. Engine `internal/matching` 已保持过滤、召回、评分、调整、洗牌和仓储接口分离。
 3. PostgreSQL 已原子保存匹配修订、完整候选和展示快照；Redis 只可做缓存或协调。
 4. T-203 已实现 `agent-execution-v1`、签名回调、成本上限、逻辑执行/网络尝试分离与 PostgreSQL fencing 租约语义。
-5. 下一步由 T-204 把当前匹配快照、脱敏概览简报、独立 allocation、统一截止时间和客观结果校验接入执行协议。
-6. BFF 只聚合并脱敏 Engine 快照；删除 Web 中的权威评分判断。
-7. 模型调整以 feature flag 单独上线，先影子运行，再依据离线指标、公平性护栏和回滚阈值启用。
+5. T-204 已把当前匹配快照、脱敏概览引用、独立 allocation 端口、统一截止时间、客观结果校验和一次确定性补位接入执行协议。
+6. T-401 已实现隔离 allocation、`double-entry-v1` 复式账本和 `AllocationGateway` 适配；生产资金到账仍由 T-402 的权威链上事件投影驱动。
+7. BFF 只聚合并脱敏 Engine 快照；删除 Web 中的权威评分判断。
+8. 模型调整以 feature flag 单独上线，先影子运行，再依据离线指标、公平性护栏和回滚阈值启用。
 
 ## 11. 必须覆盖的测试
 

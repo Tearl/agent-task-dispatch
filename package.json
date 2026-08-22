@@ -2,6 +2,7 @@
   "name": "agent-platform",
   "private": true,
   "workspaces": [
+    "agents/*",
     "apps/*",
     "packages/*"
   ],

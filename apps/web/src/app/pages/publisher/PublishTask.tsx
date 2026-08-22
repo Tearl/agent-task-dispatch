@@ -1,10 +1,9 @@
 import { useRef, useState } from 'react';
-import { useLocation } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { ShieldCheck, Lock, Info, FileCheck2 } from 'lucide-react';
 import { Page } from '../../components/AppShell';
 import { PageHeader, Panel, SectionTitle, CtaButton, GhostButton, InfoNote, Pill } from '../../components/kit/primitives';
-import { AGENTS } from '../../lib/mock';
 import type { PublisherFlowState } from '../../lib/publisher-flow';
 import { createAndPublishTask, validateTaskPublishInput, type TaskPublishInput } from '../../lib/platform-api';
 
@@ -12,12 +11,12 @@ const CATEGORIES = ['数据分析', '翻译', '图像生成', '代码开发', '�
 
 export default function PublishTask() {
   const location = useLocation();
+  const navigate = useNavigate();
   const flowState = (location.state ?? {}) as PublisherFlowState;
   const analysis = flowState.analysis;
-  const selectedAgent = AGENTS.find((agent) => agent.id === flowState.selectedAgentId);
   const [title, setTitle] = useState(analysis?.title ?? '');
   const [cat, setCat] = useState(analysis?.category ?? '数据分析');
-  const [amount, setAmount] = useState(String(Math.max(analysis?.budget ?? 0, selectedAgent?.price ?? 1200)));
+  const [amount, setAmount] = useState(String(analysis?.budget ?? 1200));
   const [desc, setDesc] = useState(
     analysis
       ? `${analysis.summary}\n\n交付物：\n${analysis.deliverables.map((item) => `- ${item}`).join('\n')}`
@@ -76,15 +75,6 @@ export default function PublishTask() {
       <div className="grid gap-6 lg:grid-cols-[1.5fr_1fr]">
         <Panel className="p-6 space-y-5">
           <SectionTitle>任务信息</SectionTitle>
-          {selectedAgent ? (
-            <div className="flex items-center justify-between rounded-xl border border-[var(--ap-border-strong)] bg-[var(--ap-cyan-soft)] px-4 py-3">
-              <div>
-                <div className="text-[11px] text-[var(--ap-muted)]">已选择推荐 Agent</div>
-                <div className="mt-1 text-[14px] text-[var(--ap-cyan)]">{selectedAgent.name} · 匹配分 {selectedAgent.match}</div>
-              </div>
-              <Pill tone="green">待发布规格</Pill>
-            </div>
-          ) : null}
           <div>
             <label htmlFor="task-title" className="text-[13px] text-[var(--ap-muted)]">任务标题</label>
             <input
@@ -170,7 +160,7 @@ export default function PublishTask() {
               <Info size={13} /> UI 仅执行 Engine 返回的 allowed 操作，不自行推导发布资格
             </p>
             {error ? <div className="mt-4 space-y-3"><div role="alert" className="rounded-xl border border-rose-300/30 bg-rose-300/10 px-4 py-3 text-[13px] text-rose-100">{error}</div>{operationId.current ? <><p className="text-[12px] text-[var(--ap-muted)]">为保证幂等重试，当前输入已锁定。可原样重试，或放弃本次操作后修改。</p><GhostButton onClick={resetAttempt}>放弃本次操作并重新编辑</GhostButton></> : null}</div> : null}
-            {publication ? <div role="status" className="mt-4 space-y-1 rounded-xl border border-emerald-300/30 bg-emerald-300/10 px-4 py-3 text-[12px] text-emerald-100"><div>任务 {publication.taskId} 已发布</div><div className="break-all">规格：{publication.specHash}</div><div className="break-all">验收：{publication.acceptanceHash}</div></div> : null}
+            {publication ? <div role="status" className="mt-4 space-y-3 rounded-xl border border-emerald-300/30 bg-emerald-300/10 px-4 py-3 text-[12px] text-emerald-100"><div><div>任务 {publication.taskId} 已发布</div><div className="break-all">规格：{publication.specHash}</div><div className="break-all">验收：{publication.acceptanceHash}</div></div><GhostButton onClick={() => navigate(`/publisher/recommendations?taskId=${encodeURIComponent(publication.taskId)}`, { state: { ...flowState, taskId: publication.taskId } satisfies PublisherFlowState })}>进入权威匹配</GhostButton></div> : null}
           </Panel>
 
           <Panel className="p-5 space-y-3">

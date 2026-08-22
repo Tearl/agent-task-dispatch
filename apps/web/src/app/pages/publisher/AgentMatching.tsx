@@ -49,7 +49,7 @@ export default function AgentMatching() {
   const [message, setMessage] = useState("");
   const [conversation, setConversation] = useState<ConversationMessage[]>([
     { id: 1, role: "user", content: prompt },
-    { id: 2, role: "assistant", content: "已生成第一版任务分析。你可以继续补充要求，确认后再进入 Agent 推荐。" },
+    { id: 2, role: "assistant", content: "已生成第一版任务分析。你可以继续补充要求，确认后发布不可变任务规格。" },
   ]);
 
   const startEditingAnalysis = () => {
@@ -92,8 +92,8 @@ export default function AgentMatching() {
     setMessage("");
   };
 
-  const continueToRecommendations = () => {
-    navigate("/publisher/recommendations", {
+  const continueToPublication = () => {
+    navigate("/publisher/publish", {
       state: { ...flowState, prompt, analysis, analysisRevision, selectedAgentId: undefined } satisfies PublisherFlowState,
     });
   };
@@ -102,16 +102,16 @@ export default function AgentMatching() {
     <Page>
       <PageHeader
         title="AI 任务分析"
-        subtitle="通过持续对话完善任务草稿，确认任务范围后再进入 Agent 推荐"
+        subtitle="通过持续对话完善任务草稿，确认后先发布不可变规格，再读取权威匹配"
         actions={<GhostButton icon={PencilLine} onClick={() => navigate("/publisher")}>修改原始需求</GhostButton>}
       />
 
       <div className="flex items-center gap-3 rounded-2xl border border-[var(--ap-border)] bg-[rgba(10,18,38,0.45)] px-4 py-3">
         <FlowStep active icon={Sparkles} label="AI 任务分析" />
         <span className="h-px flex-1 bg-[var(--ap-border-strong)]" />
-        <FlowStep icon={Sparkles} label="Agent 推荐" />
+        <FlowStep icon={FileCheck2} label="发布规格" />
         <span className="h-px flex-1 bg-[var(--ap-border)]" />
-        <FlowStep icon={ShieldCheck} label="确认并托管" />
+        <FlowStep icon={ShieldCheck} label="匹配与选择" />
       </div>
 
       <Panel strong className="overflow-hidden">
@@ -174,8 +174,8 @@ export default function AgentMatching() {
             <div className="text-[11px] text-[var(--ap-muted)]">即将锁定</div>
             <div className="mt-1 truncate text-[14px] text-[var(--ap-text)]">任务分析 R{analysisRevision}</div>
           </div>
-          <button type="button" disabled={isEditingAnalysis} onClick={continueToRecommendations} className="ap-cta inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-[14px] disabled:cursor-not-allowed disabled:opacity-40">
-            确认任务分析，查看 Agent 推荐 <ArrowRight size={16} />
+          <button type="button" disabled={isEditingAnalysis} onClick={continueToPublication} className="ap-cta inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-[14px] disabled:cursor-not-allowed disabled:opacity-40">
+            确认任务分析，发布任务规格 <ArrowRight size={16} />
           </button>
         </div>
       </Panel>
@@ -223,7 +223,7 @@ function AnalysisEditor({ draft, onChange, onCancel, onSave }: { draft: TaskAnal
       <div className="grid gap-4 sm:grid-cols-2"><EditField label="建议预算"><div className="relative"><input type="number" min="1" value={draft.budget} onChange={(event) => update("budget", Number(event.target.value))} className="analysis-edit-input pr-14" /><span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-[var(--ap-muted)]">USDC</span></div></EditField><EditField label="预计周期"><div className="relative"><input type="number" min="1" value={draft.deliveryDays} onChange={(event) => update("deliveryDays", Number(event.target.value))} className="analysis-edit-input pr-8" /><span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-[var(--ap-muted)]">天</span></div></EditField></div>
       <div className="grid gap-4 lg:grid-cols-2"><EditField label="预期交付物（一行一项）"><textarea value={draft.deliverables.join("\n")} onChange={(event) => update("deliverables", lines(event.target.value))} rows={5} className="analysis-edit-input resize-none" /></EditField><EditField label="验收标准（一行一项）"><textarea value={draft.acceptanceCriteria.join("\n")} onChange={(event) => update("acceptanceCriteria", lines(event.target.value))} rows={5} className="analysis-edit-input resize-none" /></EditField></div>
       <div className="grid gap-4 lg:grid-cols-2"><EditField label="能力标签（使用逗号分隔）"><input value={draft.tags.join("，")} onChange={(event) => update("tags", event.target.value.split(/[,，]/).map((item) => item.trim()).filter(Boolean))} className="analysis-edit-input" /></EditField><EditField label="风险与待确认项"><textarea value={draft.risk} onChange={(event) => update("risk", event.target.value)} rows={2} className="analysis-edit-input resize-none" /></EditField></div>
-      <div className="flex justify-end gap-2 border-t border-[var(--ap-border)] pt-4"><GhostButton icon={X} onClick={onCancel}>取消</GhostButton><button type="button" onClick={onSave} className="ap-cta inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-[13px]"><Save size={15} />保存并刷新推荐</button></div>
+      <div className="flex justify-end gap-2 border-t border-[var(--ap-border)] pt-4"><GhostButton icon={X} onClick={onCancel}>取消</GhostButton><button type="button" onClick={onSave} className="ap-cta inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-[13px]"><Save size={15} />保存分析</button></div>
     </div>
   );
 }

@@ -31,7 +31,7 @@
   - Risk: high
   - Verification: 覆盖协议、签名回调、成本上限、租约 fencing、取消、重投与迟到结果
 
-- [ ] [T-204] [pending] 实现概览编排、校验、计费结果与补位
+- [x] [T-204] [done] 实现概览编排、校验、计费结果与补位
   - Repository: .
   - Covers: F-204, F-205, AC-203, AC-204
   - Depends on: T-203, T-401
@@ -39,7 +39,7 @@
   - Risk: high
   - Verification: 三路 fan-out 测试覆盖截止时间、只读策略、客观有效性、重试、补位与 allocation 唯一性
 
-- [ ] [T-205] [pending] 实现选择预留与链上确认 assignment
+- [x] [T-205] [done] 实现选择预留与链上确认 assignment
   - Repository: .
   - Covers: F-206, AC-205
   - Depends on: T-204, T-403
@@ -47,7 +47,7 @@
   - Risk: critical
   - Verification: Engine/合约集成测试覆盖并发选择、证明不匹配、重放、抵扣、净额锁定与预留释放
 
-- [ ] [T-206] [pending] 交付匹配、概览比较与选择 UI
+- [x] [T-206] [done] 交付匹配、概览比较与选择 UI
   - Repository: .
   - Covers: F-203, F-204, F-206, AC-202, AC-203, AC-205
   - Depends on: T-202, T-204, T-205

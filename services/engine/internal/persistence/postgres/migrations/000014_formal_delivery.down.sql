@@ -1,0 +1,3 @@
+-- Formal scope, versions and billing results are immutable business history.
+-- Rollback is intentionally non-destructive; disable writers and deploy a
+-- forward migration when the formal-delivery writer must be rolled back.

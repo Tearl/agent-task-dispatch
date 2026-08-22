@@ -1,0 +1,3 @@
+-- Overview batches, validation decisions, billing projections, and replacement
+-- events are settlement/dispute evidence. Rollback intentionally preserves all
+-- tables and rows; application compatibility is rolled back separately.

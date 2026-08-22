@@ -1,129 +1,31 @@
-import { ArrowDownToLine, Coins, Info, Link2, Sparkles, Wallet } from "lucide-react";
-import { useState } from "react";
-import { toast } from "sonner";
+import { Coins, Info, Link2, RefreshCw, Wallet } from "lucide-react";
+import { useCallback } from "react";
 
 import { Page } from "../../components/AppShell";
-import {
-  CtaButton,
-  GhostButton,
-  InfoNote,
-  PageHeader,
-  Panel,
-  Pill,
-  SectionTitle,
-  StatCard,
-} from "../../components/kit/primitives";
-
-const RECORDS = [
-  { id: "SET-330", task: "TSK-2020 · 合约审计", amount: 2377, time: "08-12 09:33", tx: "0x8b…7c" },
-  { id: "SET-322", task: "TSK-1998 · 数据抓取", amount: 1098, time: "08-09 15:10", tx: "0x7a…2d" },
-  { id: "SET-318", task: "TSK-1974 · 本地化翻译", amount: 608, time: "08-05 11:44", tx: "0x6b…9e" },
-];
+import { GhostButton, InfoNote, PageHeader, Panel, Pill, SectionTitle, StatCard } from "../../components/kit/primitives";
+import { readAgentFinance } from "../../lib/platform-api";
+import { useFinanceView } from "../../lib/use-finance-view";
 
 export default function AgentEarnings() {
-  const [yieldOn, setYieldOn] = useState(true);
-
-  return (
-    <Page>
-      <PageHeader title="Agent 收益中心" subtitle="已结算收入、自动生息与立即提取" />
-
-      <InfoNote tone="green">
-        <span className="inline-flex items-center gap-1.5">
-          <Info size={14} />
-          此处均为已结算的 Agent 收入，可立即提取或自愿生息；与任务级履约金无关（接单零履约金）。
-        </span>
-      </InfoNote>
-
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="可提取余额" value="4,083" unit="USDC" icon={Wallet} accent="#34d399" />
-        <StatCard label="累计已结算收入" value="42,610" unit="USDC" icon={Coins} delta={13} accent="#8b5cf6" />
-        <StatCard label="生息中本金" value="12,000" unit="USDC" icon={Sparkles} accent="#22d3ee" hint="年化 5.2%" />
-        <StatCard label="累计利息收益" value="318.7" unit="USDC" icon={Coins} delta={6} accent="#fbbf24" />
+  const loader = useCallback(() => readAgentFinance(), []);
+  const { value, error, loading, reload } = useFinanceView(loader);
+  return <Page>
+    <PageHeader title="Agent 收益中心" subtitle="概览应收与正式可提现收益独立展示" actions={<GhostButton icon={RefreshCw} onClick={reload}>刷新</GhostButton>} />
+    <InfoNote tone="green"><span className="inline-flex items-center gap-1.5"><Info size={14}/>正式收益只能由绑定 controller 发起提现，并只能转入绑定 payout；本页不提供修改收款地址。</span></InfoNote>
+    {loading && <InfoNote>正在读取权威收益视图…</InfoNote>}
+    {error && <InfoNote tone="red"><span role="alert">{error}</span></InfoNote>}
+    {value && <>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <StatCard label="概览应收" value={amount(value.totals.overviewReceivable)} icon={Coins} accent="#8b5cf6" />
+        <StatCard label="正式可提现" value={amount(value.totals.formalClaimable)} icon={Wallet} accent="#34d399" />
+        <StatCard label="总可用收益" value={amount(value.totals.totalAvailable)} icon={Coins} accent="#22d3ee" />
       </div>
-
-      <div className="grid gap-6 lg:grid-cols-[1fr_1.4fr]">
-        <div className="space-y-6">
-          <Panel strong className="p-6">
-            <SectionTitle>立即提取</SectionTitle>
-            <div className="text-[13px] text-[var(--ap-muted)]">可提取余额</div>
-            <div className="mt-1 text-[30px] text-white">
-              4,083 <span className="text-[14px] text-[var(--ap-muted)]">USDC</span>
-            </div>
-            <input
-              aria-label="提取金额"
-              placeholder="输入提取金额"
-              className="mt-4 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]"
-            />
-            <CtaButton
-              full
-              icon={ArrowDownToLine}
-              className="mt-3"
-              onClick={() => toast.success("提取请求已提交，资金将链上转入你的钱包")}
-            >
-              提取到钱包
-            </CtaButton>
-          </Panel>
-
-          <Panel className="p-6">
-            <SectionTitle
-              right={
-                <button
-                  type="button"
-                  onClick={() => {
-                    setYieldOn((value) => !value);
-                    toast.success(yieldOn ? "已关闭自动生息" : "已开启自动生息");
-                  }}
-                  className="rounded-full px-3 py-1 text-[12px]"
-                  style={{
-                    background: yieldOn ? "rgba(52,211,153,.15)" : "rgba(114,134,166,.15)",
-                    color: yieldOn ? "#6ee7b7" : "#b7c6e0",
-                  }}
-                >
-                  {yieldOn ? "已开启" : "已关闭"}
-                </button>
-              }
-            >
-              自动生息
-            </SectionTitle>
-            <p className="text-[13px] text-[var(--ap-text-2)]">
-              开启后，结算收入将自动存入合规生息池，随时可赎回。当前年化约 5.2%。
-            </p>
-            <Pill tone="cyan">
-              <span className="inline-flex items-center gap-1">
-                <Info size={12} /> 生息为自愿，不作为履约保证
-              </span>
-            </Pill>
-          </Panel>
-        </div>
-
-        <Panel className="p-6">
-          <SectionTitle right={<GhostButton icon={Link2}>链上明细</GhostButton>}>结算收入记录</SectionTitle>
-          <div className="ap-scroll overflow-x-auto">
-            <table className="w-full min-w-[680px] text-[13px]">
-              <thead>
-                <tr className="text-left text-[var(--ap-muted)]">
-                  <th className="pb-3 font-normal">结算号</th>
-                  <th className="pb-3 font-normal">关联任务</th>
-                  <th className="pb-3 font-normal">到账金额</th>
-                  <th className="pb-3 font-normal">时间</th>
-                  <th className="pb-3 text-right font-normal">哈希</th>
-                </tr>
-              </thead>
-              <tbody>
-                {RECORDS.map((record) => (
-                  <tr key={record.id} className="border-t border-[var(--ap-border)]">
-                    <td className="py-3 text-[var(--ap-text-2)]">{record.id}</td>
-                    <td className="py-3 text-[var(--ap-text-2)]">{record.task}</td>
-                    <td className="py-3 text-[var(--ap-success)]">+{record.amount.toLocaleString()} USDC</td>
-                    <td className="py-3 text-[var(--ap-muted)]">{record.time}</td>
-                    <td className="py-3 text-right text-[var(--ap-cyan)]">{record.tx}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Panel>
-      </div>
-    </Page>
-  );
+      <Panel className="p-5"><SectionTitle right={<span className="text-[12px] text-[var(--ap-muted)]">截至 {date(value.asOf)}</span>}>收益仓位</SectionTitle><div className="ap-scroll overflow-x-auto"><table className="w-full min-w-[900px] text-[13px]"><thead><tr className="text-left text-[var(--ap-muted)]"><th className="pb-3 font-normal">Agent</th><th className="pb-3 font-normal">概览应收</th><th className="pb-3 font-normal">正式账本</th><th className="pb-3 font-normal">链上可提</th><th className="pb-3 font-normal">确认</th><th className="pb-3 font-normal">收款绑定</th></tr></thead><tbody>{value.positions.map((position)=><tr key={`${position.agentId}:${position.asset}`} className="border-t border-[var(--ap-border)]"><td className="py-3"><div>{position.agentName}</div><div className="text-[11px] text-[var(--ap-muted)]">{position.agentId}</div></td><td className="py-3">{amount(position.overviewReceivable)} {position.asset}</td><td className="py-3 text-[var(--ap-success)]">{amount(position.formalClaimable)} {position.asset}</td><td className="py-3 text-[var(--ap-cyan)]">{amount(position.chainClaimable)} {position.asset}</td><td className="py-3"><Pill tone={position.chain.confirmation === "confirmed" ? "green" : "amber"} dot>{position.chain.confirmation === "confirmed" ? "已确认" : "待确认"}</Pill></td><td className="py-3 font-mono text-[11px] text-[var(--ap-muted)]">{short(position.controller)} → {short(position.payout)}</td></tr>)}</tbody></table></div></Panel>
+      <Panel className="p-5"><SectionTitle right={<GhostButton icon={Link2}>链上与账本明细</GhostButton>}>收益流水</SectionTitle><div className="ap-scroll overflow-x-auto"><table className="w-full min-w-[720px] text-[13px]"><thead><tr className="text-left text-[var(--ap-muted)]"><th className="pb-3 font-normal">流水</th><th className="pb-3 font-normal">类型</th><th className="pb-3 font-normal">金额</th><th className="pb-3 font-normal">时间</th><th className="pb-3 text-right font-normal">交易</th></tr></thead><tbody>{value.records.map((record)=><tr key={record.id} className="border-t border-[var(--ap-border)]"><td className="py-3 text-[var(--ap-text-2)]">{short(record.id)}</td><td className="py-3"><Pill tone={record.type === "earnings_withdrawal" ? "blue" : "green"}>{record.type}</Pill></td><td className="py-3">{amount(record.amount)} {record.asset}</td><td className="py-3 text-[var(--ap-muted)]">{date(record.createdAt)}</td><td className="py-3 text-right font-mono text-[var(--ap-cyan)]">{record.transactionHash ? short(record.transactionHash) : "—"}</td></tr>)}</tbody></table></div></Panel>
+    </>}
+  </Page>;
 }
+
+function amount(value:string){try{return BigInt(value).toLocaleString("zh-CN")}catch{return "—"}}
+function date(value:string){const parsed=new Date(value);return Number.isFinite(parsed.getTime())?parsed.toLocaleString("zh-CN"):"—"}
+function short(value:string){return value.length>14?`${value.slice(0,8)}…${value.slice(-6)}`:value}

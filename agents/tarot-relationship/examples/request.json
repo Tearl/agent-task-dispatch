@@ -1,0 +1,8 @@
+{
+  "relationshipStage": "dating",
+  "question": "最近沟通越来越少，我应该主动联系吗？",
+  "context": "双方交往半年，最近两周联系频率下降。",
+  "tone": "gentle",
+  "drawMode": "platform_random",
+  "ageConfirmed": true
+}

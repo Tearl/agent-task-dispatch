@@ -20,6 +20,20 @@ func NewStore(db *sql.DB) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// Get reads a sealed immutable snapshot by identity for downstream overview
+// orchestration. It never creates a revision or reshuffles candidates.
+func (store *Store) Get(ctx context.Context, snapshotID string) (matching.Snapshot, error) {
+	var body []byte
+	err := store.db.QueryRowContext(ctx, `SELECT snapshot_body FROM match_snapshots WHERE snapshot_id=$1 AND sealed_at IS NOT NULL`, snapshotID).Scan(&body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return matching.Snapshot{}, matching.ErrSnapshotNotFound
+	}
+	if err != nil {
+		return matching.Snapshot{}, fmt.Errorf("read matching snapshot: %w", err)
+	}
+	return decodeSnapshot(body)
+}
+
 func (store *Store) Latest(ctx context.Context, taskID, taskSpecHash, algorithmVersion string) (matching.Snapshot, error) {
 	var body []byte
 	err := store.db.QueryRowContext(ctx, `SELECT snapshot_body FROM match_snapshots WHERE task_id=$1 AND task_spec_hash=$2 AND algorithm_version=$3 AND sealed_at IS NOT NULL ORDER BY match_revision DESC LIMIT 1`, taskID, taskSpecHash, algorithmVersion).Scan(&body)

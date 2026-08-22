@@ -20,6 +20,9 @@ import (
 	engineagent "github.com/example/agent-platform/engine/internal/agent"
 	engineauth "github.com/example/agent-platform/engine/internal/auth"
 	enginecredential "github.com/example/agent-platform/engine/internal/credential"
+	enginedelivery "github.com/example/agent-platform/engine/internal/delivery"
+	enginefinance "github.com/example/agent-platform/engine/internal/financeview"
+	enginematchingview "github.com/example/agent-platform/engine/internal/matchingview"
 	enginetask "github.com/example/agent-platform/engine/internal/task"
 	"golang.org/x/crypto/sha3"
 )
@@ -33,6 +36,136 @@ func TestHealth(t *testing.T) {
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+}
+
+type apiFinanceRepository struct{ publisherCalls, agentCalls, reconciliationCalls int }
+
+func (repo *apiFinanceRepository) Publisher(context.Context, string) (enginefinance.PublisherView, error) {
+	repo.publisherCalls++
+	return enginefinance.PublisherView{Tasks: []enginefinance.TaskFunds{}, Ledger: []enginefinance.LedgerRecord{}}, nil
+}
+func (repo *apiFinanceRepository) Agent(context.Context, string) (enginefinance.AgentView, error) {
+	repo.agentCalls++
+	return enginefinance.AgentView{Positions: []enginefinance.EarningPosition{}, Records: []enginefinance.LedgerRecord{}}, nil
+}
+func (repo *apiFinanceRepository) Reconciliation(context.Context) (enginefinance.ReconciliationView, error) {
+	repo.reconciliationCalls++
+	return enginefinance.ReconciliationView{Runs: []enginefinance.ReconciliationRun{}}, nil
+}
+
+func TestFinanceTransportEnforcesRoleBeforeRepository(t *testing.T) {
+	repo := &apiFinanceRepository{}
+	financeService, _ := enginefinance.NewService(repo)
+	publisherAuth, _ := engineauth.NewService(staticSessionStore{session: engineauth.Session{UserID: "publisher", Roles: []string{"publisher"}}}, engineauth.EthereumVerifier{}, engineauth.Config{Domain: "app.example", ChainID: "1", Purpose: "login"})
+	handler := NewHandlerWithFinance(slog.New(slog.NewTextHandler(io.Discard, nil)), publisherAuth, nil, nil, nil, nil, financeService)
+	for _, test := range []struct {
+		path   string
+		status int
+	}{{"/v1/finance/publisher", 200}, {"/v1/finance/agent", 403}, {"/v1/finance/reconciliation", 403}} {
+		request := httptest.NewRequest(http.MethodGet, test.path, nil)
+		request.Header.Set("authorization", "Bearer session")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != test.status {
+			t.Fatalf("%s: %d %s", test.path, recorder.Code, recorder.Body.String())
+		}
+	}
+	if repo.publisherCalls != 1 || repo.agentCalls != 0 || repo.reconciliationCalls != 0 {
+		t.Fatalf("role boundary calls: %#v", repo)
+	}
+}
+
+type apiMatchingViewRepository struct{ calls int }
+
+func (repo *apiMatchingViewRepository) Get(context.Context, string, string) (enginematchingview.View, error) {
+	repo.calls++
+	return enginematchingview.View{Task: enginematchingview.Task{ID: "task-1"}}, nil
+}
+
+func TestMatchingViewTransportUsesAuthoritativePublisherSession(t *testing.T) {
+	repo := &apiMatchingViewRepository{}
+	service, _ := enginematchingview.NewService(repo)
+	authService, _ := engineauth.NewService(staticSessionStore{session: engineauth.Session{UserID: "publisher", Roles: []string{"publisher"}}}, engineauth.EthereumVerifier{}, engineauth.Config{Domain: "app.example", ChainID: "1", Purpose: "login"})
+	handler := NewHandlerWithMatchingView(slog.New(slog.NewTextHandler(io.Discard, nil)), authService, nil, nil, nil, nil, nil, service)
+	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-1/matching-view", nil)
+	request.Header.Set("authorization", "Bearer session")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || repo.calls != 1 {
+		t.Fatalf("unexpected matching response: %d %s calls=%d", recorder.Code, recorder.Body.String(), repo.calls)
+	}
+}
+
+type apiDeliveryRepository struct {
+	startCalls    int
+	getCalls      int
+	feedbackCalls int
+}
+
+func (repo *apiDeliveryRepository) Start(context.Context, enginedelivery.Mutation, string, enginedelivery.StartInput) (enginedelivery.StartResult, bool, error) {
+	repo.startCalls++
+	return enginedelivery.StartResult{Version: enginedelivery.Version{Number: 1, Status: enginedelivery.VersionAllocated}}, false, nil
+}
+func (repo *apiDeliveryRepository) Get(context.Context, string, string) (enginedelivery.View, error) {
+	repo.getCalls++
+	return enginedelivery.View{Package: enginedelivery.Package{ID: "package"}}, nil
+}
+func (repo *apiDeliveryRepository) SubmitFeedback(context.Context, enginedelivery.Mutation, string, enginedelivery.FeedbackInput, enginedelivery.FeedbackSet) (enginedelivery.FeedbackSet, bool, error) {
+	repo.feedbackCalls++
+	return enginedelivery.FeedbackSet{ID: "sha256:" + strings.Repeat("a", 64)}, false, nil
+}
+func (repo *apiDeliveryRepository) ProofContext(context.Context, string) (enginedelivery.ProofContext, error) {
+	return enginedelivery.ProofContext{}, nil
+}
+func (repo *apiDeliveryRepository) RecordDispatched(context.Context, string) (enginedelivery.Version, bool, error) {
+	return enginedelivery.Version{}, false, nil
+}
+func (repo *apiDeliveryRepository) RecordResult(context.Context, enginedelivery.ExecutionResult, *enginedelivery.ProofRecord) (enginedelivery.Version, bool, error) {
+	return enginedelivery.Version{}, false, nil
+}
+func (repo *apiDeliveryRepository) ProposeChangeOrder(context.Context, enginedelivery.Mutation, string, enginedelivery.ProposeChangeOrderInput, enginedelivery.ChangeOrder) (enginedelivery.ChangeOrder, bool, error) {
+	return enginedelivery.ChangeOrder{}, false, nil
+}
+func (repo *apiDeliveryRepository) DecideChangeOrder(context.Context, enginedelivery.Mutation, bool, string, string, enginedelivery.DecideChangeOrderInput) (enginedelivery.ChangeOrder, bool, error) {
+	return enginedelivery.ChangeOrder{}, false, nil
+}
+func (repo *apiDeliveryRepository) AcceptChangeOrder(context.Context, enginedelivery.Mutation, string, string, enginedelivery.ChangeOrderVersionInput) (enginedelivery.ChangeOrder, bool, error) {
+	return enginedelivery.ChangeOrder{}, false, nil
+}
+func (repo *apiDeliveryRepository) ActivateChangeOrder(context.Context, enginedelivery.Mutation, bool, string, string, enginedelivery.ChangeOrderVersionInput) (enginedelivery.ChangeOrder, bool, error) {
+	return enginedelivery.ChangeOrder{}, false, nil
+}
+
+func TestFormalDeliveryTransportUsesPublisherSessionAndIdempotencyKey(t *testing.T) {
+	repo := &apiDeliveryRepository{}
+	deliveryService, _ := enginedelivery.NewService(repo)
+	authService, _ := engineauth.NewService(staticSessionStore{session: engineauth.Session{UserID: "publisher", Roles: []string{"publisher"}}}, engineauth.EthereumVerifier{}, engineauth.Config{Domain: "app.example", ChainID: "1", Purpose: "login"})
+	handler := NewHandlerWithDelivery(slog.New(slog.NewTextHandler(io.Discard, nil)), authService, nil, nil, nil, nil, nil, nil, deliveryService)
+	body := strings.NewReader(`{"expectedPackageVersion":0,"workNonce":1}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/tasks/task-1/formal-packages/start", body)
+	request.Header.Set("authorization", "Bearer session")
+	request.Header.Set("Idempotency-Key", "formal-operation")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated || repo.startCalls != 1 {
+		t.Fatalf("unexpected formal start response: %d %s calls=%d", recorder.Code, recorder.Body.String(), repo.startCalls)
+	}
+	read := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-1/formal-package", nil)
+	read.Header.Set("authorization", "Bearer session")
+	readRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(readRecorder, read)
+	if readRecorder.Code != http.StatusOK || repo.getCalls != 1 {
+		t.Fatalf("unexpected formal read response: %d %s calls=%d", readRecorder.Code, readRecorder.Body.String(), repo.getCalls)
+	}
+	feedbackBody := strings.NewReader(`{"packageId":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedPackageVersion":2,"parentVersion":1,"parentContentHash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","items":[{"criterionId":"criterion","category":"defect","priority":"high","target":"artifact","description":"wrong","expectedOutcome":"fixed","scopeClaim":"in_scope"}]}`)
+	feedbackRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/task-1/formal-feedback", feedbackBody)
+	feedbackRequest.Header.Set("authorization", "Bearer session")
+	feedbackRequest.Header.Set("Idempotency-Key", "formal-feedback")
+	feedbackRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(feedbackRecorder, feedbackRequest)
+	if feedbackRecorder.Code != http.StatusCreated || repo.feedbackCalls != 1 {
+		t.Fatalf("unexpected feedback response: %d %s calls=%d", feedbackRecorder.Code, feedbackRecorder.Body.String(), repo.feedbackCalls)
 	}
 }
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { aggregateEngineResource, forwardEngineMutation, InvalidEngineResponseError, InvalidResourceIdError, resolveEngineBaseUrl } from "./engine.ts";
+import { aggregateEngineFinance, aggregateEngineFormalDelivery, aggregateEngineMatching, aggregateEngineResource, forwardEngineMutation, forwardEngineRead, InvalidEngineResponseError, InvalidResourceIdError, resolveEngineBaseUrl } from "./engine.ts";
 
 test("BFF aggregation calls only internal Engine endpoints and strips sensitive fields", async () => {
   const calls: Array<{ url: string; authorization: string | null }> = [];
@@ -46,6 +46,63 @@ test("BFF rejects an internally inconsistent Engine view snapshot", async () => 
     },
   }), InvalidEngineResponseError);
   assert.equal(calls, 1);
+});
+
+test("finance aggregation keeps submitted and confirmation states separate and strips secrets", async () => {
+  let target = "";
+  const result = await aggregateEngineFinance("publisher", "session-secret", { engineBaseUrl: "http://engine.internal:8080", fetch: async (input) => {
+    target = String(input);
+    return Response.json({ asOf: "2026-08-22T00:00:00Z", totals: { discovery: "0", formal: "90", changeOrders: "0", disputeFees: "0", refundable: "90", refunded: "0" }, tasks: [{ taskId: "task-1", title: "Task", asset: "evm:1/native", lifecycle: "refund_pending", discovery: "0", formal: "90", changeOrders: "0", disputeFees: "0", refundable: "90", refundStatus: "pending", terminal: false, updatedAt: "2026-08-22T00:00:00Z", chain: { submission: "submitted", confirmation: "pending" }, privateKey: "strip" }], ledger: [] });
+  }});
+  assert.equal(target, "http://engine.internal:8080/v1/finance/publisher");
+  assert.equal(JSON.stringify((result.body.tasks as Array<Record<string, unknown>>)[0]).includes("privateKey"), false);
+  await assert.rejects(() => aggregateEngineFinance("agent", "session", { engineBaseUrl: "http://engine", fetch: async () => Response.json({ asOf: "x", totals: { available: 1 }, positions: [], records: [] }) }), InvalidEngineResponseError);
+});
+
+test("matching aggregation reads one sealed view and preserves degradation evidence", async () => {
+  let target = "";
+  const result = await aggregateEngineMatching("task-1", "session", { engineBaseUrl: "http://engine", fetch: async (input) => {
+    target = String(input);
+    return Response.json({ asOf: "2026-08-22T00:00:00Z", task: { id: "task-1", title: "Task", status: "awaiting_selection", specHash: "sha256:x" }, snapshot: { id: "sha256:s", revision: 2, algorithmVersion: "fair-shuffle-v1", ruleVersion: "v1", modelVersion: "fallback", seedDigest: "sha256:d", degradations: [{ dependency: "dense", code: "recall_unavailable", message: "fallback" }], candidates: [{ agentId: "agent-1", name: "Agent", category: "research", tags: ["web"], position: 1, exploration: false, overviewPrice: "10", formalPrice: "100", externalCostCap: "0", score: { taskMatch: 50, reputation: 20, priceTime: 10, availability: 5, rule: 85, modelDelta: 0, ranking: 85 } }] } });
+  }});
+  assert.equal(target, "http://engine/v1/tasks/task-1/matching-view");
+  assert.equal(((result.body.snapshot as { degradations: unknown[] }).degradations).length, 1);
+  await assert.rejects(() => aggregateEngineMatching("../admin", "session"), InvalidResourceIdError);
+});
+
+test("selection routes accept only task-bound reservation identities", async () => {
+  const reservation = `sha256:${"a".repeat(64)}`;
+  const encoded = encodeURIComponent(reservation);
+  const read = await forwardEngineRead(`/v1/tasks/task-1/selection-reservations/${encoded}`, "session", { engineBaseUrl: "http://engine", fetch: async () => Response.json({ reservation: { id: reservation }, platformSignature: "0xsafe" }) });
+  assert.equal((read.body.reservation as { id: string }).id, reservation);
+  const mutation = await forwardEngineMutation({ path: `/v1/tasks/task-1/selection-reservations/${encoded}/reconcile`, body: `{}`, idempotencyKey: "reconcile", sessionToken: "session" }, { engineBaseUrl: "http://engine", fetch: async () => Response.json({ reservation: { id: reservation }, assignment: null }) });
+  assert.equal((mutation.body.reservation as { id: string }).id, reservation);
+  await assert.rejects(() => forwardEngineRead(`/v1/tasks/other/selection-reservations/../${encoded}`, "session"), InvalidResourceIdError);
+});
+
+test("formal delivery read validates frozen scope and version identity", async () => {
+  let target = "";
+  const packageID = `sha256:${"1".repeat(64)}`;
+  const digest = `sha256:${"2".repeat(64)}`;
+  const result = await aggregateEngineFormalDelivery("task-1", "session", { engineBaseUrl: "http://engine", fetch: async (input) => {
+    target = String(input);
+    return Response.json({
+      package: { id: packageID, taskId: "task-1", assignmentId: `0x${"3".repeat(64)}`, aggregateVersion: 2, allocatedVersion: 1, includedVersions: 3, maximumVersions: 5 },
+      scope: { id: digest, contentHash: digest, taskSpecHash: digest },
+      versions: [{ packageId: packageID, number: 1, aggregateVersion: 2, scopeHash: digest, workNonce: 1, logicalExecutionId: digest, status: "allocated", usedCost: "0" }],
+      feedback: [],
+      changeOrders: [],
+    });
+  }});
+  assert.equal(target, "http://engine/v1/tasks/task-1/formal-package");
+  assert.equal((result.body.versions as unknown[]).length, 1);
+  await assert.rejects(() => aggregateEngineFormalDelivery("../admin", "session"), InvalidResourceIdError);
+  const started = await forwardEngineMutation({ path: "/v1/tasks/task-1/formal-packages/start", body: `{}`, idempotencyKey: "formal-start", sessionToken: "session" }, { engineBaseUrl: "http://engine", fetch: async () => Response.json({ version: { number: 1 } }, { status: 201 }) });
+  assert.equal((started.body.version as { number: number }).number, 1);
+  const feedback = await forwardEngineMutation({ path: "/v1/tasks/task-1/formal-feedback", body: `{}`, idempotencyKey: "feedback", sessionToken: "session" }, { engineBaseUrl: "http://engine", fetch: async () => Response.json({ id: digest }, { status: 201 }) });
+  assert.equal(feedback.body.id, digest);
+  const changeOrder = await forwardEngineMutation({ path: `/v1/tasks/task-1/formal-change-orders/${encodeURIComponent(digest)}/activate`, body: `{}`, idempotencyKey: "activate", sessionToken: "session" }, { engineBaseUrl: "http://engine", fetch: async () => Response.json({ id: digest }, { status: 201 }) });
+  assert.equal(changeOrder.body.id, digest);
 });
 
 test("Agent capacity and retire decision come from one Engine view request", async () => {

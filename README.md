@@ -19,11 +19,17 @@ AI Agent 任务交易与分发平台 MVP。项目由 [Create Better-T-Stack](htt
 apps/
   web/                 React/Vite C 端应用
   bff/                 Next.js SSR 与 BFF
+agents/
+  competitor-intelligence/  独立竞品情报 Agent
+  tarot-relationship/       独立关系塔罗 Agent
+  image-generator/          Mastra 一句话图片生成 Agent
+  viral-video-analyzer/     独立短视频爆款分析 Agent
 contracts/
   escrow/              任务资金托管合约
 services/
   engine/              Go 状态机、分发与调度引擎
 packages/
+  agent-runtime/       业务 Agent 的任务、HTTP、模型与抓取公共底座
   ui/                  共享 UI 组件与 Tailwind 主题
   env/                 TypeScript 环境变量定义
   config/              TypeScript 共享配置

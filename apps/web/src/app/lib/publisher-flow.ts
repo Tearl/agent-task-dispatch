@@ -12,6 +12,7 @@ export interface TaskAnalysis {
 }
 
 export interface PublisherFlowState {
+  taskId?: string;
   prompt?: string;
   category?: string | null;
   depth?: string;

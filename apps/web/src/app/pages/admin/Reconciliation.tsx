@@ -1,91 +1,25 @@
-import { AlertTriangle, CheckCircle2, FileText, Link2, RefreshCw } from "lucide-react";
-import { toast } from "sonner";
+import { AlertTriangle, CheckCircle2, Link2, RefreshCw } from "lucide-react";
+import { useCallback } from "react";
 
 import { Page } from "../../components/AppShell";
-import {
-  CtaButton,
-  GhostButton,
-  PageHeader,
-  Panel,
-  Pill,
-  SectionTitle,
-  StatCard,
-} from "../../components/kit/primitives";
-
-const DIFFERENCES = [
-  { tx: "0x9a…21", task: "TSK-2001", chain: "已托管 2,600", platform: "待托管", status: "diff" },
-  { tx: "0x8b…7c", task: "TSK-2020", chain: "已结算 2,377", platform: "已结算 2,377", status: "ok" },
-  { tx: "0x6d…4e", task: "TSK-2012", chain: "已冻结 1,500", platform: "已冻结 1,500", status: "ok" },
-  { tx: "0x5c…3a", task: "TSK-1990", chain: "已退款 500", platform: "退款处理中", status: "diff" },
-];
+import { GhostButton, InfoNote, PageHeader, Panel, Pill, SectionTitle, StatCard } from "../../components/kit/primitives";
+import { readReconciliationFinance } from "../../lib/platform-api";
+import { useFinanceView } from "../../lib/use-finance-view";
 
 export default function AdminReconciliation() {
-  return (
-    <Page>
-      <PageHeader
-        title="链上对账"
-        subtitle="链上与平台状态差异、事件重放与对账报告"
-        actions={
-          <CtaButton icon={FileText} onClick={() => toast.success("对账报告已生成")}>
-            生成对账报告
-          </CtaButton>
-        }
-      />
-
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="今日对账笔数" value="8,214" icon={Link2} accent="#38bdf8" />
-        <StatCard label="一致" value="8,212" unit="笔" icon={CheckCircle2} accent="#34d399" />
-        <StatCard label="状态差异" value="2" unit="笔" icon={AlertTriangle} accent="#fb7185" />
-        <StatCard label="对账覆盖率" value="99.98" unit="%" icon={RefreshCw} accent="#22d3ee" />
-      </div>
-
-      <Panel className="p-5">
-        <SectionTitle
-          right={
-            <GhostButton icon={RefreshCw} onClick={() => toast.success("已重新执行对账")}>
-              重新对账
-            </GhostButton>
-          }
-        >
-          差异明细
-        </SectionTitle>
-        <div className="ap-scroll overflow-x-auto">
-          <table className="w-full min-w-[800px] text-[13px]">
-            <thead>
-              <tr className="text-left text-[var(--ap-muted)]">
-                <th className="pb-3 font-normal">交易哈希</th>
-                <th className="pb-3 font-normal">任务</th>
-                <th className="pb-3 font-normal">链上状态</th>
-                <th className="pb-3 font-normal">平台状态</th>
-                <th className="pb-3 font-normal">对账结果</th>
-                <th className="pb-3 text-right font-normal">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {DIFFERENCES.map((item) => (
-                <tr key={item.tx} className="border-t border-[var(--ap-border)]">
-                  <td className="py-3 font-mono text-[var(--ap-cyan)]">{item.tx}</td>
-                  <td className="py-3 text-[var(--ap-text-2)]">{item.task}</td>
-                  <td className="py-3 text-[var(--ap-text-2)]">{item.chain}</td>
-                  <td className="py-3 text-[var(--ap-text-2)]">{item.platform}</td>
-                  <td className="py-3">
-                    <Pill tone={item.status === "ok" ? "green" : "red"} dot>
-                      {item.status === "ok" ? "一致" : "差异"}
-                    </Pill>
-                  </td>
-                  <td className="py-3 text-right">
-                    {item.status === "diff" ? (
-                      <GhostButton onClick={() => toast.success("已重放链上事件以修复状态")}>事件重放</GhostButton>
-                    ) : (
-                      <span className="text-[var(--ap-muted)]">—</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Panel>
-    </Page>
-  );
+  const loader=useCallback(()=>readReconciliationFinance(),[]);
+  const {value,error,loading,reload}=useFinanceView(loader);
+  const latest=value?.runs[0];
+  const differences=value?.runs.reduce((total,run)=>total+run.differences.length,0)??0;
+  return <Page>
+    <PageHeader title="链上对账" subtitle="只读展示安全区块、账本预期、合约观测与不可变差异证据" actions={<GhostButton icon={RefreshCw} onClick={reload}>刷新</GhostButton>}/>
+    {loading&&<InfoNote>正在读取对账记录…</InfoNote>}{error&&<InfoNote tone="red"><span role="alert">{error}</span></InfoNote>}
+    {value&&<>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4"><StatCard label="最近安全区块" value={latest?String(latest.safeBlock):"—"} icon={Link2} accent="#38bdf8"/><StatCard label="最近运行" value={latest?.status==="matched"?"一致":"有差异"} icon={latest?.status==="matched"?CheckCircle2:AlertTriangle} accent={latest?.status==="matched"?"#34d399":"#fb7185"}/><StatCard label="保留运行" value={String(value.runs.length)} icon={RefreshCw} accent="#22d3ee"/><StatCard label="差异证据" value={String(differences)} icon={AlertTriangle} accent="#fbbf24"/></div>
+      <InfoNote>对账页面不直接重放事件或修改账本；处置操作属于受审计的管理员流程。</InfoNote>
+      {value.runs.map((run)=><Panel key={run.id} className="p-5"><SectionTitle right={<Pill tone={run.status==="matched"?"green":"red"} dot>{run.status==="matched"?"一致":"检测到差异"}</Pill>}>{run.chainId} · 区块 {run.safeBlock}</SectionTitle><div className="mb-3 text-[12px] text-[var(--ap-muted)]">{short(run.contract)} · {date(run.finishedAt)}</div><div className="ap-scroll overflow-x-auto"><table className="w-full min-w-[760px] text-[13px]"><thead><tr className="text-left text-[var(--ap-muted)]"><th className="pb-3 font-normal">类别</th><th className="pb-3 font-normal">资源</th><th className="pb-3 font-normal">账本预期</th><th className="pb-3 font-normal">链上观测</th><th className="pb-3 font-normal">级别</th></tr></thead><tbody>{run.differences.length===0?<tr className="border-t border-[var(--ap-border)]"><td colSpan={5} className="py-4 text-center text-[var(--ap-success)]">未发现差异</td></tr>:run.differences.map((difference,index)=><tr key={`${difference.category}:${difference.resourceId}:${index}`} className="border-t border-[var(--ap-border)]"><td className="py-3">{difference.category}</td><td className="py-3 font-mono text-[var(--ap-text-2)]">{difference.resourceId}</td><td className="py-3 text-[var(--ap-text-2)]">{difference.expected}</td><td className="py-3 text-[var(--ap-text-2)]">{difference.observed}</td><td className="py-3"><Pill tone={difference.severity==="critical"?"red":"amber"}>{difference.severity}</Pill></td></tr>)}</tbody></table></div></Panel>)}
+    </>}
+  </Page>;
 }
+function date(value:string){const parsed=new Date(value);return Number.isFinite(parsed.getTime())?parsed.toLocaleString("zh-CN"):"—"}
+function short(value:string){return value.length>18?`${value.slice(0,10)}…${value.slice(-6)}`:value}

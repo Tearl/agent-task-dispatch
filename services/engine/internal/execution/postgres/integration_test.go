@@ -124,7 +124,7 @@ func seedExecutionDependencies(t *testing.T, ctx context.Context, db *sql.DB) {
 }
 
 func integrationSpec() execution.Spec {
-	return execution.Spec{LogicalExecutionID: "execution-pg-1", Stage: execution.StageOverview, TaskID: "task-execution", TaskSpecHash: "sha256:1111111111111111111111111111111111111111111111111111111111111111", AgentID: "agent-execution", AgentEndpoint: "https://agent.example", ResponsibilityCode: "overview_candidate", CostCap: "100", ToolPolicy: execution.ToolPolicy{Mode: execution.ToolPolicyReadOnly, AllowedTools: []string{"read"}}, Deadline: time.Now().UTC().Add(30 * time.Minute), IdempotencyKey: "execution-pg-idem-1", Overview: &execution.OverviewBinding{MatchRevision: 1, AllocationID: "allocation-1", QuoteHash: "sha256:2222222222222222222222222222222222222222222222222222222222222222"}}
+	return execution.Spec{LogicalExecutionID: "execution-pg-1", Stage: execution.StageOverview, TaskID: "task-execution", TaskSpecHash: "sha256:1111111111111111111111111111111111111111111111111111111111111111", InputRef: "brief://task-execution/spec-1", InputHash: "sha256:3333333333333333333333333333333333333333333333333333333333333333", AgentID: "agent-execution", AgentEndpoint: "https://agent.example", ResponsibilityCode: "overview_candidate", CostCap: "100", ToolPolicy: execution.ToolPolicy{Mode: execution.ToolPolicyReadOnly, AllowedTools: []string{"read"}}, Deadline: time.Now().UTC().Add(30 * time.Minute), IdempotencyKey: "execution-pg-idem-1", Overview: &execution.OverviewBinding{MatchRevision: 1, AllocationID: "allocation-1", QuoteHash: "sha256:2222222222222222222222222222222222222222222222222222222222222222"}}
 }
 
 func executionSearchPath(databaseURL, schema string) string {

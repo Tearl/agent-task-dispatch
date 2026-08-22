@@ -14,9 +14,6 @@ interface SessionState {
   connect: (session: PublicSession, preferredRole?: RoleId) => RoleId | null;
   disconnect: () => Promise<void>;
   switchRole: (role: RoleId) => void;
-  adminAuthed: boolean;
-  adminLogin: () => void;
-  adminLogout: () => void;
 }
 
 const SessionContext = createContext<SessionState | null>(null);
@@ -30,11 +27,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [address, setAddress] = useState("");
   const [role, setRole] = useState<RoleId>("publisher");
   const [authorizedRoles, setAuthorizedRoles] = useState<RoleId[]>([]);
-  const [adminAuthed, setAdminAuthed] = useState(false);
 
   const applySession = (session: PublicSession, preferredRole?: RoleId) => {
     const roles = clientRolesForEngineRoles(session.roles);
-    const nextRole = preferredRole && preferredRole !== "admin" && roles.includes(preferredRole) ? preferredRole : roles[0] ?? null;
+    const nextRole = preferredRole && roles.includes(preferredRole) ? preferredRole : roles[0] ?? null;
     setConnected(true);
     setAddress(session.walletAddress);
     setAuthorizedRoles(roles);
@@ -84,11 +80,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setAuthorizedRoles([]);
       },
       switchRole: (nextRole) => { if (authorizedRoles.includes(nextRole)) setRole(nextRole); },
-      adminAuthed,
-      adminLogin: () => setAdminAuthed(true),
-      adminLogout: () => setAdminAuthed(false),
     }),
-    [connected, loading, restoreError, address, role, adminAuthed, authorizedRoles],
+    [connected, loading, restoreError, address, role, authorizedRoles],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

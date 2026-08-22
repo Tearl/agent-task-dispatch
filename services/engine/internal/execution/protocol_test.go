@@ -19,6 +19,15 @@ func TestValidateSpecEnforcesStageSpecificProtocol(t *testing.T) {
 	if err := ValidateSpec(formal, now); err != nil {
 		t.Fatalf("valid formal execution rejected: %v", err)
 	}
+	changeOrder := formal
+	changeOrder.Formal = &FormalBinding{AssignmentID: "assignment-1", Package: "standard", Version: 4, AggregateVersion: 14, WorkNonce: 4, ScopeSpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ChangeOrderID: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Responsibility: "agent"}
+	if err := ValidateSpec(changeOrder, now); err != nil {
+		t.Fatalf("valid change-order execution rejected: %v", err)
+	}
+	changeOrder.Formal.ScopeSpecHash = ""
+	if err := ValidateSpec(changeOrder, now); err == nil {
+		t.Fatal("change order without new scope spec hash accepted")
+	}
 	tests := []struct {
 		name  string
 		alter func(*Spec)
@@ -50,7 +59,7 @@ func TestEveryOperationEnvelopeCarriesFencingAndRequiredBindings(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if envelope.ProtocolVersion != ProtocolVersion || envelope.Operation != operation || envelope.FencingToken != 7 || envelope.Overview == nil || envelope.TaskSpecHash != spec.TaskSpecHash || envelope.CostCap != spec.CostCap || envelope.CallbackNonce == "" {
+		if envelope.ProtocolVersion != ProtocolVersion || envelope.Operation != operation || envelope.FencingToken != 7 || envelope.Overview == nil || envelope.TaskSpecHash != spec.TaskSpecHash || envelope.InputRef != spec.InputRef || envelope.InputHash != spec.InputHash || envelope.CostCap != spec.CostCap || envelope.CallbackNonce == "" {
 			t.Fatalf("operation %q lost protocol binding: %#v", operation, envelope)
 		}
 	}

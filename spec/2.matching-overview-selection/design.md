@@ -7,6 +7,10 @@
 | v2 | 2026-08-21 | 冻结 matching-rules-v1 的召回融合、评分与降级策略 |
 | v3 | 2026-08-21 | 冻结 fair-shuffle-v1、匹配修订和不可变快照契约 |
 | v4 | 2026-08-21 | 冻结 agent-execution-v1、逻辑执行/网络尝试分层和 fencing 回调契约 |
+| v5 | 2026-08-22 | 冻结 overview-orchestration-v1、客观校验、计费投影和一次补位契约 |
+| v6 | 2026-08-22 | 冻结 selection-reservation-v1、EIP-712 选择证明和链上 assignment 确认边界 |
+| v7 | 2026-08-22 | 接入 T-402 权威链事件投影、确认深度和重组隔离 |
+| v8 | 2026-08-22 | 交付 matching-view-v1、同源选择流程与链上确认 UI |
 
 ## 架构与影响层
 Engine 匹配领域拥有资格、评分和随机化规则；适配器提供词法、分类、向量和模型信号；调度器拥有租约和执行；BFF/Web 只暴露快照与状态。
@@ -84,3 +88,65 @@ Engine 匹配领域拥有资格、评分和随机化规则；适配器提供词�
 | 有效终态回调 | `running -> succeeded/failed` | `active -> completed/failed` | 一次性落结果并释放 lease |
 
 `execution_callback_events` 为只增不改的回调证据；迁移回滚不得删除逻辑执行、网络尝试或回调历史。
+
+### overview-orchestration-v1
+
+- 一个已封存匹配快照最多创建一个概览批次。批次只读取快照，不触发重新评分或洗牌；初始 slot 严格来自快照的最多三个 `Selections`，所有 slot 使用同一个 Engine 截止时间。
+- 概览模块不接受完整任务正文。`BriefProvider` 负责生成脱敏简报并返回非 bearer secret 的短期 `brief_ref + brief_hash`；执行协议同时绑定二者。实际请求鉴权由 T-104 的 Agent 凭证完成，数据库不得保存访问 token、签名或简报正文。
+- 每个 slot 独立绑定 Agent、服务商、冻结价格版本、报价哈希、allocation、逻辑执行和只读工具白名单。目标解析器必须把当前 Agent 端点与快照中的 Agent、服务商、价格版本、概览价及外部成本上限逐项比对，避免跨候选或跨报价拼接。
+- 最多三路 `Dispatch` 并行执行；Worker/HTTP 重投复用 T-203 的逻辑执行和网络 attempt。只有成功投递才把 slot 从 `planned` 推进为 `dispatched`，不确定网络错误保持可安全重投。
+- allocation 的资金授权、捕获和释放属于 T-401；概览模块只通过 `AllocationGateway` 使用以 allocation ID 为幂等边界的 `authorize/capture/release`，并保存不可变绑定和状态投影，不复制余额或复式账本规则。
+
+#### 客观校验与计费
+
+概览交付物固定为 `overview-result-v1` JSON，拒绝未知字段和尾随文档，最大 64 KiB。有效结果必须同时满足：
+
+- `content_hash` 与实际字节一致；
+- 包含理解摘要、至少一项方法、交付结构、关键风险和合法预计时长；
+- Engine 接收终态的时间不晚于批次截止时间；
+- 平台工具审计证据完整、没有外部写尝试，且每个工具都在只读白名单中；
+- 同一批次不存在已接受的相同内容哈希。
+
+校验 reason code 使用稳定、排序后的集合。只有 `valid` slot 可以按冻结概览价调用 capture；无效、超时、取消、成本停止或越权结果只能 release。capture/release 与本地投影之间允许崩溃重试，但 T-401 必须以 allocation ID 保证不会重复计费。
+
+#### overview-replacement-v1
+
+- 每个批次最多补位一次，且只能在原 slot 客观无效后触发；主观不喜欢不得补位或拒付。
+- 候选只来自原快照的 `Qualified` 稳定顺序，排除所有已经投递过的 Agent 和服务商，不重新召回、不放宽质量门槛。
+- 补位 slot 使用新的 allocation 和逻辑执行 ID，同时保留原失败 slot 与 release 证据；并发失败通过批次事务锁收敛到同一个补位。
+- 没有合格补位时永久记录 `replacement_exhausted`，普通重试不得再次尝试另一候选。
+
+新匹配修订生效时，旧批次变为 `obsolete`。未终态执行被取消、未捕获 allocation 被释放；已经有效并捕获的概览费不追回，但旧批次不得进入 T-205 选择或抵扣。
+
+### selection-reservation-v1
+
+- 创建预留的唯一入口为 `POST /v1/tasks/{taskId}/selection-reservations`，必须携带发布者会话、`Idempotency-Key`、已完成概览批次和有效 slot。读取与对账接口同时绑定发布者、task 和 reservation，禁止仅凭 reservation ID 跨资源访问。
+- Engine 在事务提交前重新验证任务仍为 `awaiting_selection`、批次属于最新封存修订、slot 客观有效且已捕获概览费、候选仍合格、Agent 当前健康且价格/控制器/收款地址未漂移、allocation 已捕获。任务级唯一索引保证并发选择只有一个有效预留。
+- 预留先获取 Agent 容量 lease，并保存 fencing token 与不晚于任务截止时间的证明期限。数据库提交失败必须按 fencing token 释放 lease；确认、明确失败和证明到期释放容量。定时 worker 可用 `Expire` 幂等回收过期预留。
+- 概览抵扣固定等于被选 slot 的已捕获概览价，`formal_payable = formal_package_gross_price - overview_credit`。不得由客户端提供价格、抵扣、Agent 地址、报价哈希或 allocation；Engine 只从不可变快照、价格版本和资金投影中重建。
+- Engine 生成与 `TaskEscrow.SelectionProof` 字段顺序完全一致的 EIP-712 证明，domain 固定为 `AgentTaskEscrow / 1 / chainId / verifyingContract`。证明绑定 task、assignment、Agent 控制器、收款地址、overview、allocation、报价、规格、匹配修订、价格版本、毛价、抵扣、策略、唯一 nonce 和期限。
+- 平台签名只在响应时由配置密钥重新生成，数据库只保存 payload hash、typed-data digest 和证明字段；不得保存签名或私钥。assignment、allocation 和 nonce 均唯一，链上正式净额锁定与多付退款由 T-403 合约执行。
+- `POST /v1/tasks/{taskId}/selection-reservations/{reservationId}/reconcile` 只接受交易哈希。Engine 必须从权威链上 receipt/event 投影获得结果，并逐字段比对证明、正式净额和初始 `work_nonce=1`；浏览器提供的事件正文永远不可信。
+- 链上确认后在同一 PostgreSQL 事务内追加不可变 assignment、把任务推进为 `assigned`、记录确认事件；重复确认返回同一 assignment。证明不匹配、交易哈希漂移或任务状态冲突不得推进任何状态。
+- T-402 的 `authoritative-chain-projection-v1` 已作为生产 `ChainVerifier` 接入。未达到确认深度的交易保持 `submitted`；只有 canonical receipt、calldata 与日志一致时才确认。确认事件随后被重组孤立时，任务进入 `chain_reorg_pending`，不得自动重选。
+
+#### 状态与幂等
+
+| 场景 | reservation | assignment / 容量 |
+| --- | --- | --- |
+| 首次选择 | `reserved` | 返回确定性证明；持有 fencing lease |
+| 同 key 同请求 | 原样重放 | 不重复签发身份或占用容量 |
+| 同任务并发选择 | 一个 `reserved` | 失败竞争者释放其 lease |
+| 交易待确认 | `reserved -> submitted` | 不创建 assignment，继续持有容量 |
+| 权威确认 | `reserved/submitted -> confirmed` | 创建唯一 assignment，`work_nonce=1`，释放容量 lease |
+| 权威失败 | `reserved/submitted -> failed` | 不创建 assignment，释放容量 lease |
+| 证明到期 | `reserved/submitted -> expired` | 不创建 assignment，幂等释放容量 lease |
+
+### matching-view-v1
+
+- 发布者比较页以已发布的 `task_id` 为唯一入口。Engine 在校验发布者角色和任务所有权后，读取当前不可变规格对应的 `Latest` 封存快照；普通刷新不会触发匹配、洗牌或修订递增。
+- 读模型只投影 FairShuffle 最终最多三个候选，包含位置、探索标志、冻结价格、预计时长、规则/模型分项、概览 slot 客观状态、计费状态、校验原因和内容哈希。浏览器不再导入模拟 Agent 或自行计算排名。
+- 依赖降级以 `dependency + code + message` 原样展示；无快照、无合格候选、概览运行中、无效、补位和计费未完成均是显式状态。只有 `slot.status=valid` 且 `billing_status=captured` 的候选可以创建选择预留。
+- BFF 仅提供同源任务绑定路由，校验 Engine 匹配响应并限制 selection reservation 路径；浏览器无法选择内部 Engine 地址。读取、预留、预留恢复和对账始终同时绑定 task 与 reservation。
+- Web 使用同一个客户端 operation ID 重放预留。钱包交易 calldata 只由 Engine 返回的冻结 proof 和平台签名编码；提交前校验钱包 chain ID，不允许客户端改写价格、抵扣、地址、nonce 或期限。
+- 钱包返回交易哈希后立即调用权威链对账。投影尚未观察到交易时，Engine 仍先幂等记录 `submitted + transaction_hash`，随后返回待确认；页面刷新可恢复同一交易。只有 canonical 确认才显示 assignment 已创建，失败、过期或 orphaned 均禁止再次提交旧证明。

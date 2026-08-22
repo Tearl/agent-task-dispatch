@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS logical_executions (
     task_id text NOT NULL REFERENCES tasks(task_id),
     task_spec_hash text NOT NULL CHECK (task_spec_hash ~ '^sha256:[0-9a-f]{64}$'),
     task_spec_version integer NOT NULL CHECK (task_spec_version > 0),
+    input_ref text NOT NULL CHECK (input_ref <> ''),
+    input_hash text NOT NULL CHECK (input_hash ~ '^sha256:[0-9a-f]{64}$'),
     agent_id text NOT NULL REFERENCES agents(agent_id),
     agent_endpoint text NOT NULL CHECK (agent_endpoint <> ''),
     responsibility_code text NOT NULL CHECK (responsibility_code <> ''),
@@ -103,6 +105,8 @@ BEGIN
        OR NEW.task_id IS DISTINCT FROM OLD.task_id
        OR NEW.task_spec_hash IS DISTINCT FROM OLD.task_spec_hash
        OR NEW.task_spec_version IS DISTINCT FROM OLD.task_spec_version
+       OR NEW.input_ref IS DISTINCT FROM OLD.input_ref
+       OR NEW.input_hash IS DISTINCT FROM OLD.input_hash
        OR NEW.agent_id IS DISTINCT FROM OLD.agent_id
        OR NEW.agent_endpoint IS DISTINCT FROM OLD.agent_endpoint
        OR NEW.responsibility_code IS DISTINCT FROM OLD.responsibility_code

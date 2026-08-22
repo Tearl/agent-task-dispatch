@@ -9,6 +9,32 @@ export type PublicSession = {
 export type ActionReason = { code: string; message: string };
 export type ActionDecision = { action: string; allowed: boolean; reasons: ActionReason[] };
 export type AvailableActions = { aggregateVersion: number; actions: ActionDecision[] };
+export type ChainPresentation = { submission: "not_submitted" | "submitted"; confirmation: "not_observed" | "pending" | "confirmed" | "failed" | "orphaned" };
+export type PublisherFinanceView = {
+  asOf: string;
+  totals: { discovery: string; formal: string; changeOrders: string; disputeFees: string; refundable: string; refunded: string };
+  tasks: Array<{ taskId: string; title: string; asset: string; lifecycle: string; discovery: string; formal: string; changeOrders: string; disputeFees: string; refundable: string; refundStatus: "available" | "pending" | "confirmed" | "unavailable"; terminal: boolean; chain: ChainPresentation; transactionHash?: string; updatedAt: string }>;
+  ledger: Array<{ id: string; taskId?: string; type: string; amount: string; asset: string; reasonCode: string; transactionHash?: string; createdAt: string }>;
+};
+export type AgentFinanceView = {
+  asOf: string;
+  totals: { overviewReceivable: string; formalClaimable: string; totalAvailable: string };
+  positions: Array<{ agentId: string; agentName: string; controller: string; payout: string; asset: string; overviewReceivable: string; formalClaimable: string; chainClaimable: string; chain: ChainPresentation }>;
+  records: PublisherFinanceView["ledger"];
+};
+export type ReconciliationFinanceView = {
+  asOf: string;
+  runs: Array<{ id: string; chainId: string; contract: string; safeBlock: number; status: "matched" | "difference_detected"; startedAt: string; finishedAt: string; differences: Array<{ category: string; resourceId: string; expected: string; observed: string; severity: "warning" | "critical" }> }>;
+};
+export type MatchingView = {
+  asOf: string;
+  task: { id: string; title: string; status: string; specHash: string };
+  snapshot?: { id: string; revision: number; algorithmVersion: string; ruleVersion: string; modelVersion: string; seedDigest: string; explorationTriggered: boolean; createdAt: string; degradations: Array<{ dependency: string; code: string; message: string }>; candidates: Array<{ agentId: string; name: string; category: string; tags: string[]; estimatedDurationSeconds: number; position: number; exploration: boolean; overviewPrice: string; formalPrice: string; externalCostCap: string; score: { taskMatch: number; reputation: number; priceTime: number; availability: number; rule: number; modelDelta: number; ranking: number }; overview?: { slotId: string; status: string; billingStatus: string; validationCodes: string[]; contentHash?: string; replacement: boolean } }> };
+  batch?: { id: string; status: string; deadline: string; replacementUsed: boolean; replacementExhausted: boolean };
+  reservation?: { id: string; agentId: string; slotId: string; status: string; transactionHash?: string };
+};
+export type SelectionProof = { taskId: string; assignmentId: string; agentController: string; payout: string; overviewId: string; allocationId: string; quoteHash: string; taskSpecHash: string; matchRevision: number; priceVersion: number; overviewPrice: string; formalGrossPrice: string; overviewCredit: string; policyHash: string; nonce: string; deadline: number };
+export type SelectionIntent = { reservation: { id: string; publisherWallet: string; taskId: string; batchId: string; slotId: string; agentId: string; chainId: string; contractAddress: string; proof: SelectionProof; formalPayable: string; status: string; transactionHash?: string }; platformSignature: string };
 
 export class PlatformAPIError extends Error {
   readonly status: number;
@@ -29,13 +55,14 @@ export type WalletProvider = {
   request(input: { method: string; params?: unknown[] }): Promise<unknown>;
 };
 
-export type ClientRole = "publisher" | "agent" | "arbitrator";
+export type ClientRole = "publisher" | "agent" | "arbitrator" | "admin";
 
 export function clientRolesForEngineRoles(roles: readonly string[]): ClientRole[] {
   const result: ClientRole[] = [];
   if (roles.includes("publisher")) result.push("publisher");
   if (roles.includes("agent_provider")) result.push("agent");
   if (roles.includes("arbitrator")) result.push("arbitrator");
+  if (roles.includes("admin")) result.push("admin");
   return result;
 }
 
@@ -56,6 +83,50 @@ export async function readSession(request: typeof fetch = fetch): Promise<Public
 
 export async function revokeSession(request: typeof fetch = fetch): Promise<void> {
   await apiRequest<unknown>("/api/auth/session", { method: "DELETE" }, request, true);
+}
+
+export function readPublisherFinance(request: typeof fetch = fetch) { return apiRequest<PublisherFinanceView>("/api/finance/publisher", {}, request); }
+export function readAgentFinance(request: typeof fetch = fetch) { return apiRequest<AgentFinanceView>("/api/finance/agent", {}, request); }
+export function readReconciliationFinance(request: typeof fetch = fetch) { return apiRequest<ReconciliationFinanceView>("/api/finance/reconciliation", {}, request); }
+export function readMatchingView(taskID: string, request: typeof fetch = fetch) { return apiRequest<MatchingView>(`/api/tasks/${encodeURIComponent(taskID)}/matching`, {}, request); }
+export function reserveSelection(taskID: string, batchID: string, slotID: string, operationID: string, request: typeof fetch = fetch) { return mutation<SelectionIntent>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations`, operationID, { batchId: batchID, slotId: slotID }, request); }
+export function readSelection(taskID: string, reservationID: string, request: typeof fetch = fetch) { return apiRequest<SelectionIntent>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations/${encodeURIComponent(reservationID)}`, {}, request); }
+export function reconcileSelection(taskID: string, reservationID: string, transactionHash: string, request: typeof fetch = fetch) { return mutation<{ reservation: SelectionIntent["reservation"]; assignment: { id: string; workNonce: number } | null }>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations/${encodeURIComponent(reservationID)}/reconcile`, `${reservationID}:reconcile:${transactionHash.toLowerCase()}`, { transactionHash }, request); }
+
+export async function submitSelectionTransaction(provider: WalletProvider, intent: SelectionIntent): Promise<string> {
+  if (!intent.platformSignature || intent.reservation.status !== "reserved") throw new Error("选择证明当前不可提交。");
+  const walletChain = await provider.request({ method: "eth_chainId" });
+  if (typeof walletChain !== "string" || !/^0x[0-9a-fA-F]+$/.test(walletChain) || BigInt(walletChain).toString(10) !== intent.reservation.chainId) throw new Error(`请将钱包切换到链 ${intent.reservation.chainId}。`);
+  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: intent.reservation.publisherWallet, to: intent.reservation.contractAddress, data: encodeSelectionCall(intent.reservation.proof, intent.platformSignature), value: "0x0" }] });
+  if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效交易哈希。");
+  return transactionHash.toLowerCase();
+}
+
+function encodeSelectionCall(proof: SelectionProof, signature: string): string {
+  const words = [proof.taskId, proof.assignmentId, addressWord(proof.agentController), addressWord(proof.payout), proof.overviewId, proof.allocationId, proof.quoteHash, proof.taskSpecHash, uintWord(proof.matchRevision), uintWord(proof.priceVersion), uintWord(proof.overviewPrice), uintWord(proof.formalGrossPrice), uintWord(proof.overviewCredit), proof.policyHash, proof.nonce, uintWord(proof.deadline)].map(normalizeWord);
+  const rawSignature = signature.replace(/^0x/, "");
+  if (!/^[0-9a-fA-F]{130}$/.test(rawSignature)) throw new Error("平台选择签名无效。");
+  const offset = uintWord(17 * 32);
+  const length = uintWord(rawSignature.length / 2);
+  const paddedSignature = rawSignature.toLowerCase().padEnd(Math.ceil(rawSignature.length / 64) * 64, "0");
+  return `0xa2dfc191${words.join("")}${offset}${length}${paddedSignature}`;
+}
+
+function normalizeWord(value: string): string {
+  const raw = value.replace(/^0x/, "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(raw)) throw new Error("选择证明字段无效。");
+  return raw;
+}
+function addressWord(value: string): string {
+  const raw = value.replace(/^0x/, "").toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(raw)) throw new Error("选择地址无效。");
+  return raw.padStart(64, "0");
+}
+function uintWord(value: string | number): string {
+  let encoded: string;
+  try { encoded = BigInt(value).toString(16); } catch { throw new Error("选择数值无效。"); }
+  if (encoded.length > 64 || encoded.startsWith("-")) throw new Error("选择数值超出范围。");
+  return encoded.padStart(64, "0");
 }
 
 export type AgentOnboardingInput = {

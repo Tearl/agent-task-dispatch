@@ -231,19 +231,14 @@ function TopBar({
 }) {
   const config = ROLES[roleId];
   const navigate = useNavigate();
-  const { address, disconnect, adminLogout } = useSession();
+  const { address, disconnect } = useSession();
 
   const logout = async () => {
-    if (variant === "admin") {
-      adminLogout();
-      navigate("/admin/login");
-    } else {
-      try {
-        await disconnect();
-        navigate("/");
-      } catch {
-        toast.error("会话撤销失败，已保持当前登录状态，请重试。");
-      }
+    try {
+      await disconnect();
+      navigate(variant === "admin" ? "/admin/login" : "/");
+    } catch {
+      toast.error("会话撤销失败，已保持当前登录状态，请重试。");
     }
   };
 
@@ -292,7 +287,7 @@ function TopBar({
             <Wallet size={16} className="text-[var(--ap-cyan)]" />
           )}
           <span className="hidden text-[13px] text-[var(--ap-text-2)] sm:inline">
-            {variant === "admin" ? "admin@platform" : shortAddr(address) || "0x…钱包"}
+            {shortAddr(address) || "0x…钱包"}
           </span>
           <ChevronDown size={14} className="hidden text-[var(--ap-muted)] sm:block" />
         </div>

@@ -76,7 +76,7 @@ func SignCallback(callback Callback, key []byte) (string, error) {
 }
 
 func ValidateSpec(spec Spec, now time.Time) error {
-	if strings.TrimSpace(spec.LogicalExecutionID) == "" || strings.TrimSpace(spec.TaskID) == "" || !validDigest(spec.TaskSpecHash) || strings.TrimSpace(spec.AgentID) == "" || strings.TrimSpace(spec.ResponsibilityCode) == "" || strings.TrimSpace(spec.IdempotencyKey) == "" {
+	if strings.TrimSpace(spec.LogicalExecutionID) == "" || strings.TrimSpace(spec.TaskID) == "" || !validDigest(spec.TaskSpecHash) || strings.TrimSpace(spec.InputRef) == "" || !validDigest(spec.InputHash) || strings.TrimSpace(spec.AgentID) == "" || strings.TrimSpace(spec.ResponsibilityCode) == "" || strings.TrimSpace(spec.IdempotencyKey) == "" {
 		return ErrInvalidInput
 	}
 	endpoint, err := url.Parse(spec.AgentEndpoint)
@@ -100,6 +100,9 @@ func ValidateSpec(spec Spec, now time.Time) error {
 	}
 	if spec.Stage == StageFormal {
 		if spec.Formal == nil || spec.Overview != nil || strings.TrimSpace(spec.Formal.AssignmentID) == "" || strings.TrimSpace(spec.Formal.Package) == "" || spec.Formal.Version < 1 || spec.Formal.AggregateVersion < 1 || spec.Formal.WorkNonce < 1 {
+			return ErrInvalidInput
+		}
+		if spec.Formal.ChangeOrderID != "" && (!validDigest(spec.Formal.ChangeOrderID) || !validDigest(spec.Formal.ScopeSpecHash) || !slices.Contains([]string{"publisher", "agent", "platform"}, spec.Formal.Responsibility)) {
 			return ErrInvalidInput
 		}
 		return nil
@@ -128,6 +131,8 @@ func BuildEnvelope(execution Execution, attempt Attempt, operation, callbackURL,
 		AgentID:            spec.AgentID,
 		TaskID:             spec.TaskID,
 		TaskSpecHash:       spec.TaskSpecHash,
+		InputRef:           spec.InputRef,
+		InputHash:          spec.InputHash,
 		ResponsibilityCode: spec.ResponsibilityCode,
 		CostCap:            spec.CostCap,
 		ToolPolicy:         spec.ToolPolicy,
