@@ -20,6 +20,7 @@ import (
 	authpostgres "github.com/example/agent-platform/engine/internal/auth/postgres"
 	chainprojection "github.com/example/agent-platform/engine/internal/chain"
 	chainpostgres "github.com/example/agent-platform/engine/internal/chain/postgres"
+	enginecore "github.com/example/agent-platform/engine/internal/core"
 	"github.com/example/agent-platform/engine/internal/credential"
 	credentialpostgres "github.com/example/agent-platform/engine/internal/credential/postgres"
 	"github.com/example/agent-platform/engine/internal/delivery"
@@ -240,10 +241,22 @@ func main() {
 	if address == "" {
 		address = ":8080"
 	}
+	apiHandler := api.NewHandlerWithDisputes(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingViewService, deliveryService, disputeService)
+	rootHandler := http.NewServeMux()
+	rootHandler.Handle("/", apiHandler)
+	var runtime *enginecore.Runtime
+	if booleanEnv(logger, "ENGINE_WORKER_ENABLED", false) {
+		runtime, err = enginecore.NewRuntime(db, agentService, deliveryService, engineRuntimeConfig(logger, fundsAsset))
+		if err != nil {
+			logger.Error("engine core runtime configuration failed", "error", err)
+			os.Exit(1)
+		}
+		rootHandler.Handle("/v1/agent-callbacks/", runtime.CallbackHandler)
+	}
 
 	server := &http.Server{
 		Addr:              address,
-		Handler:           api.NewHandlerWithDisputes(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingViewService, deliveryService, disputeService),
+		Handler:           rootHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -259,6 +272,15 @@ func main() {
 	if chainProjector != nil {
 		go runChainProjection(shutdownSignal, logger, chainProjector, chainReconciler)
 	}
+	workerErrors := make(chan error, 1)
+	if runtime != nil {
+		go func() {
+			if workerErr := runtime.OutboxWorker.Run(shutdownSignal); workerErr != nil && !errors.Is(workerErr, context.Canceled) {
+				workerErrors <- workerErr
+				stop()
+			}
+		}()
+	}
 
 	go func() {
 		<-shutdownSignal.Done()
@@ -271,6 +293,12 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("engine stopped unexpectedly", "error", err)
 		os.Exit(1)
+	}
+	select {
+	case workerErr := <-workerErrors:
+		logger.Error("engine outbox worker stopped unexpectedly", "error", workerErr)
+		os.Exit(1)
+	default:
 	}
 }
 

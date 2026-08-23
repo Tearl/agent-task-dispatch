@@ -29,6 +29,42 @@ func TestFoundationDownMigrationPreservesImmutableHistory(t *testing.T) {
 	}
 }
 
+func TestOutboxWorkerMigrationAddsLeasingRetryAndDeadLetterState(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000019_outbox_worker.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"locked_by text",
+		"locked_until timestamptz",
+		"last_error text",
+		"dead_lettered_at timestamptz",
+		"outbox_messages_lock_pair",
+		"outbox_messages_last_error_safe",
+		"outbox_messages_dead_letter_time",
+		"outbox_messages_claim_idx",
+		"published_at IS NULL AND dead_lettered_at IS NULL",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("outbox worker migration missing %q", required)
+		}
+	}
+}
+
+func TestOutboxWorkerRollbackPreservesDeadLetterEvidence(t *testing.T) {
+	contents, err := os.ReadFile("migrations/000019_outbox_worker.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(contents))
+	for _, forbidden := range []string{"drop column", "drop table", "delete from", "truncate"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("outbox rollback destroys operational evidence with %q", forbidden)
+		}
+	}
+}
+
 func TestMigrationFilesAreOrderedAndTransactionManagedByRunner(t *testing.T) {
 	contents, err := migrationFiles.ReadFile("migrations/000001_foundation.up.sql")
 	if err != nil {

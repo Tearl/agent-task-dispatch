@@ -81,6 +81,20 @@ with a three-second timeout and expects a bounded JSON response:
 targets are rejected by default; `AGENT_HEALTH_ALLOW_PRIVATE_NETWORKS=true` is
 for explicit local testing only and must remain disabled in production.
 
+### Engine Outbox worker
+
+Set `ENGINE_WORKER_ENABLED=true` only after configuring the versioned matching
+and execution secrets in `.env.example`. `ENGINE_AGENT_RUNTIME_CREDENTIALS_JSON`
+is a server-only JSON object keyed by Agent ID; its bearer token authorizes
+Engine-to-Agent calls and its base64 callback key verifies Agent callbacks.
+These values stay in process memory and are never written to PostgreSQL or logs.
+
+The worker claims only registered command topics with PostgreSQL leases and
+`FOR UPDATE SKIP LOCKED`. Formal execution commands are retried with bounded
+exponential backoff and move to dead-letter state after the configured attempt
+limit or a permanent validation failure. Other Outbox topics remain pending for
+their dedicated publishers/consumers.
+
 ## Quality commands
 
 ```bash
