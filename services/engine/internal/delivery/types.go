@@ -48,7 +48,53 @@ const (
 	ChangeReady                 = "ready_to_activate"
 	ChangeEffective             = "effective"
 	ChangeConsumed              = "consumed"
+	AcceptanceVersion           = "formal-acceptance-v1"
+	AcceptanceIntentRecorded    = "intent_recorded"
+	AcceptancePending           = "pending_confirmation"
+	AcceptanceConfirmed         = "confirmed"
+	AcceptanceOrphaned          = "orphaned"
 )
+
+type AcceptanceIntentInput struct {
+	PackageID              string `json:"packageId"`
+	ExpectedPackageVersion int64  `json:"expectedPackageVersion"`
+	FormalVersion          int    `json:"formalVersion"`
+	ContentHash            string `json:"contentHash"`
+	ProofDigest            string `json:"proofDigest"`
+	WorkNonce              uint64 `json:"workNonce"`
+}
+
+type AcceptanceTransitionInput struct {
+	ExpectedVersion int64  `json:"expectedVersion"`
+	TransactionHash string `json:"transactionHash,omitempty"`
+}
+
+type SettlementEligibility struct {
+	Eligible   bool   `json:"eligible"`
+	ReasonCode string `json:"reasonCode,omitempty"`
+}
+
+type AcceptanceIntent struct {
+	ID                      string                `json:"id"`
+	PackageID               string                `json:"packageId"`
+	TaskID                  string                `json:"taskId"`
+	FormalVersion           int                   `json:"formalVersion"`
+	ContentHash             string                `json:"contentHash"`
+	ProofDigest             string                `json:"proofDigest"`
+	WorkNonce               uint64                `json:"workNonce"`
+	PackageAggregateVersion int64                 `json:"packageAggregateVersion"`
+	AggregateVersion        int64                 `json:"aggregateVersion"`
+	State                   string                `json:"state"`
+	TransactionHash         string                `json:"transactionHash,omitempty"`
+	ChainEventID            string                `json:"chainEventId,omitempty"`
+	ChainID                 string                `json:"chainId"`
+	ContractAddress         string                `json:"contractAddress"`
+	PublisherWallet         string                `json:"publisherWallet"`
+	ChainTaskID             string                `json:"chainTaskId"`
+	Eligibility             SettlementEligibility `json:"settlementEligibility"`
+	CreatedAt               time.Time             `json:"createdAt"`
+	UpdatedAt               time.Time             `json:"updatedAt"`
+}
 
 type RevisionBinding struct {
 	ParentVersion            int    `json:"parentVersion"`
@@ -284,11 +330,22 @@ type StartResult struct {
 }
 
 type View struct {
-	Package      Package       `json:"package"`
-	Scope        Scope         `json:"scope"`
-	Versions     []Version     `json:"versions"`
-	Feedback     []FeedbackSet `json:"feedback"`
-	ChangeOrders []ChangeOrder `json:"changeOrders"`
+	Package      Package            `json:"package"`
+	Scope        Scope              `json:"scope"`
+	Versions     []Version          `json:"versions"`
+	Feedback     []FeedbackSet      `json:"feedback"`
+	ChangeOrders []ChangeOrder      `json:"changeOrders"`
+	Acceptances  []AcceptanceIntent `json:"acceptances"`
+	Chain        ChainBinding       `json:"chain"`
+}
+
+type ChainBinding struct {
+	ChainID         string `json:"chainId"`
+	ContractAddress string `json:"contractAddress"`
+	PublisherWallet string `json:"publisherWallet"`
+	TaskID          string `json:"taskId"`
+	AssignmentID    string `json:"assignmentId"`
+	WorkNonce       uint64 `json:"workNonce"`
 }
 
 type Mutation struct {
@@ -337,6 +394,9 @@ type Repository interface {
 	DecideChangeOrder(context.Context, Mutation, bool, string, string, DecideChangeOrderInput) (ChangeOrder, bool, error)
 	AcceptChangeOrder(context.Context, Mutation, string, string, ChangeOrderVersionInput) (ChangeOrder, bool, error)
 	ActivateChangeOrder(context.Context, Mutation, bool, string, string, ChangeOrderVersionInput) (ChangeOrder, bool, error)
+	CreateAcceptanceIntent(context.Context, Mutation, string, AcceptanceIntentInput, AcceptanceIntent) (AcceptanceIntent, bool, error)
+	SubmitAcceptance(context.Context, Mutation, string, string, AcceptanceTransitionInput) (AcceptanceIntent, bool, error)
+	ReconcileAcceptance(context.Context, Mutation, string, string, AcceptanceTransitionInput) (AcceptanceIntent, bool, error)
 }
 
 type RevisionAuthorizer interface {

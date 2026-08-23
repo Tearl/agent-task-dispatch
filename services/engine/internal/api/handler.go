@@ -12,6 +12,7 @@ import (
 	"github.com/example/agent-platform/engine/internal/auth"
 	"github.com/example/agent-platform/engine/internal/credential"
 	"github.com/example/agent-platform/engine/internal/delivery"
+	"github.com/example/agent-platform/engine/internal/dispute"
 	"github.com/example/agent-platform/engine/internal/financeview"
 	"github.com/example/agent-platform/engine/internal/matchingview"
 	"github.com/example/agent-platform/engine/internal/persistence"
@@ -29,6 +30,7 @@ type handler struct {
 	finance     *financeview.Service
 	matching    *matchingview.Service
 	deliveries  *delivery.Service
+	disputes    *dispute.Service
 }
 
 type nonceRequest struct {
@@ -78,7 +80,11 @@ func NewHandlerWithMatchingView(logger *slog.Logger, authService *auth.Service, 
 }
 
 func NewHandlerWithDelivery(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service, matchingService *matchingview.Service, deliveryService *delivery.Service) http.Handler {
-	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService, tasks: taskService, selections: selectionService, finance: financeService, matching: matchingService, deliveries: deliveryService}
+	return NewHandlerWithDisputes(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingService, deliveryService, nil)
+}
+
+func NewHandlerWithDisputes(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service, matchingService *matchingview.Service, deliveryService *delivery.Service, disputeService *dispute.Service) http.Handler {
+	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService, tasks: taskService, selections: selectionService, finance: financeService, matching: matchingService, deliveries: deliveryService, disputes: disputeService}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /v1/auth/nonce", h.createNonce)
@@ -128,9 +134,87 @@ func NewHandlerWithDelivery(logger *slog.Logger, authService *auth.Service, agen
 		mux.HandleFunc("POST /v1/tasks/{id}/formal-change-orders/{changeOrderId}/decision", h.decideFormalChangeOrder)
 		mux.HandleFunc("POST /v1/tasks/{id}/formal-change-orders/{changeOrderId}/accept", h.acceptFormalChangeOrder)
 		mux.HandleFunc("POST /v1/tasks/{id}/formal-change-orders/{changeOrderId}/activate", h.activateFormalChangeOrder)
+		mux.HandleFunc("POST /v1/tasks/{id}/formal-acceptance-intents", h.createFormalAcceptanceIntent)
+		mux.HandleFunc("POST /v1/tasks/{id}/formal-acceptance-intents/{intentId}/submit", h.submitFormalAcceptance)
+		mux.HandleFunc("POST /v1/tasks/{id}/formal-acceptance-intents/{intentId}/reconcile", h.reconcileFormalAcceptance)
+	}
+	if disputeService != nil {
+		mux.HandleFunc("GET /v1/disputes", h.listDisputes)
+		mux.HandleFunc("POST /v1/tasks/{id}/disputes", h.openDispute)
+		mux.HandleFunc("GET /v1/disputes/{caseId}", h.getDispute)
+		mux.HandleFunc("POST /v1/disputes/{caseId}/claims", h.addDisputeClaim)
+		mux.HandleFunc("POST /v1/disputes/{caseId}/freeze-submission", h.submitDisputeFreeze)
+		mux.HandleFunc("POST /v1/disputes/{caseId}/freeze-reconcile", h.reconcileDisputeFreeze)
+		mux.HandleFunc("POST /v1/disputes/{caseId}/evidence", h.appendDisputeEvidence)
+		mux.HandleFunc("POST /v1/disputes/{caseId}/evidence-access", h.grantDisputeEvidenceAccess)
+		mux.HandleFunc("POST /v1/disputes/{caseId}/assignments", h.assignDispute)
+		mux.HandleFunc("POST /v1/disputes/{caseId}/decisions", h.decideDispute)
+		mux.HandleFunc("POST /v1/disputes/{caseId}/settlements", h.settleDispute)
+		mux.HandleFunc("POST /v1/disputes/{caseId}/reviews", h.reviewDispute)
+		mux.HandleFunc("POST /v1/disputes/{caseId}/finalize", h.finalizeDispute)
+		mux.HandleFunc("POST /v1/admin/operations", h.adminOperation)
 	}
 
 	return requestLogging(logger, mux)
+}
+
+func (h *handler) createFormalAcceptanceIntent(writer http.ResponseWriter, request *http.Request) {
+	var input delivery.AcceptanceIntentInput
+	if decodeJSON(writer, request, 16_384, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, replay, err := h.deliveries.CreateAcceptanceIntent(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeDeliveryError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) submitFormalAcceptance(writer http.ResponseWriter, request *http.Request) {
+	h.formalAcceptanceTransition(writer, request, false)
+}
+
+func (h *handler) reconcileFormalAcceptance(writer http.ResponseWriter, request *http.Request) {
+	h.formalAcceptanceTransition(writer, request, true)
+}
+
+func (h *handler) formalAcceptanceTransition(writer http.ResponseWriter, request *http.Request, reconcile bool) {
+	var input delivery.AcceptanceTransitionInput
+	if decodeJSON(writer, request, 8_192, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	var value delivery.AcceptanceIntent
+	var replay bool
+	var err error
+	if reconcile {
+		value, replay, err = h.deliveries.ReconcileAcceptance(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), request.PathValue("intentId"), input)
+	} else {
+		value, replay, err = h.deliveries.SubmitAcceptance(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), request.PathValue("intentId"), input)
+	}
+	if err != nil {
+		h.writeDeliveryError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
 }
 
 func (h *handler) proposeFormalChangeOrder(writer http.ResponseWriter, request *http.Request) {
@@ -278,7 +362,7 @@ func (h *handler) writeDeliveryError(writer http.ResponseWriter, err error) {
 	case errors.Is(err, delivery.ErrInvalidInput):
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid formal delivery request"})
 	case errors.Is(err, delivery.ErrDependencyPending):
-		writeJSON(writer, http.StatusTooEarly, map[string]string{"error": "formal revision authorization pending"})
+		writeJSON(writer, http.StatusTooEarly, map[string]string{"error": "formal chain authorization or confirmation pending"})
 	case errors.Is(err, delivery.ErrInvalidState), errors.Is(err, delivery.ErrStaleVersion), errors.Is(err, delivery.ErrContentConflict), errors.Is(err, persistence.ErrIdempotencyConflict):
 		writeJSON(writer, http.StatusConflict, map[string]string{"error": "formal delivery conflict"})
 	default:

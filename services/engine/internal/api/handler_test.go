@@ -98,9 +98,10 @@ func TestMatchingViewTransportUsesAuthoritativePublisherSession(t *testing.T) {
 }
 
 type apiDeliveryRepository struct {
-	startCalls    int
-	getCalls      int
-	feedbackCalls int
+	startCalls      int
+	getCalls        int
+	feedbackCalls   int
+	acceptanceCalls int
 }
 
 func (repo *apiDeliveryRepository) Start(context.Context, enginedelivery.Mutation, string, enginedelivery.StartInput) (enginedelivery.StartResult, bool, error) {
@@ -136,6 +137,16 @@ func (repo *apiDeliveryRepository) AcceptChangeOrder(context.Context, enginedeli
 func (repo *apiDeliveryRepository) ActivateChangeOrder(context.Context, enginedelivery.Mutation, bool, string, string, enginedelivery.ChangeOrderVersionInput) (enginedelivery.ChangeOrder, bool, error) {
 	return enginedelivery.ChangeOrder{}, false, nil
 }
+func (repo *apiDeliveryRepository) CreateAcceptanceIntent(context.Context, enginedelivery.Mutation, string, enginedelivery.AcceptanceIntentInput, enginedelivery.AcceptanceIntent) (enginedelivery.AcceptanceIntent, bool, error) {
+	repo.acceptanceCalls++
+	return enginedelivery.AcceptanceIntent{ID: "sha256:" + strings.Repeat("a", 64), State: enginedelivery.AcceptanceIntentRecorded}, false, nil
+}
+func (repo *apiDeliveryRepository) SubmitAcceptance(context.Context, enginedelivery.Mutation, string, string, enginedelivery.AcceptanceTransitionInput) (enginedelivery.AcceptanceIntent, bool, error) {
+	return enginedelivery.AcceptanceIntent{}, false, nil
+}
+func (repo *apiDeliveryRepository) ReconcileAcceptance(context.Context, enginedelivery.Mutation, string, string, enginedelivery.AcceptanceTransitionInput) (enginedelivery.AcceptanceIntent, bool, error) {
+	return enginedelivery.AcceptanceIntent{}, false, nil
+}
 
 func TestFormalDeliveryTransportUsesPublisherSessionAndIdempotencyKey(t *testing.T) {
 	repo := &apiDeliveryRepository{}
@@ -166,6 +177,15 @@ func TestFormalDeliveryTransportUsesPublisherSessionAndIdempotencyKey(t *testing
 	handler.ServeHTTP(feedbackRecorder, feedbackRequest)
 	if feedbackRecorder.Code != http.StatusCreated || repo.feedbackCalls != 1 {
 		t.Fatalf("unexpected feedback response: %d %s calls=%d", feedbackRecorder.Code, feedbackRecorder.Body.String(), repo.feedbackCalls)
+	}
+	acceptanceBody := strings.NewReader(`{"packageId":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedPackageVersion":2,"formalVersion":1,"contentHash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","proofDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workNonce":1}`)
+	acceptanceRequest := httptest.NewRequest(http.MethodPost, "/v1/tasks/task-1/formal-acceptance-intents", acceptanceBody)
+	acceptanceRequest.Header.Set("authorization", "Bearer session")
+	acceptanceRequest.Header.Set("Idempotency-Key", "formal-acceptance")
+	acceptanceRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(acceptanceRecorder, acceptanceRequest)
+	if acceptanceRecorder.Code != http.StatusCreated || repo.acceptanceCalls != 1 {
+		t.Fatalf("unexpected acceptance response: %d %s calls=%d", acceptanceRecorder.Code, acceptanceRecorder.Body.String(), repo.acceptanceCalls)
 	}
 }
 

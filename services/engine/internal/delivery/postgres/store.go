@@ -366,7 +366,33 @@ func (store *Store) Get(ctx context.Context, publisherID, taskID string) (delive
 	if err != nil {
 		return delivery.View{}, err
 	}
-	return delivery.View{Package: packageValue, Scope: scope, Versions: versions, Feedback: feedback, ChangeOrders: changeOrders}, nil
+	acceptances, err := store.loadAcceptances(ctx, packageValue.ID)
+	if err != nil {
+		return delivery.View{}, err
+	}
+	chain, err := store.loadChainBinding(ctx, packageValue.ID)
+	if err != nil {
+		return delivery.View{}, err
+	}
+	return delivery.View{Package: packageValue, Scope: scope, Versions: versions, Feedback: feedback, ChangeOrders: changeOrders, Acceptances: acceptances, Chain: chain}, nil
+}
+
+func (store *Store) loadChainBinding(ctx context.Context, packageID string) (delivery.ChainBinding, error) {
+	var value delivery.ChainBinding
+	var nonce sql.NullInt64
+	err := store.db.QueryRowContext(ctx, `SELECT reservation.chain_id::text,reservation.contract_address,reservation.publisher_wallet,reservation.proof_task_id,reservation.assignment_id,
+max(COALESCE(event.work_nonce,(event.payload->>'workNonce')::bigint))
+FROM formal_packages package JOIN assignments assignment ON assignment.assignment_id=package.assignment_id
+JOIN selection_reservations reservation ON reservation.reservation_id=assignment.reservation_id
+LEFT JOIN chain_events event ON event.chain_id=reservation.chain_id::text AND event.contract_address=reservation.contract_address
+ AND event.task_chain_id=reservation.proof_task_id AND event.assignment_chain_id=reservation.assignment_id
+ AND event.event_type IN ('selection_confirmed','work_nonce_advanced')
+ AND EXISTS (SELECT 1 FROM chain_canonical_blocks canonical WHERE canonical.chain_id=event.chain_id AND canonical.contract_address=event.contract_address AND canonical.block_hash=event.block_hash)
+WHERE package.package_id=$1 GROUP BY reservation.chain_id,reservation.contract_address,reservation.publisher_wallet,reservation.proof_task_id,reservation.assignment_id`, packageID).Scan(&value.ChainID, &value.ContractAddress, &value.PublisherWallet, &value.TaskID, &value.AssignmentID, &nonce)
+	if nonce.Valid {
+		value.WorkNonce = uint64(nonce.Int64)
+	}
+	return value, err
 }
 
 func (store *Store) ProofContext(ctx context.Context, logicalExecutionID string) (delivery.ProofContext, error) {

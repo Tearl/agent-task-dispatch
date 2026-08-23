@@ -36,6 +36,32 @@ export type MatchingView = {
 export type SelectionProof = { taskId: string; assignmentId: string; agentController: string; payout: string; overviewId: string; allocationId: string; quoteHash: string; taskSpecHash: string; matchRevision: number; priceVersion: number; overviewPrice: string; formalGrossPrice: string; overviewCredit: string; policyHash: string; nonce: string; deadline: number };
 export type SelectionIntent = { reservation: { id: string; publisherWallet: string; taskId: string; batchId: string; slotId: string; agentId: string; chainId: string; contractAddress: string; proof: SelectionProof; formalPayable: string; status: string; transactionHash?: string }; platformSignature: string };
 
+export type FormalProofRecord = {
+  proof: { version: string; taskId: string; assignmentId: string; deliveryUnit: string; packageId: string; scopeHash: string; formalVersion: number; packageAggregateVersion: number; workNonce: number; agentId: string; contentHash: string; parentContentHash?: string; feedbackDigest?: string; changeOrderId?: string; agentResponseHash: string; changeSummaryHash: string; policyHash: string; deadline: number };
+  payloadHash: string;
+  digest: string;
+  signature: string;
+};
+export type FormalVersion = { packageId: string; number: number; aggregateVersion: number; scopeId: string; scopeHash: string; workNonce: number; revision?: { parentVersion: number; parentContentHash: string; feedbackSetId: string; feedbackDigest: string; feedbackAggregateVersion: number }; changeOrderId?: string; logicalExecutionId: string; status: "allocated" | "generating" | "review" | "failed"; contentHash?: string; deliverableRef?: string; usedCost: string; failureReasonCode?: string; feedbackResponses?: Array<{ feedbackItemId: string; disposition: string; summary: string }>; changes?: Array<{ path: string; kind: "added" | "modified" | "deleted"; beforeHash?: string; afterHash?: string }>; proof?: FormalProofRecord; createdAt: string; updatedAt: string };
+export type FormalFeedback = { id: string; packageId: string; parentVersion: number; parentContentHash: string; scopeId: string; scopeHash: string; digest: string; packageAggregateVersion: number; items: Array<{ id: string; ordinal: number; criterionId: string; category: string; priority: string; target: string; description: string; expectedOutcome: string; scopeClaim: string }>; createdAt: string };
+export type FormalChangeOrder = { id: string; packageId: string; taskId: string; targetVersion: number; triggerVersion: number; triggerContentHash: string; feedbackSetId: string; feedbackDigest: string; baseScopeId: string; baseScopeHash: string; newScopeId?: string; newScopeHash?: string; newSpecHash: string; differenceDigest: string; differences: Array<{ path: string; kind: "added" | "modified" | "deleted"; beforeHash?: string; afterHash?: string; description: string; workloadDeltaPercent: number }>; requestedPrice: string; authorizedPrice: string; responsibility?: "publisher" | "agent" | "platform"; responsibilityReasonCode?: string; fundingSource?: string; fundAccountId?: string; principalOwnerId?: string; residualRecipientId?: string; publisherCompensationIrrevocable: boolean; packageAggregateVersion: number; aggregateVersion: number; status: string; deadline: string; acceptedAt?: string; effectiveAt?: string; consumedAt?: string; createdAt: string; updatedAt: string };
+export type FormalAcceptance = { id: string; packageId: string; taskId: string; formalVersion: number; contentHash: string; proofDigest: string; workNonce: number; packageAggregateVersion: number; aggregateVersion: number; state: "intent_recorded" | "pending_confirmation" | "confirmed" | "orphaned"; transactionHash?: string; chainEventId?: string; chainId: string; contractAddress: string; publisherWallet: string; chainTaskId: string; settlementEligibility: { eligible: boolean; reasonCode?: string }; createdAt: string; updatedAt: string };
+export type FormalDeliveryView = {
+  package: { id: string; taskId: string; assignmentId: string; deliveryUnit: string; kind: string; scopeId: string; scopeRevision: number; agentId: string; providerId: string; publisherId: string; includedVersions: number; maximumVersions: number; allocatedVersion: number; aggregateVersion: number; status: string; createdAt: string; updatedAt: string };
+  scope: { id: string; packageId: string; revision: number; contentHash: string; taskSpecHash: string; selectedOverviewId: string; overviewHash: string; overviewRef: string; inputs: string[]; acceptanceHash: string; acceptanceCriteria: Array<Record<string, unknown>>; outputConstraints: Record<string, unknown>; allowedTools: string[]; externalCostCap: string; exclusions: string[]; changeOrderId?: string; differences?: FormalChangeOrder["differences"]; createdAt: string };
+  versions: FormalVersion[];
+  feedback: FormalFeedback[];
+  changeOrders: FormalChangeOrder[];
+  acceptances: FormalAcceptance[];
+  chain: { chainId: string; contractAddress: string; publisherWallet: string; taskId: string; assignmentId: string; workNonce: number };
+};
+export type DisputeView = {
+  case: { id: string; taskId: string; assignmentId: string; deliveryUnitId: string; policyVersion: string; publisherId: string; agentProviderId: string; state: "soft_lock_pending"|"frozen"|"evidence"|"decided"|"review_pending"|"final"|"orphaned"; aggregateVersion: number; softLockedAt?: string; freezeSubmittedAt?: string; frozenAt?: string; freezeTransactionHash?: string; freezeEventId?: string; freezeRoot?: string; frozenAmount: string; asset: string; evidenceDeadline?: string; decisionDeadline?: string; reviewDeadline?: string; claims: Array<{id:string;side:"publisher"|"agent";kind:string;reasonCode:string;statementHash:string;createdAt:string}>; evidence: Array<{id:string;claimId:string;category:string;objectKey:string;ciphertextDigest:string;envelopeKeyReference:string;objectVersionId:string;retentionMode:string;retainUntil:string;submittedBy:string;createdAt:string}>; assignments:Array<{id:string;stage:"initial"|"review";assigneeId:string;conflictCheckedAt:string;assignedAt:string}>; decisions:Array<{id:string;kind:"initial"|"review"|"settlement";decidedBy:string;reasonCode:string;evidenceRoot:string;publisherBps:number;createdAt:string}>; leaves:Array<{index:number;owner:string;account:string;cap:string;kind:string}>; reputationPending:boolean; finalizedAt?:string; createdAt:string; updatedAt:string };
+  context: { taskId:string;assignmentId:string;deliveryUnitId:string;publisherId:string;agentProviderId:string;chainId:string;contractAddress:string;chainTaskId:string;publisherWallet:string;agentController:string;agentPayout:string;disputeResolver:string;frozenAmount:string;asset:string;feeCap:string;eligible:boolean;reasonCode?:string;disputeDeadline:string };
+  accessGrants:Array<{id:string;evidenceId:string;principalId:string;purpose:string;expiresAt:string;createdAt:string}>;
+  adminOperations:Array<{id:string;kind:string;resourceType:string;resourceId:string;reasonCode:string;payloadHash:string;actorId:string;status:string;createdAt:string}>;
+};
+
 export class PlatformAPIError extends Error {
   readonly status: number;
   constructor(status: number, message: string) { super(message); this.status = status; }
@@ -92,6 +118,31 @@ export function readMatchingView(taskID: string, request: typeof fetch = fetch) 
 export function reserveSelection(taskID: string, batchID: string, slotID: string, operationID: string, request: typeof fetch = fetch) { return mutation<SelectionIntent>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations`, operationID, { batchId: batchID, slotId: slotID }, request); }
 export function readSelection(taskID: string, reservationID: string, request: typeof fetch = fetch) { return apiRequest<SelectionIntent>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations/${encodeURIComponent(reservationID)}`, {}, request); }
 export function reconcileSelection(taskID: string, reservationID: string, transactionHash: string, request: typeof fetch = fetch) { return mutation<{ reservation: SelectionIntent["reservation"]; assignment: { id: string; workNonce: number } | null }>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations/${encodeURIComponent(reservationID)}/reconcile`, `${reservationID}:reconcile:${transactionHash.toLowerCase()}`, { transactionHash }, request); }
+export function readFormalDelivery(taskID: string, request: typeof fetch = fetch) { return apiRequest<FormalDeliveryView>(`/api/tasks/${encodeURIComponent(taskID)}/formal-package`, {}, request); }
+export function submitFormalFeedback(taskID: string, operationID: string, input: { packageId: string; expectedPackageVersion: number; parentVersion: number; parentContentHash: string; items: Array<{ criterionId: string; category: string; priority: string; target: string; description: string; expectedOutcome: string; scopeClaim: string }> }, request: typeof fetch = fetch) { return mutation<FormalFeedback>(`/api/tasks/${encodeURIComponent(taskID)}/formal-feedback`, operationID, input, request); }
+export function proposeFormalChangeOrder(taskID: string, operationID: string, input: { packageId: string; expectedPackageVersion: number; triggerVersion: number; triggerContentHash: string; feedbackSetId: string; feedbackDigest: string; newSpecHash: string; differences: FormalChangeOrder["differences"]; requestedPrice: string; deadline: string }, request: typeof fetch = fetch) { return mutation<FormalChangeOrder>(`/api/tasks/${encodeURIComponent(taskID)}/formal-change-orders`, operationID, input, request); }
+export function acceptFormalChangeOrder(taskID: string, orderID: string, expectedVersion: number, operationID: string, request: typeof fetch = fetch) { return mutation<FormalChangeOrder>(`/api/tasks/${encodeURIComponent(taskID)}/formal-change-orders/${encodeURIComponent(orderID)}/accept`, operationID, { expectedVersion }, request); }
+export function activateFormalChangeOrder(taskID: string, orderID: string, expectedVersion: number, operationID: string, request: typeof fetch = fetch) { return mutation<FormalChangeOrder>(`/api/tasks/${encodeURIComponent(taskID)}/formal-change-orders/${encodeURIComponent(orderID)}/activate`, operationID, { expectedVersion }, request); }
+export function startFormalVersion(taskID: string, operationID: string, input: { expectedPackageVersion: number; workNonce: number; revision?: { parentVersion: number; parentContentHash: string; feedbackSetId: string; feedbackDigest: string; feedbackAggregateVersion: number }; changeOrderId?: string }, request: typeof fetch = fetch) { return mutation<{ package: FormalDeliveryView["package"]; scope: FormalDeliveryView["scope"]; version: FormalVersion }>(`/api/tasks/${encodeURIComponent(taskID)}/formal-package/start`, operationID, input, request); }
+export function createFormalAcceptance(taskID: string, operationID: string, version: FormalVersion, packageAggregateVersion: number, request: typeof fetch = fetch) {
+  if (!version.contentHash || !version.proof) throw new Error("当前版本没有可验收的权威证明。");
+  return mutation<FormalAcceptance>(`/api/tasks/${encodeURIComponent(taskID)}/formal-acceptance-intents`, operationID, { packageId: version.packageId, expectedPackageVersion: packageAggregateVersion, formalVersion: version.number, contentHash: version.contentHash, proofDigest: version.proof.digest, workNonce: version.workNonce }, request);
+}
+export function recordFormalAcceptanceSubmission(taskID: string, intent: FormalAcceptance, transactionHash: string, operationID: string, request: typeof fetch = fetch) { return mutation<FormalAcceptance>(`/api/tasks/${encodeURIComponent(taskID)}/formal-acceptance-intents/${encodeURIComponent(intent.id)}/submit`, operationID, { expectedVersion: intent.aggregateVersion, transactionHash }, request); }
+export function reconcileFormalAcceptance(taskID: string, intent: FormalAcceptance, operationID: string, request: typeof fetch = fetch) { return mutation<FormalAcceptance>(`/api/tasks/${encodeURIComponent(taskID)}/formal-acceptance-intents/${encodeURIComponent(intent.id)}/reconcile`, operationID, { expectedVersion: intent.aggregateVersion }, request); }
+export function readDisputes(request:typeof fetch=fetch){return apiRequest<{cases:DisputeView[]}>("/api/disputes",{},request);}
+export function readDispute(caseID:string,request:typeof fetch=fetch){return apiRequest<DisputeView>(`/api/disputes/${encodeURIComponent(caseID)}`,{},request);}
+export function openDisputeCase(taskID:string,operationID:string,input:{deliveryUnitId:string;kind:string;reasonCode:string;statementHash:string},request:typeof fetch=fetch){return mutation<DisputeView>(`/api/tasks/${encodeURIComponent(taskID)}/disputes`,operationID,input,request);}
+export function addDisputeClaim(caseID:string,operationID:string,input:{kind:string;reasonCode:string;statementHash:string},request:typeof fetch=fetch){return disputeMutation(caseID,"claims",operationID,input,request);}
+export function recordDisputeFreeze(caseID:string,operationID:string,transactionHash:string,request:typeof fetch=fetch){return disputeMutation(caseID,"freeze-submission",operationID,{transactionHash},request);}
+export function reconcileDisputeFreeze(caseID:string,transactionHash:string,request:typeof fetch=fetch){return disputeMutation(caseID,"freeze-reconcile",`${caseID}:freeze:${transactionHash}`,{transactionHash},request);}
+export function appendDisputeEvidence(caseID:string,operationID:string,input:{claimId:string;category:string;objectKey:string;ciphertextDigest:string;envelopeKeyReference:string;objectVersionId:string;retentionMode:"COMPLIANCE";retainUntil:string},request:typeof fetch=fetch){return disputeMutation(caseID,"evidence",operationID,input,request);}
+export function requestEvidenceAccess(caseID:string,evidenceID:string,purpose:string,request:typeof fetch=fetch){return disputeMutation(caseID,"evidence-access",`${caseID}:access:${evidenceID}`,{evidenceId:evidenceID,purpose,ttlSeconds:300},request);}
+export function assignDispute(caseID:string,operationID:string,input:{assigneeId:string;stage:"initial"|"review"},request:typeof fetch=fetch){return disputeMutation(caseID,"assignments",operationID,input,request);}
+export function decideDispute(caseID:string,operationID:string,input:{publisherBps:number;reasonCode:string;evidenceRoot:string},request:typeof fetch=fetch){return disputeMutation(caseID,"decisions",operationID,input,request);}
+export function settleDispute(caseID:string,operationID:string,input:{publisherBps:number;reasonCode:string;evidenceRoot:string;agreementHash:string;publisherSignature:string;agentSignature:string},request:typeof fetch=fetch){return disputeMutation(caseID,"settlements",operationID,input,request);}
+export function reviewDispute(caseID:string,operationID:string,input:{assigneeId:string;publisherBps:number;reasonCode:string;evidenceRoot:string},request:typeof fetch=fetch){return disputeMutation(caseID,"reviews",operationID,input,request);}
+export function runAdminOperation(operationID:string,input:{kind:"dlq_replay"|"ledger_reversal"|"reconciliation_repair"|"state_migration";resourceType:string;resourceId:string;reasonCode:string;payload:Record<string,unknown>},request:typeof fetch=fetch){return mutation<DisputeView>("/api/admin/operations",operationID,input,request);}
 
 export async function submitSelectionTransaction(provider: WalletProvider, intent: SelectionIntent): Promise<string> {
   if (!intent.platformSignature || intent.reservation.status !== "reserved") throw new Error("选择证明当前不可提交。");
@@ -100,6 +151,39 @@ export async function submitSelectionTransaction(provider: WalletProvider, inten
   const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: intent.reservation.publisherWallet, to: intent.reservation.contractAddress, data: encodeSelectionCall(intent.reservation.proof, intent.platformSignature), value: "0x0" }] });
   if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效交易哈希。");
   return transactionHash.toLowerCase();
+}
+
+export async function submitFormalAcceptanceTransaction(provider: WalletProvider, intent: FormalAcceptance): Promise<string> {
+  if (!intent.settlementEligibility.eligible || !["intent_recorded", "orphaned"].includes(intent.state)) throw new Error("当前验收意图没有链上结算资格。");
+  if (!/^0x[0-9a-f]{64}$/.test(intent.chainTaskId) || !/^0x[0-9a-f]{40}$/.test(intent.contractAddress) || !/^0x[0-9a-f]{40}$/.test(intent.publisherWallet)) throw new Error("验收链上绑定无效。");
+  const walletChain = await provider.request({ method: "eth_chainId" });
+  if (typeof walletChain !== "string" || !/^0x[0-9a-fA-F]+$/.test(walletChain) || BigInt(walletChain).toString(10) !== intent.chainId) throw new Error(`请将钱包切换到链 ${intent.chainId}。`);
+  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: intent.publisherWallet, to: intent.contractAddress, data: `0xe4725ba1${intent.chainTaskId.slice(2)}`, value: "0x0" }] });
+  if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效交易哈希。");
+  return transactionHash.toLowerCase();
+}
+
+export async function submitWorkNonceTransaction(provider: WalletProvider, chain: FormalDeliveryView["chain"]): Promise<string> {
+  if (!/^0x[0-9a-f]{64}$/.test(chain.taskId) || !/^0x[0-9a-f]{40}$/.test(chain.contractAddress) || !/^0x[0-9a-f]{40}$/.test(chain.publisherWallet)) throw new Error("工作 nonce 链上绑定无效。");
+  const walletChain = await provider.request({ method: "eth_chainId" });
+  if (typeof walletChain !== "string" || !/^0x[0-9a-fA-F]+$/.test(walletChain) || BigInt(walletChain).toString(10) !== chain.chainId) throw new Error(`请将钱包切换到链 ${chain.chainId}。`);
+  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: chain.publisherWallet, to: chain.contractAddress, data: `0x201abd80${chain.taskId.slice(2)}`, value: "0x0" }] });
+  if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效交易哈希。");
+  return transactionHash.toLowerCase();
+}
+
+export async function submitDisputeFreezeTransaction(provider:WalletProvider,view:DisputeView):Promise<string>{
+  const chain=view.context;if(!chain.eligible||!/^0x[0-9a-f]{64}$/.test(chain.chainTaskId)||!/^0x[0-9a-f]{40}$/.test(chain.contractAddress)||!/^0x[0-9a-f]{40}$/.test(chain.publisherWallet)||!/^0x[0-9a-f]{40}$/.test(chain.agentPayout)||!/^0x[0-9a-f]{40}$/.test(chain.disputeResolver))throw new Error("争议冻结链绑定无效。");
+  const walletChain=await provider.request({method:"eth_chainId"});if(typeof walletChain!=="string"||BigInt(walletChain).toString(10)!==chain.chainId)throw new Error(`请将钱包切换到链 ${chain.chainId}。`);
+  const accounts=await provider.request({method:"eth_requestAccounts"});const from=Array.isArray(accounts)&&typeof accounts[0]==="string"?accounts[0].toLowerCase():"";if(from!==chain.publisherWallet&&from!==chain.agentController)throw new Error("当前钱包不是争议当事方。");
+  const head=[normalizeWord(chain.chainTaskId),uintWord(128),addressWord(chain.disputeResolver),uintWord(chain.feeCap)];const leaves=[uintWord(2),uintWord(0),addressWord(chain.publisherWallet),uintWord(chain.frozenAmount),uintWord(0),uintWord(1),addressWord(chain.agentPayout),uintWord(chain.frozenAmount),uintWord(1)];
+  const transactionHash=await provider.request({method:"eth_sendTransaction",params:[{from,to:chain.contractAddress,data:`0xee1e9b21${head.join("")}${leaves.join("")}`,value:"0x0"}]});if(typeof transactionHash!=="string"||!/^0x[0-9a-fA-F]{64}$/.test(transactionHash))throw new Error("钱包未返回有效交易哈希。");return transactionHash.toLowerCase();
+}
+
+export async function sha256Digest(value: unknown): Promise<string> {
+  const encoded = new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
+  const digest = await crypto.subtle.digest("SHA-256", encoded);
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function encodeSelectionCall(proof: SelectionProof, signature: string): string {
@@ -266,6 +350,7 @@ export function requireAllowed(actions: AvailableActions, action: string): Actio
 async function mutation<T>(path: string, idempotencyKey: string, body: unknown, request: typeof fetch) {
   return apiRequest<T>(path, { method: "POST", body, idempotencyKey }, request);
 }
+function disputeMutation(caseID:string,action:string,operationID:string,body:unknown,request:typeof fetch){return mutation<DisputeView>(`/api/disputes/${encodeURIComponent(caseID)}/${action}`,operationID,body,request);}
 
 async function apiRequest<T>(path: string, options: { method?: string; body?: unknown; idempotencyKey?: string } = {}, request: typeof fetch = fetch, allowEmpty = false): Promise<T> {
   const headers = new Headers({ accept: "application/json" });

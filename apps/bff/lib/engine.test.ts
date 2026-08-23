@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { aggregateEngineFinance, aggregateEngineFormalDelivery, aggregateEngineMatching, aggregateEngineResource, forwardEngineMutation, forwardEngineRead, InvalidEngineResponseError, InvalidResourceIdError, resolveEngineBaseUrl } from "./engine.ts";
+import { aggregateEngineDisputes, aggregateEngineFinance, aggregateEngineFormalDelivery, aggregateEngineMatching, aggregateEngineResource, forwardEngineMutation, forwardEngineRead, InvalidEngineResponseError, InvalidResourceIdError, resolveEngineBaseUrl } from "./engine.ts";
 
 test("BFF aggregation calls only internal Engine endpoints and strips sensitive fields", async () => {
   const calls: Array<{ url: string; authorization: string | null }> = [];
@@ -89,9 +89,11 @@ test("formal delivery read validates frozen scope and version identity", async (
     return Response.json({
       package: { id: packageID, taskId: "task-1", assignmentId: `0x${"3".repeat(64)}`, aggregateVersion: 2, allocatedVersion: 1, includedVersions: 3, maximumVersions: 5 },
       scope: { id: digest, contentHash: digest, taskSpecHash: digest },
+      chain: { chainId: "1", contractAddress: `0x${"4".repeat(40)}`, publisherWallet: `0x${"5".repeat(40)}`, taskId: `0x${"6".repeat(64)}`, assignmentId: `0x${"7".repeat(64)}`, workNonce: 1 },
       versions: [{ packageId: packageID, number: 1, aggregateVersion: 2, scopeHash: digest, workNonce: 1, logicalExecutionId: digest, status: "allocated", usedCost: "0" }],
       feedback: [],
       changeOrders: [],
+      acceptances: [],
     });
   }});
   assert.equal(target, "http://engine/v1/tasks/task-1/formal-package");
@@ -103,6 +105,17 @@ test("formal delivery read validates frozen scope and version identity", async (
   assert.equal(feedback.body.id, digest);
   const changeOrder = await forwardEngineMutation({ path: `/v1/tasks/task-1/formal-change-orders/${encodeURIComponent(digest)}/activate`, body: `{}`, idempotencyKey: "activate", sessionToken: "session" }, { engineBaseUrl: "http://engine", fetch: async () => Response.json({ id: digest }, { status: 201 }) });
   assert.equal(changeOrder.body.id, digest);
+  const acceptance = await forwardEngineMutation({ path: `/v1/tasks/task-1/formal-acceptance-intents/${encodeURIComponent(digest)}/reconcile`, body: `{}`, idempotencyKey: "reconcile", sessionToken: "session" }, { engineBaseUrl: "http://engine", fetch: async () => Response.json({ id: digest }, { status: 201 }) });
+  assert.equal(acceptance.body.id, digest);
+});
+
+test("dispute aggregation validates chain binding and limits mutation paths", async()=>{
+  const caseID=`sha256:${"a".repeat(64)}`,address=`0x${"b".repeat(40)}`,chainTask=`0x${"c".repeat(64)}`;let target="";
+  const view={case:{id:caseID,taskId:"task-1",assignmentId:"assignment-1",deliveryUnitId:"package-1",policyVersion:"platform-dispute-v1",publisherId:"publisher-1",agentProviderId:"provider-1",state:"soft_lock_pending",aggregateVersion:1,frozenAmount:"100",asset:"evm:1/native",claims:[],evidence:[],assignments:[],decisions:[],leaves:[]},context:{taskId:"task-1",assignmentId:"assignment-1",deliveryUnitId:"package-1",publisherId:"publisher-1",agentProviderId:"provider-1",chainId:"1",contractAddress:address,chainTaskId:chainTask,publisherWallet:address,agentController:address,agentPayout:address,disputeResolver:address,frozenAmount:"100",asset:"evm:1/native",feeCap:"0",eligible:true,disputeDeadline:"2026-08-30T00:00:00Z"},accessGrants:[],adminOperations:[]};
+  const result=await aggregateEngineDisputes(caseID,"session",{engineBaseUrl:"http://engine",fetch:async(input)=>{target=String(input);return Response.json(view)}});assert.equal(target,`http://engine/v1/disputes/${encodeURIComponent(caseID)}`);assert.equal((result.body.case as {id:string}).id,caseID);
+  await assert.rejects(()=>aggregateEngineDisputes("../admin","session"),InvalidResourceIdError);
+  const mutation=await forwardEngineMutation({path:`/v1/disputes/${encodeURIComponent(caseID)}/evidence`,body:"{}",idempotencyKey:"evidence",sessionToken:"session"},{engineBaseUrl:"http://engine",fetch:async()=>Response.json(view,{status:201})});assert.equal(mutation.status,201);
+  await assert.rejects(()=>forwardEngineMutation({path:`/v1/disputes/${encodeURIComponent(caseID)}/credentials`,body:"{}",idempotencyKey:"x",sessionToken:"session"}),InvalidResourceIdError);
 });
 
 test("Agent capacity and retire decision come from one Engine view request", async () => {

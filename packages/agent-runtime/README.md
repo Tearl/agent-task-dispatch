@@ -14,6 +14,10 @@
 
 业务 Agent 只需实现 `JobExecutor<TRequest, TResult>`、请求校验和可选的文本渲染器。
 
+平台型 Agent 还可以使用 `AgentExecutionAdapter` 和 `createAgentExecutionServer` 实现统一的
+`agent-execution-v1`。公共适配层负责 Envelope 校验、输入哈希、公网引用限制、幂等与 fencing、
+取消信号、JSON 产物、Bearer 鉴权以及 HMAC 回调；业务 Agent 只实现输入解析、概览和正式执行。
+
 ```ts
 import {
   AsyncJobService,

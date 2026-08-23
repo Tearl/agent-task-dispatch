@@ -141,6 +141,27 @@ body {
   background: transparent;
 }
 
+.form-input {
+  width: 100%;
+  border: 1px solid var(--ap-border);
+  border-radius: 0.75rem;
+  background: rgba(5, 9, 20, 0.5);
+  padding: 0.7rem 0.85rem;
+  color: var(--ap-text);
+  font-size: 0.8125rem;
+  outline: none;
+}
+
+.form-input:focus {
+  border-color: var(--ap-border-strong);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.12);
+}
+
+.form-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .ap-text-gradient {
   background: linear-gradient(90deg, #e8f0ff 0%, #7dd3fc 60%, #a5b4fc 100%);
   -webkit-background-clip: text;

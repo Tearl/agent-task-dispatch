@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { AsyncJobRecord } from "@agent-platform/agent-runtime";
+import { EXECUTION_PROTOCOL_VERSION, type AsyncJobRecord, type ExecutionEnvelope } from "@agent-platform/agent-runtime";
+import { createRuntime } from "../src/bootstrap.ts";
 import type { GeneratedImage, ImageRequest } from "../src/domain.ts";
 import { ImageStore } from "../src/image-store.ts";
 import { createImageAgentServer } from "../src/server.ts";
@@ -53,4 +55,34 @@ test("HTTP API validates jobs and protects generated image bytes", async (contex
   });
   assert.equal(submitted.status, 202);
   assert.equal((await submitted.json() as { status: string }).status, "queued");
+});
+
+test("image generator platform adapter returns a bounded overview without calling GLM-Image", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "image-agent-platform-"));
+  const runtime = createRuntime({
+    port: 8092,
+    dataDir,
+    zaiApiKey: "test-key",
+    zaiBaseUrl: "https://example.com/v4",
+    plannerModel: "test-model",
+    jobConcurrency: 1,
+    callbackKeyVersion: "test-v1",
+  });
+  const input = Buffer.from(JSON.stringify({ prompt: "一只橘猫", size: "1280x1280", quality: "hd" }));
+  const envelope: ExecutionEnvelope = {
+    protocolVersion: EXECUTION_PROTOCOL_VERSION, operation: "create", stage: "overview", logicalExecutionId: "image-overview",
+    attemptId: "image-overview:attempt:1", agentId: "agent-db-id", taskId: "task-1", taskSpecHash: `sha256:${"a".repeat(64)}`,
+    inputRef: `data:application/json;base64,${input.toString("base64")}`, inputHash: `sha256:${createHash("sha256").update(input).digest("hex")}`,
+    responsibilityCode: "overview", costCap: "0", toolPolicy: { mode: "read_only", allowedTools: [] },
+    deadline: new Date(Date.now() + 60_000).toISOString(), idempotencyKey: "image-overview", callbackUrl: "https://engine.example/callback",
+    callbackNonce: "nonce", fencingToken: 1, overview: { matchRevision: 1, allocationId: "allocation-1", quoteHash: `sha256:${"b".repeat(64)}` },
+  };
+  runtime.executions.create(envelope);
+  for (let index = 0; index < 40; index += 1) {
+    if (runtime.executions.status({ ...envelope, operation: "status" }).status === "succeeded") break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  const delivered = runtime.executions.deliverable({ ...envelope, operation: "deliverable" });
+  const artifact = await runtime.artifacts.read(delivered.deliverableRef.split("://")[1] ?? "");
+  assert.equal((JSON.parse(artifact?.bytes.toString("utf8") ?? "{}") as { schemaVersion?: string }).schemaVersion, "overview-result-v1");
 });

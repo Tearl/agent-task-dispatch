@@ -67,7 +67,7 @@ async function route<TRequest, TResult>(
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://agent.local");
   if (request.method === "GET" && url.pathname === "/health") {
-    sendJson(response, 200, { status: "healthy", agent: options.manifest.id, version: options.manifest.version });
+    sendJson(response, 200, { status: "healthy", protocolVersion: "1", agent: options.manifest.id, version: options.manifest.version });
     return;
   }
   if (!bearerAuthorized(request, options.apiToken)) {

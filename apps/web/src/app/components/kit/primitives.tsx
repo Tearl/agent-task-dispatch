@@ -130,6 +130,7 @@ export function CtaButton({
   icon: Icon,
   disabled = false,
   busy = false,
+	type = "button",
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -138,10 +139,11 @@ export function CtaButton({
   icon?: LucideIcon;
   disabled?: boolean;
   busy?: boolean;
+	type?: "button" | "submit";
 }) {
   return (
     <button
-      type="button"
+		type={type}
       onClick={onClick}
       disabled={disabled}
       aria-busy={busy}

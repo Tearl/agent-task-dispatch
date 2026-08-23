@@ -1,112 +1,218 @@
-import { useState } from 'react';
-import { toast } from 'sonner';
+import { FileLock2, RefreshCw, Scale, ShieldAlert } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Page } from "../../components/AppShell";
 import {
-  Snowflake, FileLock2, Lock, ShieldCheck, Scale, Info, EyeOff,
-} from 'lucide-react';
-import { Page } from '../../components/AppShell';
-import { PageHeader, Panel, SectionTitle, Pill, CtaButton, GhostButton, InfoNote, Bar } from '../../components/kit/primitives';
-
-type Vote = 'publisher' | 'agent' | 'split' | null;
+  CtaButton,
+  GhostButton,
+  InfoNote,
+  PageHeader,
+  Panel,
+  Pill,
+  SectionTitle,
+} from "../../components/kit/primitives";
+import {
+  decideDispute,
+  readDisputes,
+  reviewDispute,
+  sha256Digest,
+  type DisputeView,
+} from "../../lib/platform-api";
 
 export default function CaseReview() {
-  const [vote, setVote] = useState<Vote>(null);
-  const [sealed, setSealed] = useState(false);
-
-  const submit = () => {
-    if (!vote) { toast.error('请先选择裁决意见'); return; }
-    setSealed(true);
-    toast.success('已提交密封投票，到期前不可查看结果');
+  const [cases, setCases] = useState<DisputeView[]>([]),
+    [selected, setSelected] = useState(""),
+    [award, setAward] = useState(50),
+    [reason, setReason] = useState("evidence_weight"),
+    [error, setError] = useState(""),
+    [notice, setNotice] = useState(""),
+    [busy, setBusy] = useState(false);
+  const operation = useRef("");
+  const load = async () => {
+    try {
+      const result = await readDisputes();
+      setCases(result.cases);
+      setSelected((current) =>
+        result.cases.some((item) => item.case.id === current)
+          ? current
+          : (result.cases[0]?.case.id ?? ""),
+      );
+    } catch (cause) {
+      setError(message(cause));
+    }
   };
-
+  useEffect(() => {
+    void load();
+  }, []);
+  const view = useMemo(
+    () => cases.find((item) => item.case.id === selected) ?? cases[0],
+    [cases, selected],
+  );
+  const submit = async () => {
+    if (!view || busy) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      operation.current ||= crypto.randomUUID();
+      const evidenceRoot = await sha256Digest(
+        view.case.evidence.map((item) => item.ciphertextDigest),
+      );
+      const assignment = view.case.assignments.find(
+        (item) =>
+          item.stage === (view.case.state === "decided" ? "review" : "initial"),
+      );
+      if (!assignment)
+        throw new Error("案件尚未完成当前阶段的独立人员分配与冲突校验。");
+      if (view.case.state === "decided")
+        await reviewDispute(view.case.id, operation.current, {
+          assigneeId: assignment.assigneeId,
+          publisherBps: award * 100,
+          reasonCode: reason,
+          evidenceRoot,
+        });
+      else
+        await decideDispute(view.case.id, operation.current, {
+          publisherBps: award * 100,
+          reasonCode: reason,
+          evidenceRoot,
+        });
+      operation.current = "";
+      setNotice(
+        view.case.state === "decided"
+          ? "唯一复核已提交，最终责任可以生效。"
+          : "初裁已密封提交；复核窗口结束前信誉不会更新。",
+      );
+      await load();
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!view)
+    return (
+      <Page>
+        <PageHeader title="案件审理" subtitle="独立初裁与唯一复核" />
+        {error ? (
+          <InfoNote tone="red">
+            <span role="alert">{error}</span>
+          </InfoNote>
+        ) : (
+          <InfoNote>当前没有分配给你的案件。</InfoNote>
+        )}
+      </Page>
+    );
+  const stage = view.case.state === "decided" ? "唯一复核" : "独立初裁";
   return (
     <Page>
-      <PageHeader title="仲裁案件审理" subtitle="ARB-771 · TSK-2012 市场消费者调研报告" actions={<Pill tone="violet" dot>密封投票阶段</Pill>} />
-
+      <PageHeader
+        title="案件审理"
+        subtitle={`${stage} · ${view.case.id}`}
+        actions={
+          <GhostButton icon={RefreshCw} onClick={() => void load()}>
+            刷新
+          </GhostButton>
+        }
+      />
+      {error ? (
+        <div
+          role="alert"
+          className="rounded-xl bg-rose-300/10 p-3 text-rose-100"
+        >
+          {error}
+        </div>
+      ) : null}
+      {notice ? (
+        <div
+          role="status"
+          className="rounded-xl bg-cyan-300/10 p-3 text-cyan-100"
+        >
+          {notice}
+        </div>
+      ) : null}
       <InfoNote tone="amber">
-        <span className="inline-flex items-center gap-1.5"><Info size={14} />单个仲裁者只能投票，不能直接划转争议资金；裁决按仲裁小组密封投票结果由合约自动执行。</span>
+        <span className="inline-flex gap-2">
+          <ShieldAlert size={14} />
+          同一人员不能复核自己的初裁；第二次复核、未授权费用及无效档位由 Engine
+          拒绝。
+        </span>
       </InfoNote>
-
-      <div className="grid gap-6 lg:grid-cols-[1.5fr_1fr]">
-        <div className="space-y-6">
-          <Panel className="p-6">
-            <SectionTitle right={<Pill tone="cyan"><span className="inline-flex items-center gap-1"><EyeOff size={12} />已脱敏</span></Pill>}>脱敏证据</SectionTitle>
-            <div className="space-y-3">
-              {[
-                { side: '需求方', files: ['验收标准_原始约定.pdf', '样本数据核对表.xlsx'] },
-                { side: 'Agent 方', files: ['交付报告_全文.pdf', '数据来源与方法说明.md'] },
-              ].map((b) => (
-                <div key={b.side} className="rounded-xl border border-[var(--ap-border)] bg-[rgba(10,18,38,0.4)] p-4">
-                  <div className="text-[13px] text-[var(--ap-text-2)]">{b.side}提交</div>
-                  <div className="mt-2 space-y-2">
-                    {b.files.map((f) => (
-                      <div key={f} className="flex items-center justify-between text-[13px] text-[var(--ap-muted)]">
-                        <span className="inline-flex items-center gap-2"><FileLock2 size={14} className="text-[var(--ap-cyan)]" />{f}</span>
-                        <span className="font-mono text-[12px]">当事方身份已隐藏</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </Panel>
-
-          <Panel className="p-6">
-            <SectionTitle>裁决意见（密封）</SectionTitle>
-            <div className="grid gap-3 sm:grid-cols-3">
-              {[
-                { id: 'publisher', label: '支持需求方', desc: '全额退款' },
-                { id: 'split', label: '按完成度分账', desc: '部分结算' },
-                { id: 'agent', label: '支持 Agent', desc: '全额结算' },
-              ].map((o) => (
-                <button key={o.id} disabled={sealed} onClick={() => setVote(o.id as Vote)}
-                  className="rounded-xl border p-4 text-left transition-colors disabled:opacity-60"
-                  style={{
-                    borderColor: vote === o.id ? 'var(--ap-border-strong)' : 'var(--ap-border)',
-                    background: vote === o.id ? 'var(--ap-cyan-soft)' : 'transparent',
-                  }}>
-                  <Scale size={17} className="text-[var(--ap-cyan)]" />
-                  <div className="mt-2 text-[14px] text-[var(--ap-text)]">{o.label}</div>
-                  <div className="text-[12px] text-[var(--ap-muted)]">{o.desc}</div>
+      <div className="grid gap-6 lg:grid-cols-[1.3fr_.8fr]">
+        <Panel className="p-5">
+          <SectionTitle
+            right={<Pill tone="violet">{view.case.evidence.length}/12 类</Pill>}
+          >
+            脱敏证据清单
+          </SectionTitle>
+          <ol aria-label="案件证据清单" className="space-y-2">
+            {view.case.evidence.map((item) => (
+              <li
+                key={item.id}
+                className="flex gap-2 rounded-xl border border-[var(--ap-border)] p-3 text-[12px]"
+              >
+                <FileLock2 size={15} />
+                <span>
+                  <b>{item.category}</b>
+                  <span className="block break-all text-[var(--ap-muted)]">
+                    {item.ciphertextDigest}
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ol>
+        </Panel>
+        <Panel strong className="p-5">
+          <SectionTitle right={<Pill tone="cyan">五档判付</Pill>}>
+            {stage}
+          </SectionTitle>
+          <fieldset>
+            <legend className="mb-2 text-[12px] text-[var(--ap-muted)]">
+              发布者退款比例
+            </legend>
+            <div className="grid grid-cols-5 gap-2">
+              {[0, 25, 50, 75, 100].map((value) => (
+                <button
+                  type="button"
+                  key={value}
+                  aria-pressed={award === value}
+                  onClick={() => setAward(value)}
+                  className={`rounded-lg border p-2 text-[12px] ${award === value ? "border-cyan-300 bg-cyan-300/10" : "border-[var(--ap-border)]"}`}
+                >
+                  {value}%
                 </button>
               ))}
             </div>
-            {vote === 'split' && (
-              <div className="mt-4">
-                <div className="flex justify-between text-[13px] text-[var(--ap-muted)]"><span>建议结算比例</span><span>70%</span></div>
-                <div className="mt-2"><Bar value={70} /></div>
-              </div>
-            )}
-            {!sealed ? (
-              <CtaButton full icon={Lock} className="mt-5" onClick={submit}>密封提交投票</CtaButton>
-            ) : (
-              <div className="mt-5 flex items-center justify-center gap-2 rounded-xl border border-[rgba(52,211,153,0.3)] bg-[rgba(52,211,153,0.08)] py-3 text-[14px] text-[var(--ap-success)]">
-                <ShieldCheck size={16} /> 已密封提交，等待到期揭晓
-              </div>
-            )}
-          </Panel>
-        </div>
-
-        <div className="space-y-6">
-          <Panel strong className="p-6">
-            <div className="flex items-center gap-2 text-[13px] text-[var(--ap-danger)]"><Snowflake size={15} />冻结中争议资金</div>
-            <div className="mt-2 text-[28px] text-white">1,500 <span className="text-[14px] text-[var(--ap-muted)]">USDC</span></div>
-            <p className="mt-2 text-[12px] text-[var(--ap-muted)]">资金锁定在托管合约，任何仲裁者都无法直接划转，只能通过投票影响裁决。</p>
-          </Panel>
-
-          <Panel className="p-6">
-            <SectionTitle>治理质押（YD）</SectionTitle>
-            <div className="space-y-2 text-[13px]">
-              <div className="flex justify-between"><span className="text-[var(--ap-muted)]">已质押</span><span className="text-[var(--ap-text)]">5,000 YD</span></div>
-              <div className="flex justify-between"><span className="text-[var(--ap-muted)]">本案投票权重</span><span className="text-[var(--ap-text)]">1.0×</span></div>
-              <div className="flex justify-between"><span className="text-[var(--ap-muted)]">诚信裁决奖励</span><span className="text-[var(--ap-success)]">+参与奖励</span></div>
-            </div>
-            <InfoNote tone="green" ><span className="inline-flex items-center gap-1.5"><Info size={12} />YD 治理质押用于资格与投票，不作 Agent 履约金。</span></InfoNote>
-          </Panel>
-
-          <GhostButton className="w-full">请求案件补充材料</GhostButton>
-        </div>
+          </fieldset>
+          <label
+            htmlFor="decision-reason"
+            className="mb-1 mt-4 block text-[12px] text-[var(--ap-muted)]"
+          >
+            决定原因
+          </label>
+          <input
+            id="decision-reason"
+            className="form-input"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+          />
+          <CtaButton
+            full
+            className="mt-4"
+            icon={Scale}
+            busy={busy}
+            disabled={busy || view.case.evidence.length < 12}
+            onClick={() => void submit()}
+          >
+            提交{stage}
+          </CtaButton>
+          <p className="mt-3 text-[11px] text-[var(--ap-muted)]">
+            完整清单、时间窗、分配、职责分离和费用授权均在 Engine 再校验。
+          </p>
+        </Panel>
       </div>
     </Page>
   );
 }
-
+function message(value: unknown) {
+  return value instanceof Error ? value.message : "案件操作失败。";
+}

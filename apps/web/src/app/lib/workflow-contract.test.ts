@@ -132,3 +132,20 @@ test("matching comparison uses authoritative snapshots and exposes degraded and 
   assert.match(page, /operationID\.current/);
   assert.doesNotMatch(page, /from "\.\.\/\.\.\/lib\/mock"/);
 });
+
+test("formal delivery UI exposes accessible append-only revision and three-state acceptance flows", async () => {
+  const page=await readFile(new URL("../pages/publisher/Settlement.tsx",import.meta.url),"utf8");
+  for(const token of ["readFormalDelivery","正式交付版本时间线","aria-pressed","结构化差异","feedback-description","change-description","intent_recorded","pending_confirmation","confirmed","检查链上确认","advanceWorkNonce","work nonce","responsibility_pending","awaiting_funding","role=\"alert\"","aria-live=\"polite\""]) assert.match(page,new RegExp(token));
+  assert.match(page,/feedbackOperation\.current \?\?=/); assert.match(page,/changeOperation\.current \?\?=/);
+  assert.match(page,/sessionStorage\.setItem/); assert.match(page,/sessionStorage\.getItem/); assert.match(page,/formal-delivery:\$\{kind\}:\$\{taskID\}/);
+  assert.match(page,/disabled=\{!eligible\|\|confirmed\|\|busy\}/);
+  assert.doesNotMatch(page,/from "\.\.\/\.\.\/lib\/mock"/);
+});
+
+test("dispute and administration workflows use authoritative cases, canonical freeze and audited repair paths",async()=>{
+  const [workspace,review,admin,publisher,agent]=await Promise.all([readFile(new URL("../components/DisputeWorkspace.tsx",import.meta.url),"utf8"),readFile(new URL("../pages/arbitrator/CaseReview.tsx",import.meta.url),"utf8"),readFile(new URL("../pages/admin/Exceptions.tsx",import.meta.url),"utf8"),readFile(new URL("../pages/publisher/Disputes.tsx",import.meta.url),"utf8"),readFile(new URL("../pages/agent/Disputes.tsx",import.meta.url),"utf8")]);
+  for(const token of ["readDisputes","争议案件时间线","soft_lock_pending","canonical DisputeFrozen","sessionStorage","appendDisputeEvidence","requestEvidenceAccess","settleDispute","双方签名和解","反请求","role=\"alert\""])assert.match(workspace,new RegExp(token));
+  assert.match(review,/\[\s*0,\s*25,\s*50,\s*75,\s*100\s*\]/);assert.match(review,/reviewDispute/);assert.match(review,/evidenceRoot/);assert.match(review,/同一人员不能复核/);
+  assert.match(admin,/runAdminOperation/);assert.match(admin,/dlq_replay/);assert.match(admin,/ledger_reversal/);assert.match(admin,/不能代签客户交易/);
+  for(const page of [workspace,review,admin,publisher,agent])assert.doesNotMatch(page,/lib\/mock|CASES|toast\.success/);
+});

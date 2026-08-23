@@ -9,9 +9,12 @@ export interface ImageAgentConfig {
   zaiBaseUrl: string;
   plannerModel: string;
   jobConcurrency: number;
+  callbackKey?: Buffer;
+  callbackKeyVersion: string;
 }
 
 export function loadConfig(): ImageAgentConfig {
+  const callbackEncoded = process.env.IMAGE_AGENT_CALLBACK_KEY_BASE64?.trim();
   return {
     port: integerFromEnvironment("IMAGE_AGENT_PORT", 8092, 1, 65_535),
     dataDir: path.resolve(process.env.IMAGE_AGENT_DATA_DIR ?? ".data/image-generator"),
@@ -21,6 +24,8 @@ export function loadConfig(): ImageAgentConfig {
     zaiBaseUrl: normalizeZaiBaseUrl(process.env.ZAI_BASE_URL),
     plannerModel: process.env.IMAGE_AGENT_PLANNER_MODEL?.trim() || "glm-4.5-flash",
     jobConcurrency: integerFromEnvironment("IMAGE_AGENT_JOB_CONCURRENCY", 1, 1, 10),
+    callbackKey: callbackEncoded ? Buffer.from(callbackEncoded, "base64") : undefined,
+    callbackKeyVersion: process.env.IMAGE_AGENT_CALLBACK_KEY_VERSION?.trim() || "image-agent-callback-v1",
   };
 }
 
@@ -40,6 +45,9 @@ export function assertConfig(config: ImageAgentConfig): void {
     throw new Error("IMAGE_AGENT_API_TOKEN must contain at least 24 characters in production");
   }
   if (!config.publicBaseUrl) throw new Error("IMAGE_AGENT_PUBLIC_BASE_URL is required in production");
+  if (!config.callbackKey || config.callbackKey.byteLength < 32) {
+    throw new Error("IMAGE_AGENT_CALLBACK_KEY_BASE64 must decode to at least 32 bytes in production");
+  }
 }
 
 function normalizePublicBaseUrl(value: string | undefined): string | undefined {

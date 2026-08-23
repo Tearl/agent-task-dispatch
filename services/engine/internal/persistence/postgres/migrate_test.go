@@ -168,6 +168,55 @@ func TestFormalChangeOrderMigrationEnforcesFundingScopeAndVersionBounds(t *testi
 	}
 }
 
+func TestFormalAcceptanceMigrationIsAppendOnlyAndSettlementBounded(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000017_formal_acceptance.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{"formal_acceptance_intents", "formal_acceptance_states", "intent_recorded", "pending_confirmation", "confirmed", "orphaned", "change_order_release", "formal_change_order_settlements", "formal acceptance history is immutable", "authorized funding boundary"} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("formal acceptance migration missing %q", required)
+		}
+	}
+	down, err := os.ReadFile("migrations/000017_formal_acceptance.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"drop table", "truncate", "delete from"} {
+		if strings.Contains(strings.ToLower(string(down)), forbidden) {
+			t.Fatalf("formal acceptance rollback destroys history: %q", forbidden)
+		}
+	}
+}
+
+func TestDisputeMigrationPreservesWORMEvidenceAndAuditedRepairs(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000018_disputes_admin.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{"dispute_cases", "dispute_events", "dispute_worm_receipts", "retention_mode='COMPLIANCE'", "dispute_evidence_manifest", "dispute_evidence_access_grants", "15 minutes", "dispute_conflict_declarations", "dispute_review_fee_authorizations", "dispute_admin_operations", "dispute_allocation", "dispute evidence and audit history is immutable", "dispute_frozen", "dispute_allocation_finalized"} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("dispute migration missing %q", required)
+		}
+	}
+	lower := strings.ToLower(sql)
+	for _, forbidden := range []string{"private_key", "signature text", "credential_value", "plaintext"} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("dispute schema persists forbidden material %q", forbidden)
+		}
+	}
+	down, err := os.ReadFile("migrations/000018_disputes_admin.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upper := strings.ToUpper(string(down))
+	if strings.Contains(upper, "DROP TABLE") || strings.Contains(upper, "DELETE FROM") {
+		t.Fatal("dispute rollback must preserve cases, evidence, decisions and audits")
+	}
+}
+
 func TestAgentDownMigrationPreservesImmutableHistory(t *testing.T) {
 	contents, err := os.ReadFile("migrations/000003_agents.down.sql")
 	if err != nil {

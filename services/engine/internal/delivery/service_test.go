@@ -58,6 +58,15 @@ func (repository *repositoryStub) AcceptChangeOrder(context.Context, Mutation, s
 func (repository *repositoryStub) ActivateChangeOrder(context.Context, Mutation, bool, string, string, ChangeOrderVersionInput) (ChangeOrder, bool, error) {
 	return ChangeOrder{}, false, repository.err
 }
+func (repository *repositoryStub) CreateAcceptanceIntent(context.Context, Mutation, string, AcceptanceIntentInput, AcceptanceIntent) (AcceptanceIntent, bool, error) {
+	return AcceptanceIntent{}, false, repository.err
+}
+func (repository *repositoryStub) SubmitAcceptance(context.Context, Mutation, string, string, AcceptanceTransitionInput) (AcceptanceIntent, bool, error) {
+	return AcceptanceIntent{}, false, repository.err
+}
+func (repository *repositoryStub) ReconcileAcceptance(context.Context, Mutation, string, string, AcceptanceTransitionInput) (AcceptanceIntent, bool, error) {
+	return AcceptanceIntent{}, false, repository.err
+}
 
 type proofSignerStub struct{ proof Proof }
 
@@ -67,6 +76,17 @@ func (signer *proofSignerStub) Sign(proof Proof) (string, string, string, error)
 }
 
 type recordingRepository struct{ repositoryStub }
+
+type acceptanceRecordingRepository struct {
+	repositoryStub
+	intent   AcceptanceIntent
+	mutation Mutation
+}
+
+func (repository *acceptanceRecordingRepository) CreateAcceptanceIntent(_ context.Context, mutation Mutation, _ string, _ AcceptanceIntentInput, intent AcceptanceIntent) (AcceptanceIntent, bool, error) {
+	repository.intent, repository.mutation = intent, mutation
+	return intent, false, repository.err
+}
 
 func (repository *recordingRepository) RecordResult(_ context.Context, result ExecutionResult, proof *ProofRecord) (Version, bool, error) {
 	repository.executionResult, repository.proof = result, proof
@@ -159,5 +179,34 @@ func TestRecordResultValidatesTrustedWorkerPayload(t *testing.T) {
 		if _, _, err := service.RecordResult(context.Background(), result); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("invalid worker result accepted: %#v err=%v", result, err)
 		}
+	}
+}
+
+func TestAcceptanceIntentIsPublisherAuthorizedAndProofBound(t *testing.T) {
+	repository := &acceptanceRecordingRepository{}
+	service, _ := NewService(repository)
+	input := AcceptanceIntentInput{PackageID: testDigest, ExpectedPackageVersion: 2, FormalVersion: 1, ContentHash: testDigest, ProofDigest: testDigest, WorkNonce: 1}
+	if _, _, err := service.CreateAcceptanceIntent(context.Background(), auth.Session{UserID: "provider", Roles: []string{"agent_provider"}}, "accept-1", "task", input); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("provider created acceptance intent: %v", err)
+	}
+	first, _, err := service.CreateAcceptanceIntent(context.Background(), auth.Session{UserID: "publisher", Roles: []string{"publisher"}}, "accept-1", "task", input)
+	if err != nil || !validDigest(first.ID) || first.State != AcceptanceIntentRecorded || repository.mutation.RequestHash == "" {
+		t.Fatalf("intent=%#v mutation=%#v err=%v", first, repository.mutation, err)
+	}
+	input.WorkNonce = 2
+	second, _, _ := service.CreateAcceptanceIntent(context.Background(), auth.Session{UserID: "publisher", Roles: []string{"publisher"}}, "accept-2", "task", input)
+	if first.ID == second.ID {
+		t.Fatal("work nonce was not bound to acceptance identity")
+	}
+}
+
+func TestAcceptanceTransitionsValidateTransactionBoundary(t *testing.T) {
+	service, _ := NewService(&repositoryStub{})
+	session := auth.Session{UserID: "publisher", Roles: []string{"publisher"}}
+	if _, _, err := service.SubmitAcceptance(context.Background(), session, "submit", "task", testDigest, AcceptanceTransitionInput{ExpectedVersion: 1, TransactionHash: "bad"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("invalid tx hash accepted: %v", err)
+	}
+	if _, _, err := service.ReconcileAcceptance(context.Background(), session, "reconcile", "task", testDigest, AcceptanceTransitionInput{ExpectedVersion: 2, TransactionHash: "0x" + strings.Repeat("a", 64)}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("reconcile accepted caller-selected transaction: %v", err)
 	}
 }

@@ -80,3 +80,41 @@ func TestChangeOrderStateMachineAllocatesV4V5AndPermanentlyRejectsV6(t *testing.
 		t.Fatalf("V6 was not permanently rejected: %v", err)
 	}
 }
+
+func TestSettlementGateAllowsCurrentV1AndRejectsStaleBindings(t *testing.T) {
+	base := SettlementGateSnapshot{IntentPackageAggregate: 2, CurrentPackageAggregate: 2, IntentFormalVersion: 1, CurrentFormalVersion: 1, VersionStatus: VersionReview, IntentContentHash: testDigest, CurrentContentHash: testDigest, IntentProofDigest: testDigest, CurrentProofDigest: testDigest, IntentWorkNonce: 1, VersionWorkNonce: 1, CanonicalWorkNonce: 1, ChangeOrderReady: true}
+	if gate := SettlementGate(base); !gate.Eligible || gate.ReasonCode != "" {
+		t.Fatalf("current V1 should be eligible: %#v", gate)
+	}
+	tests := []struct {
+		name, want string
+		mutate     func(*SettlementGateSnapshot)
+	}{
+		{"feedback advanced aggregate", "package_advanced", func(v *SettlementGateSnapshot) { v.CurrentPackageAggregate++ }},
+		{"new version", "newer_version", func(v *SettlementGateSnapshot) { v.CurrentFormalVersion++ }},
+		{"proof replaced", "proof_mismatch", func(v *SettlementGateSnapshot) {
+			v.CurrentProofDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		}},
+		{"nonce advanced", "work_nonce_advanced", func(v *SettlementGateSnapshot) { v.CanonicalWorkNonce++ }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := base
+			test.mutate(&value)
+			if gate := SettlementGate(value); gate.Eligible || gate.ReasonCode != test.want {
+				t.Fatalf("gate=%#v want=%s", gate, test.want)
+			}
+		})
+	}
+}
+
+func TestSettlementGateRequiresFundedChangeOrderForV4V5(t *testing.T) {
+	value := SettlementGateSnapshot{IntentPackageAggregate: 10, CurrentPackageAggregate: 10, IntentFormalVersion: 4, CurrentFormalVersion: 4, VersionStatus: VersionReview, IntentContentHash: testDigest, CurrentContentHash: testDigest, IntentProofDigest: testDigest, CurrentProofDigest: testDigest, IntentWorkNonce: 4, VersionWorkNonce: 4, CanonicalWorkNonce: 4}
+	if gate := SettlementGate(value); gate.Eligible || gate.ReasonCode != "change_order_not_funded" {
+		t.Fatalf("unfunded V4 accepted: %#v", gate)
+	}
+	value.ChangeOrderReady = true
+	if gate := SettlementGate(value); !gate.Eligible {
+		t.Fatalf("funded V4 rejected: %#v", gate)
+	}
+}

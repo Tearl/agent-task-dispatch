@@ -16,21 +16,23 @@ var (
 )
 
 const (
-	ProjectionVersion = "authoritative-chain-projection-v1"
-	StateCanonical    = "canonical"
-	StateOrphaned     = "orphaned"
-	EventTaskCreated  = "task_created"
-	EventSelection    = "selection_confirmed"
-	EventWorkNonce    = "work_nonce_advanced"
-	EventReleased     = "funds_released"
-	EventRefunded     = "funds_refunded"
-	EventEarnings     = "earnings_accrued"
-	EventWithdrawal   = "earnings_withdrawn"
-	EventYield        = "yield_eligibility_changed"
-	EventDisputeOpen  = "dispute_opened"
-	EventDisputeDone  = "dispute_resolved"
-	TxSucceeded       = "succeeded"
-	TxFailed          = "failed"
+	ProjectionVersion  = "authoritative-chain-projection-v1"
+	StateCanonical     = "canonical"
+	StateOrphaned      = "orphaned"
+	EventTaskCreated   = "task_created"
+	EventSelection     = "selection_confirmed"
+	EventWorkNonce     = "work_nonce_advanced"
+	EventReleased      = "funds_released"
+	EventRefunded      = "funds_refunded"
+	EventEarnings      = "earnings_accrued"
+	EventWithdrawal    = "earnings_withdrawn"
+	EventYield         = "yield_eligibility_changed"
+	EventDisputeOpen   = "dispute_opened"
+	EventDisputeDone   = "dispute_resolved"
+	EventDisputeFreeze = "dispute_frozen"
+	EventDisputeAlloc  = "dispute_allocation_finalized"
+	TxSucceeded        = "succeeded"
+	TxFailed           = "failed"
 )
 
 type Scope struct {

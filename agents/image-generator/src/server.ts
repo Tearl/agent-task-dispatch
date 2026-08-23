@@ -1,5 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { bearerAuthorized, createAgentHttpServer, sendJson, type AgentJobApplication } from "@agent-platform/agent-runtime";
+import {
+  bearerAuthorized,
+  createAgentHttpServer,
+  createExecutionHttpHandler,
+  sendJson,
+  type AgentExecutionAdapter,
+  type AgentJobApplication,
+  type ExecutionArtifactStore,
+} from "@agent-platform/agent-runtime";
 import { imageRequestSchema, type GeneratedImage, type ImageRequest } from "./domain.ts";
 import type { ImageStore } from "./image-store.ts";
 
@@ -7,6 +15,8 @@ export function createImageAgentServer(
   service: AgentJobApplication<ImageRequest, GeneratedImage>,
   images: ImageStore,
   apiToken?: string,
+  executions?: AgentExecutionAdapter<ImageRequest, GeneratedImage>,
+  artifacts?: ExecutionArtifactStore,
 ) {
   const jobsServer = createAgentHttpServer({
     manifest: { id: "image-generator", version: "0.1.0" },
@@ -17,8 +27,16 @@ export function createImageAgentServer(
     parseRequest: (value) => imageRequestSchema.parse(value),
   });
 
+  const executionHandler = executions && artifacts ? createExecutionHttpHandler({
+    manifest: { id: "image-generator", version: "0.1.0" },
+    executions,
+    artifacts,
+    apiToken,
+  }) : undefined;
+
   return createServer(async (request, response) => {
     try {
+      if (executionHandler && await executionHandler(request, response)) return;
       if (await serveImage(request, response, images, apiToken)) return;
       jobsServer.emit("request", request, response);
     } catch (error) {

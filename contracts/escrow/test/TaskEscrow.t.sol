@@ -11,6 +11,7 @@ interface Vm {
     function expectRevert(bytes4 selector) external;
     function prank(address sender) external;
     function sign(uint256 privateKey, bytes32 digest) external returns (uint8 v, bytes32 r, bytes32 s);
+    function warp(uint256 newTimestamp) external;
 }
 
 contract ReentrantPublisher {
@@ -72,9 +73,64 @@ contract TaskEscrowTest {
     address private constant payout = address(0xF00D);
     TaskEscrow private escrow;
 
+    receive() external payable {}
+
     function setUp() public {
         escrow = new TaskEscrow(address(this), vm.addr(PLATFORM_SIGNER_KEY));
         vm.deal(publisher, 100 ether);
+    }
+
+    function testFrozenLeafAllocationRequiresCompleteStableValueConservingCoverage() public {
+        bytes32 taskId = keccak256("leaf-dispute");
+        _fund(taskId, 4 ether);
+        TaskEscrow.SelectionProof memory proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
+        vm.prank(publisher);
+        escrow.selectAgent(proof, _sign(proof));
+        TaskEscrow.FrozenLeaf[] memory leaves = new TaskEscrow.FrozenLeaf[](2);
+        leaves[0] = TaskEscrow.FrozenLeaf(0, publisher, 3 ether, 0);
+        leaves[1] = TaskEscrow.FrozenLeaf(1, payout, 3 ether, 1);
+        vm.prank(publisher);
+        escrow.freezeDispute(taskId, leaves, address(this), 0.5 ether);
+
+        TaskEscrow.DisputeAllocation[] memory incomplete = new TaskEscrow.DisputeAllocation[](1);
+        incomplete[0] = TaskEscrow.DisputeAllocation(0, publisher, 2 ether);
+        vm.expectRevert(TaskEscrow.InvalidState.selector);
+        escrow.finalizeDisputeAllocation(taskId, incomplete, 0.5 ether);
+        vm.warp(block.timestamp + 1 days);
+        vm.expectRevert(TaskEscrow.InvalidProof.selector);
+        escrow.finalizeDisputeAllocation(taskId, incomplete, 0.5 ether);
+
+        TaskEscrow.DisputeAllocation[] memory allocation = new TaskEscrow.DisputeAllocation[](2);
+        allocation[0] = TaskEscrow.DisputeAllocation(0, publisher, 1 ether);
+        allocation[1] = TaskEscrow.DisputeAllocation(1, payout, 1.5 ether);
+        uint256 publisherBefore = publisher.balance;
+        escrow.finalizeDisputeAllocation(taskId, allocation, 0.5 ether);
+        require(publisher.balance == publisherBefore + 1 ether, "publisher leaf not paid");
+        require(escrow.claimableEarnings(agentController, payout) == 1.5 ether, "agent leaf not isolated");
+        require(address(escrow).balance == 0, "allocation did not conserve value");
+    }
+
+    function testFrozenLeafAllocationRejectsOwnerReplacementAndReplay() public {
+        bytes32 taskId = keccak256("leaf-owner");
+        _fund(taskId, 3 ether);
+        TaskEscrow.SelectionProof memory proof = _proof(taskId, 3 ether, 0, 0);
+        vm.prank(publisher);
+        escrow.selectAgent(proof, _sign(proof));
+        TaskEscrow.FrozenLeaf[] memory leaves = new TaskEscrow.FrozenLeaf[](2);
+        leaves[0] = TaskEscrow.FrozenLeaf(0, publisher, 3 ether, 0);
+        leaves[1] = TaskEscrow.FrozenLeaf(1, payout, 3 ether, 1);
+        vm.prank(agentController);
+        escrow.freezeDispute(taskId, leaves, address(this), 0);
+        TaskEscrow.DisputeAllocation[] memory allocation = new TaskEscrow.DisputeAllocation[](2);
+        allocation[0] = TaskEscrow.DisputeAllocation(0, address(0xBAD), 1 ether);
+        allocation[1] = TaskEscrow.DisputeAllocation(1, payout, 2 ether);
+        vm.warp(block.timestamp + 1 days);
+        vm.expectRevert(TaskEscrow.InvalidProof.selector);
+        escrow.finalizeDisputeAllocation(taskId, allocation, 0);
+        allocation[0] = TaskEscrow.DisputeAllocation(0, publisher, 1 ether);
+        escrow.finalizeDisputeAllocation(taskId, allocation, 0);
+        vm.expectRevert(TaskEscrow.InvalidState.selector);
+        escrow.finalizeDisputeAllocation(taskId, allocation, 0);
     }
 
     function testSelectionAppliesCreditLocksNetRefundsExcessAndStartsV1() public {
@@ -357,15 +413,35 @@ contract TaskEscrowTest {
         vm.prank(publisher);
         escrow.selectAgent(proof, signature);
 
+        TaskEscrow.FrozenLeaf[] memory leaves = new TaskEscrow.FrozenLeaf[](2);
+        leaves[0] = TaskEscrow.FrozenLeaf(0, publisher, 3 ether, 0);
+        leaves[1] = TaskEscrow.FrozenLeaf(1, payout, 3 ether, 1);
         vm.expectRevert(TaskEscrow.NotAuthorized.selector);
         vm.prank(payout);
-        escrow.openDispute(taskId);
+        escrow.freezeDispute(taskId, leaves, address(this), 0);
         vm.prank(agentController);
-        escrow.openDispute(taskId);
-        escrow.resolveDispute(taskId, payable(payout));
+        escrow.freezeDispute(taskId, leaves, address(this), 0);
+        TaskEscrow.DisputeAllocation[] memory allocation = new TaskEscrow.DisputeAllocation[](2);
+        allocation[0] = TaskEscrow.DisputeAllocation(0, publisher, 0);
+        allocation[1] = TaskEscrow.DisputeAllocation(1, payout, 3 ether);
+        vm.warp(block.timestamp + 1 days);
+        escrow.finalizeDisputeAllocation(taskId, allocation, 0);
 
         require(escrow.claimableEarnings(agentController, payout) == 3 ether, "award was not isolated");
         require(payout.balance == 0, "resolver bypassed pull payment");
+    }
+
+    function testDeprecatedSingleRecipientDisputePathFailsClosed() public {
+        bytes32 taskId = keccak256("deprecated-dispute");
+        _fund(taskId, 1 ether);
+        TaskEscrow.SelectionProof memory proof = _proof(taskId, 1 ether, 0, 0);
+        vm.prank(publisher);
+        escrow.selectAgent(proof, _sign(proof));
+        vm.expectRevert(TaskEscrow.InvalidState.selector);
+        vm.prank(publisher);
+        escrow.openDispute(taskId);
+        vm.expectRevert(TaskEscrow.InvalidState.selector);
+        escrow.resolveDispute(taskId, payable(payout));
     }
 
     function testYieldEligibilityStartsOnlyAfterSelection() public {

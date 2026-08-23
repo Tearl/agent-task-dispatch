@@ -72,6 +72,9 @@ importers:
 
   agents/glm-image-to-code:
     dependencies:
+      '@agent-platform/agent-runtime':
+        specifier: workspace:*
+        version: link:../../packages/agent-runtime
       '@agent-platform/image-to-code-core':
         specifier: workspace:*
         version: link:../../packages/image-to-code-core
@@ -119,6 +122,9 @@ importers:
 
   agents/qwen-image-to-code:
     dependencies:
+      '@agent-platform/agent-runtime':
+        specifier: workspace:*
+        version: link:../../packages/agent-runtime
       '@agent-platform/image-to-code-core':
         specifier: workspace:*
         version: link:../../packages/image-to-code-core
@@ -265,6 +271,10 @@ importers:
   contracts/escrow: {}
 
   packages/agent-runtime:
+    dependencies:
+      zod:
+        specifier: 'catalog:'
+        version: 4.4.3
     devDependencies:
       '@agent-platform/config':
         specifier: workspace:*
@@ -302,6 +312,9 @@ importers:
 
   packages/image-to-code-core:
     dependencies:
+      '@agent-platform/agent-runtime':
+        specifier: workspace:*
+        version: link:../agent-runtime
       zod:
         specifier: 'catalog:'
         version: 4.4.3

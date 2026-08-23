@@ -24,6 +24,8 @@ import (
 	credentialpostgres "github.com/example/agent-platform/engine/internal/credential/postgres"
 	"github.com/example/agent-platform/engine/internal/delivery"
 	deliverypostgres "github.com/example/agent-platform/engine/internal/delivery/postgres"
+	"github.com/example/agent-platform/engine/internal/dispute"
+	disputepostgres "github.com/example/agent-platform/engine/internal/dispute/postgres"
 	"github.com/example/agent-platform/engine/internal/financeview"
 	financepostgres "github.com/example/agent-platform/engine/internal/financeview/postgres"
 	"github.com/example/agent-platform/engine/internal/matchingview"
@@ -161,6 +163,21 @@ func main() {
 		logger.Error("formal delivery service failed", "error", err)
 		os.Exit(1)
 	}
+	disputeResolver := os.Getenv("DISPUTE_RESOLVER_ADDRESS")
+	if escrowContract != "" && disputeResolver == "" {
+		logger.Error("dispute resolver address is required with escrow projection")
+		os.Exit(1)
+	}
+	disputeStore, err := disputepostgres.NewStore(db, disputeResolver)
+	if err != nil {
+		logger.Error("dispute store failed", "error", err)
+		os.Exit(1)
+	}
+	disputeService, err := dispute.NewService(disputeStore)
+	if err != nil {
+		logger.Error("dispute service failed", "error", err)
+		os.Exit(1)
+	}
 	var selectionService *selection.Service
 	var chainProjector *chainprojection.Projector
 	var chainReconciler *chainprojection.Reconciler
@@ -226,7 +243,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              address,
-		Handler:           api.NewHandlerWithDelivery(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingViewService, deliveryService),
+		Handler:           api.NewHandlerWithDisputes(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingViewService, deliveryService, disputeService),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,

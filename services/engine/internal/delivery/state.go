@@ -29,3 +29,42 @@ func NextIncludedVersion(packageValue Package, previous *Version, input StartInp
 	}
 	return next, packageValue.AggregateVersion + 1, nil
 }
+
+type SettlementGateSnapshot struct {
+	IntentPackageAggregate  int64
+	CurrentPackageAggregate int64
+	IntentFormalVersion     int
+	CurrentFormalVersion    int
+	VersionStatus           string
+	IntentContentHash       string
+	CurrentContentHash      string
+	IntentProofDigest       string
+	CurrentProofDigest      string
+	IntentWorkNonce         uint64
+	VersionWorkNonce        uint64
+	CanonicalWorkNonce      uint64
+	ChangeOrderReady        bool
+}
+
+// SettlementGate decides eligibility independently from transaction
+// submission. A canonical receipt confirms only a proof that is still current.
+func SettlementGate(value SettlementGateSnapshot) SettlementEligibility {
+	reason := ""
+	switch {
+	case value.IntentPackageAggregate != value.CurrentPackageAggregate:
+		reason = "package_advanced"
+	case value.IntentFormalVersion != value.CurrentFormalVersion:
+		reason = "newer_version"
+	case value.VersionStatus != VersionReview:
+		reason = "version_not_reviewable"
+	case value.IntentContentHash != value.CurrentContentHash || value.IntentProofDigest != value.CurrentProofDigest || value.IntentWorkNonce != value.VersionWorkNonce:
+		reason = "proof_mismatch"
+	case value.CanonicalWorkNonce == 0:
+		reason = "chain_projection_pending"
+	case value.IntentWorkNonce != value.CanonicalWorkNonce:
+		reason = "work_nonce_advanced"
+	case value.IntentFormalVersion > IncludedVersions && !value.ChangeOrderReady:
+		reason = "change_order_not_funded"
+	}
+	return SettlementEligibility{Eligible: reason == "", ReasonCode: reason}
+}

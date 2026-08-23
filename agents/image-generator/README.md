@@ -29,3 +29,8 @@ curl -X POST http://localhost:8092/v1/image-generation/jobs \
 ```
 
 响应中的 `statusUrl` 用于查询任务状态；完成后读取其 `resultUrl`，结果内的 `imageUrl` 即图片地址。默认尺寸为 `1280x1280`、质量为 GLM-Image 唯一支持的 `hd`；还支持 `1568x1056`、`1056x1568`、`1472x1088`、`1088x1472`、`1728x960`、`960x1728`。
+
+同一个服务还提供平台统一的 `agent-execution-v1` 接口：`POST /v1/executions`、
+`/status`、`/cancel` 和 `/deliverable`。`GET /health` 返回 `protocolVersion: "1"`，
+结构化交付物位于 `/v1/artifacts/:id`。生产环境还必须配置
+`IMAGE_AGENT_CALLBACK_KEY_BASE64`（至少 32 字节）及其对应的 Engine 回调验签密钥版本。

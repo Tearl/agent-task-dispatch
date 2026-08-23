@@ -119,6 +119,43 @@ WHERE reservation.chain_id=$1 AND reservation.contract_address=$2 AND reservatio
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE tasks SET status='refunded',aggregate_version=aggregate_version+1,updated_at=$2 WHERE task_id=$1 AND status<>'refunded'`, taskID, now)
 		return err
+
+	case chainprojection.EventDisputeAlloc:
+		publisherAmount, _ := event.Payload["publisherAmount"].(string)
+		agentAmount, _ := event.Payload["agentAmount"].(string)
+		feeAmount, _ := event.Payload["feeAmount"].(string)
+		taskID, formalID, asset, err := formalAccountForChainTask(ctx, tx, event.TaskID)
+		if err != nil {
+			return err
+		}
+		entries := []settlementEntry{}
+		if publisherAmount != "0" {
+			controlID := settlementDigest("fund-system-account", "funding_control", asset, "double-entry-v1")
+			if _, err = tx.ExecContext(ctx, `INSERT INTO fund_accounts (account_id,account_class,account_type,reference_id,asset_key,state,balance,created_at,updated_at) VALUES ($1,'system','funding_control','funding',$2,'open',0,$3,$3) ON CONFLICT (account_type,reference_id,asset_key) DO NOTHING`, controlID, asset, now); err != nil {
+				return err
+			}
+			entries = append(entries, settlementEntry{formalID, "formal_escrow", "debit", publisherAmount, asset}, settlementEntry{controlID, "funding_control", "credit", publisherAmount, asset})
+		}
+		if feeAmount != "0" {
+			feeID := settlementDigest("fund-task-account", "dispute_fee_pool", taskID, asset, "double-entry-v1")
+			if _, err = tx.ExecContext(ctx, `INSERT INTO fund_accounts (account_id,account_class,account_type,reference_id,task_id,asset_key,state,balance,created_at,updated_at) VALUES ($1,'task','dispute_fee_pool',$2,$2,$3,'open',0,$4,$4) ON CONFLICT (account_type,reference_id,asset_key) DO NOTHING`, feeID, taskID, asset, now); err != nil {
+				return err
+			}
+			entries = append(entries, settlementEntry{formalID, "formal_escrow", "debit", feeAmount, asset}, settlementEntry{feeID, "dispute_fee_pool", "credit", feeAmount, asset})
+		}
+		if len(entries) > 0 {
+			if err = insertSettlementJournal(ctx, tx, event.ID, "dispute_allocation", taskID, event.ID, "final_dispute_allocation", now, entries); err != nil {
+				return err
+			}
+		}
+		status := "settled"
+		if publisherAmount != "0" && agentAmount != "0" {
+			status = "partially_settled"
+		} else if publisherAmount != "0" {
+			status = "refunded"
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET status=$2,aggregate_version=aggregate_version+1,updated_at=$3 WHERE task_id=$1 AND status<>$2`, taskID, status, now)
+		return err
 	}
 	return nil
 }
@@ -145,7 +182,7 @@ func reverseSettlementBlock(ctx context.Context, tx *sql.Tx, scope chainprojecti
 FROM chain_events event JOIN fund_journals journal ON journal.source_ref=event.event_id
 JOIN fund_entries entry ON entry.journal_id=journal.journal_id
 WHERE event.chain_id=$1 AND event.contract_address=$2 AND event.block_hash=$3
-  AND journal.journal_type IN ('settlement_release','settlement_refund','earnings_withdrawal')
+  AND journal.journal_type IN ('settlement_release','settlement_refund','earnings_withdrawal','change_order_release','change_order_residual','dispute_allocation')
 ORDER BY journal.journal_id,entry.entry_index`, scope.ChainID, scope.Contract, blockHash)
 	if err != nil {
 		return err
@@ -191,6 +228,14 @@ ORDER BY journal.journal_id,entry.entry_index`, scope.ChainID, scope.Contract, b
 				return err
 			}
 		}
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO formal_acceptance_states (acceptance_intent_id,aggregate_version,state,transaction_hash,chain_event_id,reason_code,occurred_at)
+SELECT intent.acceptance_intent_id,latest.aggregate_version+1,'orphaned',latest.transaction_hash,latest.chain_event_id,'chain_reorganization',$4
+FROM formal_acceptance_intents intent
+JOIN LATERAL (SELECT state.* FROM formal_acceptance_states state WHERE state.acceptance_intent_id=intent.acceptance_intent_id ORDER BY state.aggregate_version DESC LIMIT 1) latest ON true
+JOIN chain_events event ON event.event_id=latest.chain_event_id
+WHERE event.chain_id=$1 AND event.contract_address=$2 AND event.block_hash=$3 AND latest.state='confirmed'`, scope.ChainID, scope.Contract, blockHash, now); err != nil {
+		return err
 	}
 	return nil
 }

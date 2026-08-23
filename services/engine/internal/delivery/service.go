@@ -193,6 +193,68 @@ func (service *Service) ActivateChangeOrder(ctx context.Context, session auth.Se
 	return service.repository.ActivateChangeOrder(ctx, Mutation{PublisherID: session.UserID, IdempotencyKey: key, RequestHash: requestHash}, isAdmin, taskID, changeOrderID, input)
 }
 
+func (service *Service) CreateAcceptanceIntent(ctx context.Context, session auth.Session, key, taskID string, input AcceptanceIntentInput) (AcceptanceIntent, bool, error) {
+	if session.UserID == "" || !slices.Contains(session.Roles, "publisher") {
+		return AcceptanceIntent{}, false, ErrForbidden
+	}
+	if strings.TrimSpace(taskID) == "" || !validMutationKey(key) || !validDigest(input.PackageID) || input.ExpectedPackageVersion < 1 || input.FormalVersion < 1 || input.FormalVersion > MaximumVersions || !validDigest(input.ContentHash) || !validDigest(input.ProofDigest) || input.WorkNonce < 1 || input.WorkNonce > math.MaxInt64 {
+		return AcceptanceIntent{}, false, ErrInvalidInput
+	}
+	requestHash, err := hashJSON(struct {
+		TaskID string
+		Input  AcceptanceIntentInput
+	}{taskID, input})
+	if err != nil {
+		return AcceptanceIntent{}, false, err
+	}
+	id, err := hashJSON(struct {
+		Version, PackageID, ContentHash, ProofDigest string
+		FormalVersion                                int
+		WorkNonce                                    uint64
+	}{AcceptanceVersion, input.PackageID, input.ContentHash, input.ProofDigest, input.FormalVersion, input.WorkNonce})
+	if err != nil {
+		return AcceptanceIntent{}, false, err
+	}
+	draft := AcceptanceIntent{ID: id, PackageID: input.PackageID, TaskID: taskID, FormalVersion: input.FormalVersion, ContentHash: input.ContentHash, ProofDigest: input.ProofDigest, WorkNonce: input.WorkNonce, PackageAggregateVersion: input.ExpectedPackageVersion, AggregateVersion: 1, State: AcceptanceIntentRecorded, Eligibility: SettlementEligibility{Eligible: true}}
+	return service.repository.CreateAcceptanceIntent(ctx, Mutation{PublisherID: session.UserID, IdempotencyKey: key, RequestHash: requestHash}, taskID, input, draft)
+}
+
+func (service *Service) SubmitAcceptance(ctx context.Context, session auth.Session, key, taskID, intentID string, input AcceptanceTransitionInput) (AcceptanceIntent, bool, error) {
+	return service.acceptanceTransition(ctx, session, key, taskID, intentID, input, false)
+}
+
+func (service *Service) ReconcileAcceptance(ctx context.Context, session auth.Session, key, taskID, intentID string, input AcceptanceTransitionInput) (AcceptanceIntent, bool, error) {
+	return service.acceptanceTransition(ctx, session, key, taskID, intentID, input, true)
+}
+
+func (service *Service) acceptanceTransition(ctx context.Context, session auth.Session, key, taskID, intentID string, input AcceptanceTransitionInput, reconcile bool) (AcceptanceIntent, bool, error) {
+	if session.UserID == "" || !slices.Contains(session.Roles, "publisher") {
+		return AcceptanceIntent{}, false, ErrForbidden
+	}
+	validTx := strings.HasPrefix(input.TransactionHash, "0x") && len(input.TransactionHash) == 66
+	if strings.TrimSpace(taskID) == "" || !validDigest(intentID) || !validMutationKey(key) || input.ExpectedVersion < 1 || (!reconcile && !validTx) || (reconcile && input.TransactionHash != "") {
+		return AcceptanceIntent{}, false, ErrInvalidInput
+	}
+	if validTx {
+		if _, err := hex.DecodeString(input.TransactionHash[2:]); err != nil {
+			return AcceptanceIntent{}, false, ErrInvalidInput
+		}
+		input.TransactionHash = strings.ToLower(input.TransactionHash)
+	}
+	requestHash, err := hashJSON(struct {
+		TaskID, IntentID, Operation string
+		Input                       AcceptanceTransitionInput
+	}{taskID, intentID, map[bool]string{true: "reconcile", false: "submit"}[reconcile], input})
+	if err != nil {
+		return AcceptanceIntent{}, false, err
+	}
+	mutation := Mutation{PublisherID: session.UserID, IdempotencyKey: key, RequestHash: requestHash}
+	if reconcile {
+		return service.repository.ReconcileAcceptance(ctx, mutation, taskID, intentID, input)
+	}
+	return service.repository.SubmitAcceptance(ctx, mutation, taskID, intentID, input)
+}
+
 // RecordDispatched and RecordResult are trusted worker boundaries. Public HTTP
 // callers never choose formal version state or billing outcomes.
 func (service *Service) RecordDispatched(ctx context.Context, logicalExecutionID string) (Version, bool, error) {

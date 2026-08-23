@@ -116,6 +116,22 @@ export async function aggregateEngineFormalDelivery(
   return { status: 200, body: value as Record<string, unknown> };
 }
 
+export async function aggregateEngineDisputes(
+  caseID: string | undefined,
+  sessionToken: string,
+  options: { fetch?: typeof fetch; engineBaseUrl?: string } = {},
+): Promise<EngineAggregateResult> {
+  if (caseID !== undefined && !/^sha256:[0-9a-f]{64}$/.test(caseID)) throw new InvalidResourceIdError("invalid dispute id");
+  if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
+  const path = caseID === undefined ? "/v1/disputes" : `/v1/disputes/${encodeURIComponent(caseID)}`;
+  const response = await (options.fetch ?? fetch)(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}${path}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
+  if (!response.ok) return engineError(response);
+  const value = sanitizePayload(await readEngineJSON(response));
+  const valid = caseID === undefined ? Boolean(record(value) && Array.isArray(record(value)?.cases) && (record(value)?.cases as unknown[]).every(validDisputeView)) : validDisputeView(value);
+  if (!valid) throw new InvalidEngineResponseError("invalid engine dispute response");
+  return { status: 200, body: value as Record<string, unknown> };
+}
+
 export async function forwardEngineRead(path: string, sessionToken: string, options: { fetch?: typeof fetch; engineBaseUrl?: string } = {}): Promise<EngineAggregateResult> {
   if (!/^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/selection-reservations\/sha256(?::|%3A)[0-9a-f]{64}$/.test(path)) throw new InvalidResourceIdError("invalid read path");
   if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
@@ -158,6 +174,10 @@ function validMutationPath(path: string): boolean {
     || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/formal-packages\/start$/.test(path)
     || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/formal-feedback$/.test(path)
     || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/formal-change-orders(?:\/sha256(?::|%3A)[0-9a-f]{64}\/(?:decision|accept|activate))?$/.test(path)
+    || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/formal-acceptance-intents(?:\/sha256(?::|%3A)[0-9a-f]{64}\/(?:submit|reconcile))?$/.test(path)
+    || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/disputes$/.test(path)
+    || /^\/v1\/disputes\/sha256(?::|%3A)[0-9a-f]{64}\/(?:claims|freeze-submission|freeze-reconcile|evidence|evidence-access|assignments|decisions|settlements|reviews|finalize)$/.test(path)
+    || path === "/v1/admin/operations"
     || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/selection-reservations(?:\/sha256(?::|%3A)[0-9a-f]{64}\/reconcile)?$/.test(path);
 }
 
@@ -259,13 +279,14 @@ function validMatchingCandidate(value: unknown): boolean {
 }
 
 function validFormalDelivery(taskID: string, value: unknown): boolean {
-  const view = record(value); const formalPackage = record(view?.package); const scope = record(view?.scope);
+  const view = record(value); const formalPackage = record(view?.package); const scope = record(view?.scope); const chain=record(view?.chain);
   if (!view || !formalPackage || formalPackage.taskId !== taskID || !text(formalPackage.id) || !text(formalPackage.assignmentId)
     || !Number.isSafeInteger(formalPackage.aggregateVersion) || !Number.isSafeInteger(formalPackage.allocatedVersion)
     || formalPackage.includedVersions !== 3 || formalPackage.maximumVersions !== 5 || !scope || !text(scope.id)
-    || !text(scope.contentHash) || !text(scope.taskSpecHash) || !Array.isArray(view.versions) || !Array.isArray(view.feedback) || !Array.isArray(view.changeOrders)) return false;
+    || !text(scope.contentHash) || !text(scope.taskSpecHash) || !chain || !text(chain.chainId) || !/^0x[0-9a-f]{40}$/.test(String(chain.contractAddress)) || !/^0x[0-9a-f]{40}$/.test(String(chain.publisherWallet)) || !/^0x[0-9a-f]{64}$/.test(String(chain.taskId)) || !/^0x[0-9a-f]{64}$/.test(String(chain.assignmentId)) || !Number.isSafeInteger(chain.workNonce) || !Array.isArray(view.versions) || !Array.isArray(view.feedback) || !Array.isArray(view.changeOrders) || !Array.isArray(view.acceptances)) return false;
   if (!view.feedback.every(validFormalFeedback)) return false;
   if (!view.changeOrders.every(validFormalChangeOrder)) return false;
+  if (!view.acceptances.every(validFormalAcceptance)) return false;
   return view.versions.every((item) => {
     const version = record(item);
     return Boolean(version && version.packageId === formalPackage.id && Number.isSafeInteger(version.number)
@@ -275,6 +296,16 @@ function validFormalDelivery(taskID: string, value: unknown): boolean {
       && (version.feedbackResponses === undefined || Array.isArray(version.feedbackResponses))
       && (version.changes === undefined || Array.isArray(version.changes)));
   });
+}
+
+function validFormalAcceptance(value: unknown): boolean {
+  const intent=record(value); const eligibility=record(intent?.settlementEligibility);
+  return Boolean(intent&&text(intent.id)&&text(intent.packageId)&&text(intent.taskId)&&Number.isSafeInteger(intent.formalVersion)
+    && text(intent.contentHash)&&text(intent.proofDigest)&&Number.isSafeInteger(intent.workNonce)&&Number.isSafeInteger(intent.packageAggregateVersion)
+    && Number.isSafeInteger(intent.aggregateVersion)&&["intent_recorded","pending_confirmation","confirmed","orphaned"].includes(String(intent.state))
+    && text(intent.chainId)&&/^0x[0-9a-f]{40}$/.test(String(intent.contractAddress))&&/^0x[0-9a-f]{40}$/.test(String(intent.publisherWallet))&&/^0x[0-9a-f]{64}$/.test(String(intent.chainTaskId))
+    && eligibility&&typeof eligibility.eligible==="boolean"&&(eligibility.reasonCode===undefined||text(eligibility.reasonCode))
+    && text(intent.createdAt)&&text(intent.updatedAt));
 }
 
 function validFormalChangeOrder(value: unknown): boolean {
@@ -297,6 +328,19 @@ function validFormalFeedback(value: unknown): boolean {
 function validFormalProof(value: unknown): boolean {
   const recordValue=record(value); const proof=record(recordValue?.proof);
   return Boolean(recordValue&&proof&&proof.version==="formal-proof-v1"&&text(recordValue.payloadHash)&&text(recordValue.digest)&&/^0x[0-9a-f]{130}$/.test(String(recordValue.signature))&&text(proof.contentHash)&&Number.isSafeInteger(proof.formalVersion)&&Number.isSafeInteger(proof.workNonce)&&Number.isSafeInteger(proof.packageAggregateVersion));
+}
+
+function validDisputeView(value: unknown): boolean {
+  const view=record(value);const caseRecord=record(view?.case);const context=record(view?.context);
+  return Boolean(view&&caseRecord&&context&&/^sha256:[0-9a-f]{64}$/.test(String(caseRecord.id))&&text(caseRecord.taskId)
+    && text(caseRecord.assignmentId)&&text(caseRecord.deliveryUnitId)&&caseRecord.policyVersion==="platform-dispute-v1"
+    && ["soft_lock_pending","frozen","evidence","decided","review_pending","final","orphaned"].includes(String(caseRecord.state))
+    && Number.isSafeInteger(caseRecord.aggregateVersion)&&money(caseRecord.frozenAmount)&&text(caseRecord.asset)
+    && Array.isArray(caseRecord.claims)&&Array.isArray(caseRecord.evidence)&&Array.isArray(caseRecord.assignments)&&Array.isArray(caseRecord.decisions)&&Array.isArray(caseRecord.leaves)
+    && text(context.chainId)&&/^0x[0-9a-f]{40}$/.test(String(context.contractAddress))&&/^0x[0-9a-f]{64}$/.test(String(context.chainTaskId))
+    && /^0x[0-9a-f]{40}$/.test(String(context.publisherWallet))&&/^0x[0-9a-f]{40}$/.test(String(context.agentController))&&/^0x[0-9a-f]{40}$/.test(String(context.agentPayout))
+    && (context.disputeResolver===""||/^0x[0-9a-f]{40}$/.test(String(context.disputeResolver)))&&money(context.feeCap)
+    && Array.isArray(view.accessGrants)&&Array.isArray(view.adminOperations));
 }
 
 function validTotals(value: unknown, keys: string[]): boolean {

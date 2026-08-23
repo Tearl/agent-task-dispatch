@@ -22,6 +22,8 @@ var eventSignatures = map[string]string{
 	hexKeccak("YieldEligibilityChanged(bytes32,uint256,bool)"):                                                               EventYield,
 	hexKeccak("DisputeOpened(bytes32,address)"):                                                                              EventDisputeOpen,
 	hexKeccak("DisputeResolved(bytes32,address,uint256)"):                                                                    EventDisputeDone,
+	hexKeccak("DisputeFrozen(bytes32,bytes32,uint32,uint256,uint256,uint64)"):                                                EventDisputeFreeze,
+	hexKeccak("DisputeAllocationFinalized(bytes32,bytes32,uint256,uint256,uint256)"):                                         EventDisputeAlloc,
 }
 
 var selectAgentSelector = hexKeccak("selectAgent((bytes32,bytes32,address,address,bytes32,bytes32,bytes32,bytes32,uint64,uint64,uint256,uint256,uint256,bytes32,bytes32,uint64),bytes)")[:10]
@@ -144,6 +146,18 @@ func decodeEvent(block Block, transaction Transaction, log Log, eventType string
 		}
 		event.TaskID = hashTopic(log.Topics[1])
 		event.Payload = map[string]any{"recipient": addressTopic(log.Topics[2]), "amount": number(data[0])}
+	case EventDisputeFreeze:
+		if len(log.Topics) != 3 || len(data) != 4 {
+			return Event{}, ErrInvalidInput
+		}
+		event.TaskID = hashTopic(log.Topics[1])
+		event.Payload = map[string]any{"root": hashTopic(log.Topics[2]), "leafCount": uint64Number(data[0]), "amount": number(data[1]), "feeCap": number(data[2]), "finalizeAfter": uint64Number(data[3])}
+	case EventDisputeAlloc:
+		if len(log.Topics) != 3 || len(data) != 3 {
+			return Event{}, ErrInvalidInput
+		}
+		event.TaskID = hashTopic(log.Topics[1])
+		event.Payload = map[string]any{"root": hashTopic(log.Topics[2]), "publisherAmount": number(data[0]), "agentAmount": number(data[1]), "feeAmount": number(data[2])}
 	}
 	return event, nil
 }

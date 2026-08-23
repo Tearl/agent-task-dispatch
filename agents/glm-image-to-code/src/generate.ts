@@ -6,7 +6,7 @@ import {
 } from "@agent-platform/image-to-code-core";
 import { glmImageToCodeAgent } from "./agent.ts";
 
-export async function generateCodeFromImage(input: ImageToCodeRequest): Promise<GeneratedProject> {
-  const result = await glmImageToCodeAgent.generate(buildImageToCodeMessages(input));
+export async function generateCodeFromImage(input: ImageToCodeRequest, signal?: AbortSignal): Promise<GeneratedProject> {
+  const result = await glmImageToCodeAgent.generate(buildImageToCodeMessages(input), { abortSignal: signal });
   return parseGeneratedProjectText(result.text);
 }

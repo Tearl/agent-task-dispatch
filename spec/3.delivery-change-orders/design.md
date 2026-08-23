@@ -7,6 +7,8 @@
 | v2 | 2026-08-22 | 交付 T-301 冻结范围、V1–V3 状态机与正式执行 Outbox |
 | v3 | 2026-08-22 | 交付 T-302 权威反馈、链上 work nonce 门控、差异与签名证明 |
 | v4 | 2026-08-22 | 交付 T-303 变更单生命周期、责任资金策略与 V4/V5 授权 |
+| v5 | 2026-08-23 | 交付 T-304 验收意图、canonical 确认、过时证明失效与结算资格 |
+| v6 | 2026-08-23 | 交付 T-305 权威正式交付时间线、反馈、差异、变更单与验收 UI |
 
 ## 架构与影响层
 Engine 交付聚合拥有版本分配、反馈与责任；合约拥有 work nonce 和资金资格；Worker 执行不可变命令；BFF/Web 渲染时间线、差异和链上状态。
@@ -97,3 +99,47 @@ V2/V3 的领域状态机要求上一版本处于 `review`、父版本及内容�
 - `POST /v1/tasks/{taskId}/formal-change-orders/{changeOrderId}/decision`
 - `POST /v1/tasks/{taskId}/formal-change-orders/{changeOrderId}/accept`
 - `POST /v1/tasks/{taskId}/formal-change-orders/{changeOrderId}/activate`
+
+## T-304 验收与结算资格
+
+### 三态验收与权威确认
+
+验收使用 `formal-acceptance-v1`，业务状态按只追加记录推进：`intent_recorded -> pending_confirmation -> confirmed`；链重组会追加 `orphaned`，随后允许使用新的交易再次进入待确认。意图绑定套餐、正式版本、内容哈希、交付证明摘要、套餐聚合版本和 work nonce，提交步骤只登记浏览器已发送的交易哈希，不把交易提交等同于验收。
+
+只有目标 escrow 合约当前 canonical 区块中的 `FundsReleased` 才能把待确认意图推进为 `confirmed`。确认必须同时匹配交易哈希、链上 task ID、Publisher 当前 assignment、Payout 地址和基础正式应付金额；`EarningsAccrued` 仍由 T-404 负责基础 `formal_escrow -> formal_agent_receivable` 账本投影，两种事件职责不重叠。
+
+### 资格门控与失效
+
+创建、提交和确认三个边界都会重新检查当前套餐聚合版本、最新正式版本、`review` 终态、内容/证明摘要、版本 work nonce 和 canonical 最新 work nonce。V1 在没有反馈和后续版本时可直接验收；反馈推进套餐聚合、新版本分配、证明不一致或 `WorkNonceAdvanced` 前进都会使旧证明立即失去结算资格。V4/V5 还要求绑定的变更单已消费，Agent 责任保持零价格无借记，Publisher/Platform 责任账户必须仍为 `frozen` 且余额覆盖授权价格。
+
+### 变更单结算与重组
+
+canonical 验收确认会为非零变更单追加独立的 `change_order_escrow -> formal_agent_receivable` 双录，金额只能等于责任决定冻结的授权价格。超出授权价格的余额通过独立余额返还分录进入资金控制账户，并在不可变结算映射中保留 `residual_recipient_id`，因此 Publisher 余额返回 Publisher、Platform 余额默认返回事故账户，显式不可撤销补偿策略仍返回 Publisher。Agent 责任不创建账户或分录。
+
+两类变更单分录都以 `FundsReleased` 事件为来源；链重组复用 T-404 的精确反向分录并把验收追加为 `orphaned`，不会覆盖原意图、确认或资金历史。
+
+### API
+
+- `POST /v1/tasks/{taskId}/formal-acceptance-intents`
+- `POST /v1/tasks/{taskId}/formal-acceptance-intents/{intentId}/submit`
+- `POST /v1/tasks/{taskId}/formal-acceptance-intents/{intentId}/reconcile`
+- `GET /v1/tasks/{taskId}/formal-package` 在同一权威视图返回验收状态与当前结算资格。
+
+## T-305 正式交付工作台
+
+### 权威视图与交互边界
+
+- Web 在 `/publisher/tasks/{taskId}/delivery` 展示 BFF 聚合的只追加版本时间线、冻结范围、证明、反馈响应、结构化差异、变更单和验收资格；旧入口仅保留兼容跳转组件，不维护第二套业务状态。
+- BFF 对正式套餐及验收中的链 ID、escrow 地址、Publisher 钱包和链上 task ID 做严格响应校验。浏览器只向 BFF 提交领域命令，并仅使用聚合返回的绑定构造 `advanceWorkNonce(bytes32)` 与 `accept(bytes32)` 钱包交易。
+- Engine 从当前 assignment reservation 与 canonical 链事件派生链绑定和最新 work nonce。UI 不使用本地模拟数据，也不把钱包回执或未确认事件显示成权威成功。
+
+### 反馈、修订与变更单
+
+- 反馈表单显式收集验收标准、目标、问题、期望结果和范围声明，使用稳定操作 ID 防止重复追加。下一版本只有在 canonical work nonce 严格连续时才能启动；V4/V5 还要求目标变更单已经生效。
+- 变更单界面展示责任、资金来源、授权价格、余额接收者和拒绝/待决原因，只在领域状态允许时开放接受或激活动作。范围差异和新规格摘要在浏览器端规范哈希后提交，由 Engine 再执行所有权、状态和并发校验。
+
+### 验收、重放与可访问性
+
+- 验收界面区分意图、链上待确认、canonical 已确认及 orphaned 四种展示状态，明确显示过时证明、work nonce 前进和资金未授权等不可结算原因。`425` 只进入待确认状态，后续动作复用已登记交易而不会再次唤起钱包。
+- 钱包已发送但服务端尚未登记的验收或 nonce 交易会按任务保存在会话存储中；刷新后继续登记或对账，成功落库/分配后清理，从而避免重复链上提交。
+- 时间线使用有序列表和当前选择状态，所有表单控件具有关联标签，错误、阻塞与异步状态分别通过 `alert`、`status` 和 `aria-live` 暴露给辅助技术。

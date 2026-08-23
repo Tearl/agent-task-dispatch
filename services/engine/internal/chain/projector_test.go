@@ -209,6 +209,25 @@ func TestDecoderProjectsEarningsWithdrawalAndYieldIsolationEvents(t *testing.T) 
 	}
 }
 
+func TestDecoderBindsFrozenRootAndCompleteAllocation(t *testing.T) {
+	taskID, root := hash("dispute-task"), hash("frozen-leaves")
+	block := testBlock(1, hash("genesis"), "dispute-allocation")
+	block.Transactions = []Transaction{{Hash: hash("dispute-tx"), To: testContract, Input: "0x", Status: TxSucceeded, Logs: []Log{
+		{Index: 1, Address: testContract, Topics: []string{hexKeccak("DisputeFrozen(bytes32,bytes32,uint32,uint256,uint256,uint64)"), taskID, root}, Data: encodeWords(uintWordTest(2), decimalWord("100"), decimalWord("5"), uintWordTest(1_800_000_000))},
+		{Index: 2, Address: testContract, Topics: []string{hexKeccak("DisputeAllocationFinalized(bytes32,bytes32,uint256,uint256,uint256)"), taskID, root}, Data: encodeWords(decimalWord("25"), decimalWord("70"), decimalWord("5"))},
+	}}}
+	events, err := DecodeBlock(testScope(), block)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("decode dispute events: %#v %v", events, err)
+	}
+	if events[0].Type != EventDisputeFreeze || events[0].Payload["root"] != root || events[0].Payload["leafCount"] != uint64(2) || events[0].Payload["amount"] != "100" {
+		t.Fatalf("freeze mismatch: %#v", events[0])
+	}
+	if events[1].Type != EventDisputeAlloc || events[1].Payload["publisherAmount"] != "25" || events[1].Payload["agentAmount"] != "70" || events[1].Payload["feeAmount"] != "5" {
+		t.Fatalf("allocation mismatch: %#v", events[1])
+	}
+}
+
 type inventoryStub map[string]string
 
 func (inventory inventoryStub) ObservedInventory(context.Context, Scope, uint64, map[string]string) (map[string]string, error) {

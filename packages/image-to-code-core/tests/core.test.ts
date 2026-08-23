@@ -7,6 +7,7 @@ import {
   buildImageToCodeMessages,
   generatedProjectSchema,
   loadImageInput,
+  parseImageToCodeExecutionInput,
   parseGeneratedProjectText,
   resolveProjectOutputDirectory,
   writeGeneratedProject,
@@ -23,6 +24,16 @@ test("loads a validated PNG and builds a multimodal message", async () => {
 
   assert.equal(messages[0]?.content[1]?.type, "file");
   assert.equal(messages[0]?.content[1]?.data, png.toString("base64"));
+});
+
+test("validates platform image-to-code JSON input", () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
+  const input = parseImageToCodeExecutionInput({
+    image: { data: png.toString("base64"), filename: "screen.png", mediaType: "image/png" },
+    target: "React",
+  });
+  assert.equal(input.image.mediaType, "image/png");
+  assert.throws(() => parseImageToCodeExecutionInput({ image: { data: Buffer.from("fake").toString("base64"), filename: "fake.png", mediaType: "image/png" } }), /do not match/u);
 });
 
 test("rejects an invalid image signature", async () => {

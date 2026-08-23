@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ActionBlockedError, authenticateWallet, clientRolesForEngineRoles, createAndPublishTask, onboardAgent, readAgentFinance, readPublisherFinance, readReconciliationFinance, requireAllowed, revokeSession, submitSelectionTransaction, type SelectionIntent } from "./platform-api.ts";
+import { ActionBlockedError, authenticateWallet, clientRolesForEngineRoles, createAndPublishTask, createFormalAcceptance, onboardAgent, readAgentFinance, readFormalDelivery, readPublisherFinance, readReconciliationFinance, recordFormalAcceptanceSubmission, requireAllowed, revokeSession, startFormalVersion, submitDisputeFreezeTransaction, submitFormalAcceptanceTransaction, submitSelectionTransaction, submitWorkNonceTransaction, type DisputeView, type FormalAcceptance, type FormalVersion, type SelectionIntent } from "./platform-api.ts";
 
 test("wallet authentication requests a nonce, signs it, and creates an HttpOnly-backed session", async () => {
   const walletCalls: unknown[] = [];
@@ -49,6 +49,37 @@ test("selection transaction encodes the frozen proof and never asks the wallet t
   assert.equal(data.slice(10 + 16 * 64, 10 + 17 * 64), (17 * 32).toString(16).padStart(64, "0"));
   assert.equal(data.slice(10 + 17 * 64, 10 + 18 * 64), (65).toString(16).padStart(64, "0"));
   assert.equal(data.length, 2 + 8 + 21 * 64);
+});
+
+test("formal acceptance and work nonce calls use only authoritative chain bindings", async () => {
+  const calls: unknown[]=[];
+  const provider={request:async(input:{method:string;params?:unknown[]})=>{calls.push(input);return input.method==="eth_chainId"?"0x1":`0x${"77".repeat(32)}`;}};
+  const intent:FormalAcceptance={id:`sha256:${"1".repeat(64)}`,packageId:`sha256:${"2".repeat(64)}`,taskId:"task-1",formalVersion:1,contentHash:`sha256:${"3".repeat(64)}`,proofDigest:`sha256:${"4".repeat(64)}`,workNonce:1,packageAggregateVersion:2,aggregateVersion:1,state:"intent_recorded",chainId:"1",contractAddress:`0x${"5".repeat(40)}`,publisherWallet:`0x${"6".repeat(40)}`,chainTaskId:`0x${"7".repeat(64)}`,settlementEligibility:{eligible:true},createdAt:"2026-08-23T00:00:00Z",updatedAt:"2026-08-23T00:00:00Z"};
+  assert.equal(await submitFormalAcceptanceTransaction(provider,intent),`0x${"77".repeat(32)}`);
+  const acceptanceCall=calls[1] as {method:string;params:Array<{data:string;from:string;to:string}>};
+  assert.equal(acceptanceCall.method,"eth_sendTransaction"); assert.equal(acceptanceCall.params[0]?.data,`0xe4725ba1${"7".repeat(64)}`); assert.equal(acceptanceCall.params[0]?.from,intent.publisherWallet);
+  calls.length=0;
+  await submitWorkNonceTransaction(provider,{chainId:"1",contractAddress:intent.contractAddress,publisherWallet:intent.publisherWallet,taskId:intent.chainTaskId,assignmentId:`0x${"8".repeat(64)}`,workNonce:1});
+  const nonceCall=calls[1] as {params:Array<{data:string}>}; assert.equal(nonceCall.params[0]?.data,`0x201abd80${"7".repeat(64)}`);
+});
+
+test("dispute freeze calldata binds complete stable leaves and resolver fee cap",async()=>{
+  const publisher=`0x${"2".repeat(40)}`,controller=`0x${"3".repeat(40)}`,payout=`0x${"4".repeat(40)}`,resolver=`0x${"5".repeat(40)}`,contract=`0x${"6".repeat(40)}`,task=`0x${"7".repeat(64)}`;const calls:unknown[]=[];
+  const provider={request:async(input:{method:string;params?:unknown[]})=>{calls.push(input);if(input.method==="eth_chainId")return "0x1";if(input.method==="eth_requestAccounts")return [publisher];return `0x${"8".repeat(64)}`;}};
+  const view={case:{state:"soft_lock_pending"},context:{eligible:true,chainId:"1",contractAddress:contract,chainTaskId:task,publisherWallet:publisher,agentController:controller,agentPayout:payout,disputeResolver:resolver,frozenAmount:"100",feeCap:"5"}} as unknown as DisputeView;
+  assert.equal(await submitDisputeFreezeTransaction(provider,view),`0x${"8".repeat(64)}`);const sent=calls[2] as {params:Array<{data:string;from:string;to:string}>};const data=sent.params[0]!.data;assert.match(data,/^0xee1e9b21[0-9a-f]+$/);assert.equal(sent.params[0]!.from,publisher);assert.equal(sent.params[0]!.to,contract);assert.equal(data.slice(10+64,10+128),(128).toString(16).padStart(64,"0"));assert.equal(data.slice(10+4*64,10+5*64),(2).toString(16).padStart(64,"0"));assert.equal(data.length,10+13*64);
+});
+
+test("formal delivery mutations stay task-bound and preserve caller idempotency", async () => {
+  const calls:Array<{url:string;key:string|null;body:Record<string,unknown>|null}>=[];
+  const request:typeof fetch=async(input,init)=>{calls.push({url:String(input),key:new Headers(init?.headers).get("idempotency-key"),body:init?.body?JSON.parse(String(init.body)) as Record<string,unknown>:null});return Response.json({id:`sha256:${"1".repeat(64)}`,aggregateVersion:1,state:"intent_recorded"},{status:201});};
+  await readFormalDelivery("task-1",request);
+  const proofDigest=`sha256:${"4".repeat(64)}`;
+  const version={packageId:`sha256:${"2".repeat(64)}`,number:1,aggregateVersion:2,scopeId:`sha256:${"3".repeat(64)}`,scopeHash:`sha256:${"3".repeat(64)}`,workNonce:1,logicalExecutionId:`sha256:${"5".repeat(64)}`,status:"review",contentHash:`sha256:${"6".repeat(64)}`,usedCost:"0",createdAt:"2026-08-23T00:00:00Z",updatedAt:"2026-08-23T00:00:00Z",proof:{proof:{version:"formal-proof-v1",taskId:"task-1",assignmentId:"assignment",deliveryUnit:"default",packageId:`sha256:${"2".repeat(64)}`,scopeHash:`sha256:${"3".repeat(64)}`,formalVersion:1,packageAggregateVersion:2,workNonce:1,agentId:"agent",contentHash:`sha256:${"6".repeat(64)}`,agentResponseHash:proofDigest,changeSummaryHash:proofDigest,policyHash:proofDigest,deadline:1},payloadHash:proofDigest,digest:proofDigest,signature:`0x${"a".repeat(130)}`}} satisfies FormalVersion;
+  const intent=await createFormalAcceptance("task-1","accept:create",version,2,request);
+  await recordFormalAcceptanceSubmission("task-1",{...intent,id:`sha256:${"1".repeat(64)}`,aggregateVersion:1},`0x${"7".repeat(64)}`,"accept:submit",request);
+  await startFormalVersion("task-1","revision:start",{expectedPackageVersion:3,workNonce:2},request);
+  assert.deepEqual(calls.map((call)=>[call.url,call.key]),[["/api/tasks/task-1/formal-package",null],["/api/tasks/task-1/formal-acceptance-intents","accept:create"],[`/api/tasks/task-1/formal-acceptance-intents/${encodeURIComponent(`sha256:${"1".repeat(64)}`)}/submit`,"accept:submit"],["/api/tasks/task-1/formal-package/start","revision:start"]]);
 });
 
 test("wallet errors stop before nonce issuance", async () => {

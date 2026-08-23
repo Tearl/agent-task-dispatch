@@ -62,7 +62,7 @@ export default function PublisherTasks() {
                   <div className="text-[14px] text-[var(--ap-text)]">{t.amount.toLocaleString()} USDC</div>
                   <div className="text-[12px] text-[var(--ap-success)]">托管收益 +{t.yield}</div>
                 </div>
-                {act && <GhostButton onClick={() => nav(act.to)}>{act.label}</GhostButton>}
+                {act && <GhostButton onClick={() => nav(t.status === 'delivered' || t.status === 'in_progress' ? `/publisher/tasks/${encodeURIComponent(t.id)}/delivery` : act.to)}>{act.label}</GhostButton>}
               </div>
             </Panel>
           );

@@ -1,52 +1,9 @@
-import { toast } from 'sonner';
-import { useNavigate } from 'react-router';
-import { ShieldAlert, CheckCircle2, XCircle, Info } from 'lucide-react';
-import { Page } from '../../components/AppShell';
-import { PageHeader, Panel, Pill, CtaButton, GhostButton, InfoNote } from '../../components/kit/primitives';
-import { CASES } from '../../lib/mock';
+import { RefreshCw, Scale } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router";
+import { Page } from "../../components/AppShell";
+import { CtaButton, GhostButton, InfoNote, PageHeader, Panel, Pill, SectionTitle } from "../../components/kit/primitives";
+import { readDisputes, type DisputeView } from "../../lib/platform-api";
 
-export default function PendingCases() {
-  const nav = useNavigate();
-  return (
-    <Page>
-      <PageHeader title="待处理案件" subtitle="系统分配 · 利益冲突检查 · 接受或申请回避" />
-
-      <InfoNote tone="cyan">
-        <span className="inline-flex items-center gap-1.5"><Info size={14} />案件由系统随机分配以保证公正。若与当事方存在利益关联，请主动申请回避。</span>
-      </InfoNote>
-
-      <div className="space-y-4">
-        {CASES.filter((c) => ['evidence', 'voting'].includes(c.status)).map((c) => (
-          <Panel key={c.id} className="p-5">
-            <div className="flex items-start justify-between gap-4 flex-wrap">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[15px] text-[var(--ap-text)]">{c.id}</span>
-                  <Pill tone="green">系统分配</Pill>
-                  <Pill tone="gray">{c.role}</Pill>
-                </div>
-                <div className="mt-1.5 text-[13px] text-[var(--ap-text-2)]">{c.task}</div>
-                <p className="mt-1 text-[13px] text-[var(--ap-muted)]">{c.summary}</p>
-              </div>
-              <div className="text-right">
-                <div className="text-[12px] text-[var(--ap-muted)]">冻结金额</div>
-                <div className="text-[18px] text-white">{c.frozen.toLocaleString()} USDC</div>
-              </div>
-            </div>
-
-            <div className="mt-4 flex items-center justify-between rounded-xl border border-[rgba(251,191,36,0.25)] bg-[rgba(251,191,36,0.08)] px-4 py-2.5">
-              <span className="flex items-center gap-2 text-[13px] text-[var(--ap-warning)]"><ShieldAlert size={15} />利益冲突自检：未检测到与当事方的关联</span>
-              <span className="text-[12px] text-[var(--ap-muted)]">投票截止 {c.deadline}</span>
-            </div>
-
-            <div className="mt-4 flex gap-2">
-              <CtaButton icon={CheckCircle2} onClick={() => { toast.success('已接受案件'); nav('/arbitrator/review'); }}>接受并审理</CtaButton>
-              <GhostButton icon={XCircle} onClick={() => toast.success('已申请回避，系统将重新分配')}>申请回避</GhostButton>
-            </div>
-          </Panel>
-        ))}
-      </div>
-    </Page>
-  );
-}
-
+export default function PendingCases(){const nav=useNavigate();const[cases,setCases]=useState<DisputeView[]>([]),[error,setError]=useState("");const load=async()=>{setError("");try{setCases((await readDisputes()).cases)}catch(cause){setError(cause instanceof Error?cause.message:"案件读取失败。")}};useEffect(()=>{void load()},[]);return <Page><PageHeader title="待处理案件" subtitle="仅显示 Engine 按角色授权的案件" actions={<GhostButton icon={RefreshCw} onClick={()=>void load()}>刷新</GhostButton>}/>{error?<InfoNote tone="red"><span role="alert">{error}</span></InfoNote>:null}<div className="space-y-3">{cases.map((view)=><Panel key={view.case.id} className="p-5"><SectionTitle right={<Pill tone="amber">{view.case.state}</Pill>}>{view.case.id}</SectionTitle><div className="grid gap-2 text-[12px] sm:grid-cols-3"><span>证据 {view.case.evidence.length}/12</span><span>举证截止 {date(view.case.evidenceDeadline)}</span><span>决定截止 {date(view.case.decisionDeadline)}</span></div><CtaButton className="mt-4" icon={Scale} onClick={()=>nav("/arbitrator/review")}>进入权威审理</CtaButton></Panel>)}</div></Page>}
+function date(value?:string){return value?new Date(value).toLocaleString("zh-CN"):"尚未开始"}
