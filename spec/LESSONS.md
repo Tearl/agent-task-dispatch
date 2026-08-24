@@ -27,4 +27,8 @@
 - SSRF 地址校验不能把 `IsGlobalUnicast` 等同于“公网可达”：IPv6 应先限制到 IANA global-unicast allocation，再显式排除翻译、文档、AS112、site-local 等特殊用途前缀，并对映射/可翻译形式分别测试。
 - 当安全顺序要求在事务锁内执行有界外部探测时，必须在开启事务前设置 fail-fast 的低并发 admission gate；否则不同幂等键仍可能用等待行锁和慢探测占满数据库连接，而无界 gate 队列也会让已错过响应期限的请求继续产生副作用。
 - 外部副作用的 admission gate 不能改变已完成幂等请求的语义；gate 被无关探测占用时，已持久化结果应走无网络副作用的短路径回放，新请求则继续 fail-fast。
+- 对已提交但缺少 SQ 收据的历史实现重新验收时，官方 uncommitted Review 可能只能评审状态行；必须用覆盖验收标准的 full QA、真实数据库集成和生产构建补足实现证据，不得将 status-only Review 单独当作功能正确性证明。
 - Foundry 的单次 `vm.prank` 会被签名辅助函数中的首个外部调用消耗；应先生成签名再设置目标调用的 prank。Pull-payment 模型中的未领取收益仍是合约负债，价值守恒断言应与 `totalClaimableEarnings` 对齐。
+- 公开 mempool 中的确定性业务 ID 不能只靠链下事件比对保护：合约必须把调用者、金额和全部不可变资金输入纳入可验证派生并在写入前校验，否则第三方或错误金额可抢占全局唯一键。钱包交易状态也应拆成稳定意图、已知 attempt 与追加式 canonical occurrence；当前状态必须能从 occurrence 历史重建，并允许同一交易在重组后再次 canonical，才能安全支持替换、失败重试与精确冲正。
+- 钱包广播与服务端登记不是原子操作，链投影可能先于 `/submit` 到达。投影必须保留未知交易的完整 canonical occurrence，attempt 注册也必须在相同 tx-hash 锁下反查并重放 retained evidence；只让投影器在首次过块时尝试关联会永久漏记真实资金。
+- occurrence 身份本身不能充当可逆资金效果的唯一幂等键：同一 block 在 orphaned 后可能再次 canonical。应为每次真实的 canonicalization 状态转换分配单调 epoch，以 epoch 创建资金 journal，并让对应 orphan 转换只冲正该 epoch；否则不可变 reversal 会阻止同一 occurrence 恢复资金。

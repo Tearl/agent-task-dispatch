@@ -9,10 +9,17 @@
 | 版本 | 日期 | 变更 | 来源 |
 | --- | --- | --- | --- |
 | v1 | 2026-08-20 | 初始定义 | 需求文档 7.9–7.10 节与资金原则 |
+| v2 | 2026-08-24 | 增加发布后正式托管入金意图、钱包提交与权威确认桥接 | 用户主流程优先级 |
+| v3 | 2026-08-24 | 加固发布者绑定、交易尝试重试、确认关联与过期退款隔离 | T-107 官方 Review |
+| v4 | 2026-08-24 | 增加链上预算承诺、canonical recurrence 与 EVM 金额域迁移规则 | T-107 第二轮官方 Review |
+| v5 | 2026-08-24 | 增加广播先于 attempt 注册时的 retained occurrence 对账 | T-107 第三轮官方 Review |
+| v6 | 2026-08-24 | 增加同一 occurrence 再次 canonical 的 epoch 化资金恢复 | T-107 追加轮官方 Review |
 
 ## 范围
 ### 范围内
 四个隔离业务子账、allocation、复式分录、链上同步、选择/工作/验收资金路径、退款、收益、提现与对账。
+
+[NEW v2] 已发布任务的正式托管入金意图、发布者钱包提交、交易状态与 canonical `TaskCreated` 确认。本地 MVP 入金仅对应 `FormalEscrow`；`DiscoveryPool` 不得复用同一链上本金二次入账。
 ### 范围外
 策略决策批准前不实现生产生息适配器；争议分配属于功能 5。
 
@@ -24,6 +31,7 @@
 - [F-405] 退款必须遵循生命周期和责任，不得向发布者收取重复失败/平台故障成本，不得通过后续争议追回终态本金。
 - [F-406] Agent 收益只能由本人提现，仅在明确选择后进入生息；每日对账比较合约、金库、账本和应收。
 - [F-407] 链上消费者必须持久化交易/区块/日志/确认状态，并幂等处理重放、乱序和重组。
+- [F-408] [CHANGED v5] Engine 必须为发布者自有的 `pending_escrow` 任务生成稳定的托管入金意图，绑定链、合约、发布者钱包、不可变任务键/规格、链上入金期限与精确 `formal_budget`。发布前必须保证正式预算是 `1..type(uint256).max` 范围内的资产最小单位整数；历史不兼容任务必须隔离且不得生成交易。合约必须从全部冻结输入、`formal_budget` 和 `msg.sender` 自行派生链上任务 ID，并强制 `msg.value == formal_budget`，防止第三方或错误金额抢占发布者任务。浏览器只能提交 Engine 返回的 `createTask` 交易；每个交易哈希及其 canonical occurrence 作为追加式证据保存，失败、替换、重组或再次 canonical 后必须可审计收敛。attempt 注册和链投影必须双向对账 retained occurrence，因此钱包广播先于 `/submit` 或投影先于 attempt 持久化时也能收敛。只有达到确认深度、receipt 成功、calldata/事件完整匹配且属于已持久化 attempt 的 canonical `TaskCreated` 才能原子记录 FormalEscrow funding journal；业务 deadline 仍有效时推进 `pending_escrow -> escrowed`，否则进入仅可退款、不可匹配的隔离状态。未确认、失败、篡改、未知交易、重放或重组事件不得留下可用于匹配的资金。
 
 ## 验收标准
 - [AC-401] 跨账支出、allocation 复用、不平分录、原位更正和重复消费必须失败。
@@ -31,6 +39,7 @@
 - [AC-403] 正式退款/争议路径无法触及有效概览费与其他任务收益。
 - [AC-404] 链重组、重放与乱序必须收敛到权威资金状态，不产生重复账本效果。
 - [AC-405] 日对账必须检测所有注入差异，并记录告警与审计处置。
+- [AC-406] [CHANGED v6] 同一发布请求重试必须回放同一入金意图，复制 calldata 的第三方或使用错误金额的发布者不得占用预期链上任务 ID；零值、超 `uint256`、非整数资产最小单位的正式预算必须在发布前拒绝，历史不兼容任务进入可解释隔离态。非所有者、错误链/合约/任务/发布者/金额/期限、不合法或未知交易哈希与失败 receipt 必须失败且不入账。失败、被替换或 orphaned attempt 后可使用新哈希重试并保留全部 occurrence 历史；同一 occurrence 在重组后再次 canonical 必须创建新的 canonicalization epoch 并恢复资金。若 canonical occurrence 已先于 `/submit` 保存，后注册 attempt 必须在同一事务边界触发 retained evidence reconciliation；与正常投影并发或重放仍只能产生一次效果。只有与已持久化 attempt 的交易哈希、成功 receipt、calldata 和事件一致的正确 canonical occurrence 可确认，任一时刻最多一笔未冲正 funding journal。重组必须用冲正分录撤销 FormalEscrow 并返回不可匹配状态；确认时已超过业务 deadline 的资金必须进入可退款隔离态。UI 在权威确认前必须展示待提交/待确认/失败状态，不得根据钱包回执自行标记已托管。
 
 ## 非功能需求
 - 安全：检查—生效—交互、重入保护、限域角色、暂停/多签准备与属性测试。

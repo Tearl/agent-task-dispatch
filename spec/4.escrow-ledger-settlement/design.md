@@ -9,6 +9,11 @@
 | v4 | 2026-08-22 | 冻结 authoritative-chain-projection-v1、重组隔离与日对账契约 |
 | v5 | 2026-08-22 | 冻结 acceptance-settlement-v1、Agent pull-payment 与可逆结算分录 |
 | v6 | 2026-08-22 | 交付 finance-view-v1 发布者资金、Agent 收益与管理员对账读模型 |
+| v7 | 2026-08-24 | 冻结 published-task-funding-v1 发布后托管意图、钱包提交与 canonical 确认桥接 |
+| v8 | 2026-08-24 | 加固 published-task-funding-v2 发布者派生 ID、追加式 attempt、确认绑定与过期退款隔离 |
+| v9 | 2026-08-24 | 加固 published-task-funding-v3 链上预算承诺、occurrence 收敛与 EVM 金额域 |
+| v10 | 2026-08-24 | 加固 published-task-funding-v4 广播先于 attempt 注册的双向对账 |
+| v11 | 2026-08-24 | 加固 published-task-funding-v5 同一 occurrence 再次 canonical 的 epoch 化恢复 |
 
 ## 架构与影响层
 `contracts/escrow` 拥有资产和账户状态。Engine 拥有意图/状态校验、不可变复式记账、交易参数与事件投影。BFF/Web 展示分离余额与确认状态。
@@ -36,6 +41,21 @@
 
 ## 技术决策与备选方案
 不内置生产链、资产、费率或生息假设。资金冲突以合约状态为准，PostgreSQL 保存可审计业务账务。
+
+### published-task-funding-v5 [CHANGED v11]
+
+- Engine 在 `POST /v1/tasks/{taskId}/funding-intents` 中权威验证 publisher 角色、任务所有权、`pending_escrow` 状态、当前不可变规格和未过期业务 deadline。意图由 `task_id + chain_id + contract + formal_budget + publisher_wallet + task_spec_hash + funding_deadline + funding-v5` 确定性派生，同一输入稳定回放，不允许客户端提供金额、合约、期限或链上任务 ID。`platform_task_key = keccak256(UTF8(task_id))`，`funding_deadline` 由 Engine 冻结且不得晚于业务 deadline。
+- 发布与入金入口共同采用 EVM 金额域：`formal_budget` 必须是以配置资产最小单位表示的规范十进制整数，且满足 `1 <= formal_budget <= 2^256-1`。新草稿在 publish 事务内拒绝不兼容预算；可加性迁移把已经发布且处于 `pending_escrow` 的不兼容任务标记为 `funding_configuration_invalid` 并写审计事件，不改不可变规格、不创建 intent。发布者只能取消该任务并从原规格克隆新草稿后修正预算；该隔离态不可匹配、不可入金。
+- 合约入口改为 `createTask(bytes32 platformTaskKey, bytes32 taskSpecHash, uint64 fundingDeadline, uint256 formalBudget)`，要求 `formalBudget > 0`、`msg.value == formalBudget` 且 `block.timestamp <= fundingDeadline`，并在合约内计算 `chain_task_id = keccak256(abi.encode("agent-platform-task-v3", block.chainid, address(this), msg.sender, platformTaskKey, taskSpecHash, fundingDeadline, formalBudget))`。因此复制 calldata 的第三方只能在自己的地址域创建不同 ID，错误金额交易则在写入前回滚，均不能抢占预期任务。返回交易必须绑定 `to`、`value`、完整 `data`、`chainId` 与 session wallet `from`；浏览器不得修改字段或自行推导确认。
+- funding intent 与交易 attempt 分离，attempt 的状态转换证据按交易 occurrence `chain + contract + transaction_hash + block_hash` 追加保存，事件证据再绑定 `log_index`，当前状态只是可重建投影。`submit` 为新哈希创建 attempt，同一哈希稳定回放；失败或钱包 replacement 后可追加新哈希。状态投影允许 `submitted -> observed_failed|canonical_confirmed|superseded`、`canonical_confirmed -> canonical_orphaned`，以及 `observed_failed|superseded|canonical_orphaned -> canonical_confirmed`，后者仅在该已持久化交易出现新的成功 canonical occurrence 时发生。历史状态和 receipt 永不删除。
+- 链投影器按 `chain_id + contract + transaction_hash` 查找任意已持久化 attempt，而不因当前投影为 failed、superseded 或 orphaned 忽略新的 canonical occurrence；随后验证成功 receipt、目标合约、`createTask` calldata、由发布者/任务键/规格/期限/正式预算重算的 chain task ID，以及唯一 `TaskCreated` 的 publisher/amount/task ID。未知哈希、错误 calldata/事件或当前非 canonical occurrence 一律不能确认。同一 canonical 链上若已有另一 attempt 的有效资金效果则拒绝区块并隔离；正常合约唯一性应使该情况不可达。
+- `/submit` 与链投影器调用同一个 `reconcileFundingAttempt(tx_hash)` 事务例程，并以 `chain + contract + transaction_hash` advisory lock 串行化。投影先到时仍完整保存 transaction、receipt、calldata 摘要、日志和 canonical occurrence，但因 attempt 未知不产生业务效果；后续 `/submit` 在持久化 attempt 后、返回成功前查询 retained canonical occurrence 并调用该例程。attempt 先到时由正常投影调用同一路径。并发双方、进程重启和显式 replay 都由 occurrence/journal 唯一键收敛，不依赖一次性内存队列。
+- occurrence 保存不可变交易/事件身份，另为每次真实的 `noncanonical -> canonical` 状态转换追加单调 `canonicalization_epoch`；重复观察已经 canonical 的 occurrence 不创建 epoch。每个 canonicalization transition 以 `occurrence_id + epoch` 创建唯一平衡 funding journal。`canonical -> orphaned` 精确冲正该 epoch 的 journal，并清除当前 canonical 资金映射；同一 occurrence 后续再次 canonical 时递增 epoch 并创建新的恢复 journal，另一已知 attempt 在替代链 canonical 时也使用自己的首个 epoch。因此历史可包含多笔 journal/reversal，但任一时刻每个 intent 最多一笔未冲正 funding journal。
+- epoch 分配、状态历史、journal/reversal 和 intent 当前 canonical 映射在同一 tx-hash/intent 锁顺序下原子提交。数据库唯一约束为 `(occurrence_id, canonicalization_epoch)`，并要求一个 epoch 最多一个 funding journal 和一个 reversal；状态仍为 canonical 时的重复投影、`/submit` retained replay 或进程重启只命中当前 epoch，不得重复加资。
+- 确认事务创建 FormalEscrow 账户和当前 canonical occurrence 的平衡 funding journal。若数据库时钟下业务 deadline 仍有效，则意图 `confirmed` 且任务 `pending_escrow -> escrowed`；若确认深度到达时业务 deadline 已过，则本金仍按链上事实入账，但任务进入 `funding_refund_pending`，只能调用现有 publisher-only `refund` 路径，不得匹配。退款 canonical 后再按既有结算投影清账。
+- `TaskCreated` 只为 FormalEscrow 记录 `formal_budget`，不向 DiscoveryPool 入账。概览资金必须由后续独立、可审计来源处理；在此之前可生成匹配快照，但不得启动需要 DiscoveryPool allocation 的付费概览。
+- 失败 receipt 只追加对应 occurrence 证据；当没有 pending 或 canonical attempt 时，意图聚合显示 `failed`，任务和账本不变并允许新 attempt。链重组孤立当前 `TaskCreated` 时精确冲正资金效果，并把未进入后续流程的任务退回 `pending_escrow`；如任务已开始匹配或更后状态，进入 `chain_reorg_pending`。孤立后可追加新 attempt；原 attempt 再次 canonical 也按 occurrence 规则重放，但 quarantine 任务必须先走显式恢复流程。
+- 发布页展示 `prepared`、`submitted`、`confirmed`、`failed/orphaned` 与 `funding_refund_pending`，并列出 replacement/retry 结果。钱包广播成功但首次 `/submit` 网络失败时，浏览器重试同一 hash；Engine 即使已越过该区块也会用 retained occurrence 对账。只有 Engine 返回 intent `confirmed` 且任务为 `escrowed` 时才显示“进入权威匹配”；刷新页面按 task 恢复同一 intent 和全部 attempt 状态。
 
 ### double-entry-v1
 
