@@ -162,7 +162,7 @@ func seedFundsDependencies(t *testing.T, ctx context.Context, db *sql.DB) {
 		t.Fatal(err)
 	}
 	for index := 1; index <= 2; index++ {
-		if _, err := db.ExecContext(ctx, `INSERT INTO match_snapshot_candidates (snapshot_id,candidate_index,agent_id,provider_id,price_version,overview_price,formal_price,external_cost_cap,evaluation_status,exclusion_reasons,recall_evidence,task_match_score,reputation_score,price_time_score,availability_score,rule_score,model_delta,ranking_score,qualified,qualification_reasons,selection_weight,probability_numerator,probability_denominator,random_draw,final_position,exploration) VALUES ($1,$2,$3,$4,1,'20','100','10','scored','[]','{}',50,20,10,5,85,0,85,true,'[]',26,1,2,$2,$2,false)`, pgFundsDigest("snapshot"), index, fmt.Sprintf("agent-%d", index), fmt.Sprintf("provider-%d", index)); err != nil {
+		if _, err := db.ExecContext(ctx, `INSERT INTO match_snapshot_candidates (snapshot_id,candidate_index,agent_id,provider_id,price_version,overview_price,formal_price,external_cost_cap,evaluation_status,exclusion_reasons,recall_evidence,task_match_score,reputation_score,price_time_score,availability_score,rule_score,model_delta,ranking_score,qualified,qualification_reasons,selection_weight,probability_numerator,probability_denominator,random_draw,final_position,exploration) VALUES ($1,$2,$3,$4,1,'20','100','10','scored','[]','{}',50,20,10,5,85,0,85,true,'[]',26,1,2,$5,$6,false)`, pgFundsDigest("snapshot"), index, fmt.Sprintf("agent-%d", index), fmt.Sprintf("provider-%d", index), index, index); err != nil {
 			t.Fatal(err)
 		}
 	}

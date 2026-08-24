@@ -14,7 +14,7 @@
 
 ## 任务
 
-- [ ] [T-401] [pending] 实现隔离账户、allocation 与平衡不可变账本
+- [x] [T-401] [done] 实现隔离账户、allocation 与平衡不可变账本
   - Repository: .
   - Covers: F-401, F-402, AC-401
   - Depends on: T-101

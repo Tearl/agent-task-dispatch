@@ -32,3 +32,4 @@
 - 公开 mempool 中的确定性业务 ID 不能只靠链下事件比对保护：合约必须把调用者、金额和全部不可变资金输入纳入可验证派生并在写入前校验，否则第三方或错误金额可抢占全局唯一键。钱包交易状态也应拆成稳定意图、已知 attempt 与追加式 canonical occurrence；当前状态必须能从 occurrence 历史重建，并允许同一交易在重组后再次 canonical，才能安全支持替换、失败重试与精确冲正。
 - 钱包广播与服务端登记不是原子操作，链投影可能先于 `/submit` 到达。投影必须保留未知交易的完整 canonical occurrence，attempt 注册也必须在相同 tx-hash 锁下反查并重放 retained evidence；只让投影器在首次过块时尝试关联会永久漏记真实资金。
 - occurrence 身份本身不能充当可逆资金效果的唯一幂等键：同一 block 在 orphaned 后可能再次 canonical。应为每次真实的 canonicalization 状态转换分配单调 epoch，以 epoch 创建资金 journal，并让对应 orphan 转换只冲正该 epoch；否则不可变 reversal 会阻止同一 occurrence 恢复资金。
+- PostgreSQL 参数占位符会在整条语句中推导单一类型；integration seed 不应把同一个参数同时写入 `integer`、`numeric` 和 `smallint` 列。即使 Go 值相同，也应使用独立占位符或显式转换，否则测试会在进入领域断言前因类型推导失败。
