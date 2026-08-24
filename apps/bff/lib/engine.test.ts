@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { aggregateEngineDisputes, aggregateEngineFinance, aggregateEngineFormalDelivery, aggregateEngineMatching, aggregateEngineResource, forwardEngineMutation, forwardEngineRead, InvalidEngineResponseError, InvalidResourceIdError, resolveEngineBaseUrl } from "./engine.ts";
+import { aggregateEngineDisputes, aggregateEngineExecutions, aggregateEngineFinance, aggregateEngineFormalDelivery, aggregateEngineMatching, aggregateEngineResource, aggregateEngineWorkspace, forwardEngineMutation, forwardEngineRead, InvalidEngineResponseError, InvalidResourceIdError, resolveEngineBaseUrl } from "./engine.ts";
 
 test("BFF aggregation calls only internal Engine endpoints and strips sensitive fields", async () => {
   const calls: Array<{ url: string; authorization: string | null }> = [];
@@ -68,6 +68,19 @@ test("matching aggregation reads one sealed view and preserves degradation evide
   assert.equal(target, "http://engine/v1/tasks/task-1/matching-view");
   assert.equal(((result.body.snapshot as { degradations: unknown[] }).degradations).length, 1);
   await assert.rejects(() => aggregateEngineMatching("../admin", "session"), InvalidResourceIdError);
+});
+
+test("workflow APIs stay task-bound and workspace reads strip secrets", async () => {
+  const digest=`sha256:${"a".repeat(64)}`;
+  for (const path of ["/v1/tasks/task-1/matching-runs","/v1/tasks/task-1/overview-batches",`/v1/tasks/task-1/overview-batches/${encodeURIComponent(digest)}/slots/${encodeURIComponent(digest)}/finalize`]) {
+    const result=await forwardEngineMutation({path,body:"{}",idempotencyKey:"workflow-op",sessionToken:"session"},{engineBaseUrl:"http://engine",fetch:async()=>Response.json({id:digest},{status:201})});
+    assert.equal(result.status,201);
+  }
+  await assert.rejects(()=>forwardEngineMutation({path:"/v1/tasks/task-1/overview-batches/not-a-digest/slots/x/finalize",body:"{}",idempotencyKey:"x",sessionToken:"session"}),InvalidResourceIdError);
+  const executions=await aggregateEngineExecutions("task-1","session",{engineBaseUrl:"http://engine",fetch:async()=>Response.json([{logicalExecutionId:digest,stage:"overview",agentId:"agent-1",status:"running",currentAttempt:1,usedCost:"0",costCap:"10",deadline:"2026-08-24T00:00:00Z",createdAt:"2026-08-23T00:00:00Z",updatedAt:"2026-08-23T00:00:00Z",inputRef:"must-strip",secret:"must-strip"}])});
+  assert.equal(JSON.stringify(executions.body).includes("must-strip"),false);
+  const workspace=await aggregateEngineWorkspace("agents","session",{engineBaseUrl:"http://engine",fetch:async()=>Response.json({agents:[{id:"agent-1",credential:"strip"}]})});
+  assert.deepEqual(workspace.body,{agents:[{id:"agent-1"}]});
 });
 
 test("selection routes accept only task-bound reservation identities", async () => {

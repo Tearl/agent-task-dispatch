@@ -117,11 +117,11 @@ export default function Home() {
   }
 
   return (
-    <main className="ap-app-bg relative min-h-svh w-full overflow-hidden">
+    <main className="home-login-page ap-app-bg relative min-h-svh w-full overflow-x-hidden">
       <div className="ap-grid-texture pointer-events-none absolute inset-0 opacity-40" />
 
-      <div className="relative mx-auto grid min-h-svh max-w-[1400px] items-center gap-12 px-5 py-10 sm:px-8 lg:grid-cols-[1.15fr_0.85fr] lg:gap-10">
-        <section className="relative">
+      <div className="home-login-layout relative mx-auto grid min-h-svh max-w-[1400px] items-center gap-12 px-5 py-10 sm:px-8 lg:grid-cols-[1.15fr_0.85fr] lg:gap-10">
+        <section className="home-login-hero relative hidden lg:block">
           <div className="flex items-center gap-3">
             <span className="h-5 w-1 rounded bg-[var(--ap-cyan)]" />
             <span className="text-[13px] tracking-[0.3em] text-[var(--ap-cyan)]">
@@ -129,16 +129,16 @@ export default function Home() {
             </span>
           </div>
 
-          <h1 className="mt-6 text-[clamp(38px,5vw,64px)] leading-[1.08] font-medium tracking-tight text-white">
+          <h1 className="home-login-title mt-6 text-[clamp(38px,5vw,64px)] leading-[1.08] font-medium tracking-tight text-white">
             让专业 Agent，
             <br />
             完成专业任务
           </h1>
-          <p className="mt-5 text-[18px] text-[var(--ap-text-2)]">
+          <p className="home-login-subtitle mt-5 text-[18px] text-[var(--ap-text-2)]">
             发布需求、智能匹配、链上托管、安全交付
           </p>
 
-          <div className="mt-7 flex flex-wrap gap-3">
+          <div className="home-login-value-chips mt-7 flex flex-wrap gap-3">
             {valueChips.map(({ icon: Icon, label }) => (
               <span
                 key={label}
@@ -185,7 +185,7 @@ export default function Home() {
             })}
           </div>
 
-          <div className="mt-6 flex flex-wrap items-center gap-x-8 gap-y-3 text-[15px] text-[var(--ap-text-2)]">
+          <div className="home-login-trust mt-6 flex flex-wrap items-center gap-x-8 gap-y-3 text-[15px] text-[var(--ap-text-2)]">
             {trustHighlights.map(({ icon: Icon, label }, index) => (
               <div key={label} className="contents">
                 {index > 0 ? (
@@ -203,21 +203,21 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="ap-glass-strong ap-ring-glow w-full rounded-3xl p-6 sm:p-8 lg:p-10">
+        <section className="home-login-card ap-glass-strong ap-ring-glow w-full rounded-3xl p-6 sm:p-8 lg:p-10">
           <div className="flex flex-col items-center text-center">
-            <div className="ap-ring-glow grid h-16 w-16 rotate-45 place-items-center rounded-2xl bg-gradient-to-br from-[#22d3ee] to-[#0891b2]">
+            <div className="home-login-logo ap-ring-glow grid h-16 w-16 rotate-45 place-items-center rounded-2xl bg-gradient-to-br from-[#22d3ee] to-[#0891b2]">
               <div className="h-6 w-6 -rotate-45 rounded bg-[#04121c]/40" />
             </div>
-            <h2 className="mt-5 text-[26px] font-medium text-white">AI Agent Platform</h2>
+            <h2 className="home-login-card-title mt-5 text-[26px] font-medium text-white">AI Agent Platform</h2>
             <p className="mt-1.5 text-[14px] text-[var(--ap-muted)]">
               连接智能能力，安全完成每一次任务
             </p>
           </div>
 
-          <div className="mt-7">
+          <div className="home-login-role-section mt-7">
             <div className="mb-2.5 flex items-center gap-1.5 text-[13px] text-[var(--ap-muted)]">
               <Users aria-hidden="true" size={14} className="text-[var(--ap-cyan)]" />
-              选择进入的角色
+              选择首先进入的工作台
             </div>
             <div role="group" aria-label="登录角色" className="grid grid-cols-2 gap-3">
               {loginRoles.map(({ id, icon: Icon, description }) => {
@@ -264,13 +264,13 @@ export default function Home() {
             onClick={connectWallet}
             disabled={connecting}
             aria-busy={connecting}
-            className="ap-cta mt-5 flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-[16px] font-medium focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--ap-cyan)]"
+            className="home-login-submit ap-cta mt-5 flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-[16px] font-medium focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--ap-cyan)]"
           >
             <Wallet aria-hidden="true" size={19} />
-            {connecting ? "等待钱包签名…" : `以「${ROLES[role].name}」身份登录`}
+            {connecting ? "等待钱包签名…" : `连接钱包并进入「${ROLES[role].name}」`}
           </button>
-          <p className="mt-3 text-center text-[13px] text-[var(--ap-muted)]">
-            支持 MetaMask 等以太坊兼容钱包 · 登录后可在右上角切换角色
+          <p className="home-login-role-note mt-3 text-center text-[13px] text-[var(--ap-muted)]">
+            同一钱包可同时作为任务发布方和 Agent 开发者，登录后可随时切换工作台
           </p>
 
           {error ? (
@@ -282,35 +282,35 @@ export default function Home() {
             </p>
           ) : null}
 
-          <div className="my-6 flex items-center gap-3">
+          <div className="home-login-divider my-6 flex items-center gap-3">
             <span className="h-px flex-1 bg-[var(--ap-border)]" />
             <span className="text-[12px] text-[var(--ap-muted)]">安全访问</span>
             <span className="h-px flex-1 bg-[var(--ap-border)]" />
           </div>
 
-          <div className="space-y-3">
+          <div className="home-login-access-list grid gap-3">
             {accessItems.map(({ icon: Icon, label }) => (
               <button
                 key={label}
                 type="button"
                 onClick={connectWallet}
-                className="ap-hoverable flex w-full items-center justify-between rounded-xl border border-[var(--ap-border)] bg-[rgba(10,18,38,0.5)] px-4 py-3.5 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ap-cyan)]"
+                className="home-login-access-item ap-hoverable flex w-full items-center justify-between rounded-xl border border-[var(--ap-border)] bg-[rgba(10,18,38,0.5)] px-4 py-3.5 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ap-cyan)]"
               >
-                <span className="flex items-center gap-3 text-[15px] text-[var(--ap-text-2)]">
+                <span className="home-login-access-label flex items-center gap-3 text-[15px] text-[var(--ap-text-2)]">
                   <Icon aria-hidden="true" size={18} className="text-[var(--ap-cyan)]" />
                   {label}
                 </span>
-                <ChevronRight aria-hidden="true" size={16} className="text-[var(--ap-muted)]" />
+                <ChevronRight aria-hidden="true" size={16} className="home-login-access-chevron text-[var(--ap-muted)]" />
               </button>
             ))}
           </div>
 
-          <p className="mt-6 flex items-center justify-center gap-1.5 text-center text-[13px] text-[var(--ap-muted)]">
+          <p className="home-login-access-note mt-6 flex items-center justify-center gap-1.5 text-center text-[13px] text-[var(--ap-muted)]">
             <Info aria-hidden="true" size={14} />
-            登录后按已授权角色进入对应工作台
+            登录后按已授权角色进入对应工作台，无需重复连接钱包
           </p>
 
-          <div className="mt-6 flex items-center justify-center gap-10 border-t border-[var(--ap-border)] pt-5 text-[13px] text-[var(--ap-muted)]">
+          <div className="home-login-footer mt-6 flex items-center justify-center gap-10 border-t border-[var(--ap-border)] pt-5 text-[13px] text-[var(--ap-muted)]">
             <button type="button" className="transition-colors hover:text-[var(--ap-text-2)]">
               隐私政策
             </button>
@@ -324,7 +324,7 @@ export default function Home() {
       <button
         type="button"
         onClick={() => navigate("/admin/login")}
-        className="absolute right-6 bottom-4 text-[12px] text-[var(--ap-muted)] transition-colors hover:text-[var(--ap-text-2)]"
+        className="home-login-admin-link absolute right-6 bottom-4 text-[12px] text-[var(--ap-muted)] transition-colors hover:text-[var(--ap-text-2)]"
       >
         管理员后台 →
       </button>

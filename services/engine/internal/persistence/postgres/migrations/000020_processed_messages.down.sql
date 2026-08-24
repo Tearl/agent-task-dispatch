@@ -1,0 +1,2 @@
+-- Intentionally non-destructive. Processed-message rows are idempotency and
+-- audit evidence; deleting them would make old broker deliveries executable.

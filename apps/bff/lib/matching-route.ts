@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { aggregateEngineMatching, forwardEngineRead, InvalidEngineResponseError, InvalidResourceIdError } from "./engine";
+import { aggregateEngineExecutions, aggregateEngineMatching, forwardEngineRead, InvalidEngineResponseError, InvalidResourceIdError } from "./engine";
 import { sessionCookieName } from "./session";
 
 async function respond(work: (token: string) => Promise<{ status: number; body: Record<string, unknown> }>) {
@@ -17,4 +17,5 @@ async function respond(work: (token: string) => Promise<{ status: number; body: 
 }
 
 export function matchingRoute(taskID: string) { return respond((token) => aggregateEngineMatching(taskID, token)); }
+export function executionsRoute(taskID: string) { return respond((token) => aggregateEngineExecutions(taskID, token)); }
 export function selectionReadRoute(taskID: string, reservationID: string) { return respond((token) => forwardEngineRead(`/v1/tasks/${encodeURIComponent(taskID)}/selection-reservations/${encodeURIComponent(reservationID)}`, token)); }

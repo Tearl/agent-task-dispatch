@@ -97,6 +97,9 @@ func TestPostgresAuthenticationReplayRoleRefreshAndRevocation(t *testing.T) {
 	if successes != 1 || replays != 1 {
 		t.Fatalf("expected one session and one replay rejection: success=%d replay=%d", successes, replays)
 	}
+	if len(session.Roles) != 2 || session.Roles[0] != "agent_provider" || session.Roles[1] != "publisher" {
+		t.Fatalf("new client roles were not persisted: %#v", session.Roles)
+	}
 	var plaintextCount int
 	if err = db.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE token_hash=$1`, session.Token).Scan(&plaintextCount); err != nil || plaintextCount != 0 {
 		t.Fatalf("plaintext token persisted: count=%d err=%v", plaintextCount, err)

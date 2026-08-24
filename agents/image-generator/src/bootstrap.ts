@@ -51,7 +51,11 @@ export function createRuntime(config: ImageAgentConfig) {
         sample: request.prompt.slice(0, 4_000),
       }),
     },
-    inputs: new SafeJsonExecutionInputResolver({ maxBytes: 128 * 1024, userAgent: "ImageGeneratorAgent/0.1" }),
+    inputs: new SafeJsonExecutionInputResolver({
+      maxBytes: 128 * 1024,
+      userAgent: "ImageGeneratorAgent/0.1",
+      authorization: config.apiToken ? `Bearer ${config.apiToken}` : undefined,
+    }),
     artifacts,
     callbacks,
     callbackKeyVersion: config.callbackKeyVersion,

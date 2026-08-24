@@ -36,7 +36,7 @@ func NewProtocolHealthChecker(allowPrivateNetworks bool) *ProtocolHealthChecker 
 
 func ValidEndpointURL(raw string) bool {
 	value, err := url.Parse(raw)
-	if err != nil || value.Scheme != "https" || value.Hostname() == "" || value.User != nil || value.RawQuery != "" || value.Fragment != "" || len(raw) > 2_048 {
+	if err != nil || value.Scheme != "https" || value.Hostname() == "" || value.User != nil || value.RawQuery != "" || value.Fragment != "" || (value.Path != "" && value.Path != "/") || len(raw) > 2_048 {
 		return false
 	}
 	if value.Port() != "" {
@@ -50,9 +50,10 @@ func ValidEndpointURL(raw string) bool {
 
 func (c *ProtocolHealthChecker) Check(ctx context.Context, raw string) error {
 	if !ValidEndpointURL(raw) {
-		return errors.New("invalid Agent health endpoint")
+		return errors.New("invalid Agent protocol base URL")
 	}
 	endpoint, _ := url.Parse(raw)
+	endpoint.Path = "/health"
 	addresses, err := c.resolver.LookupNetIP(ctx, "ip", endpoint.Hostname())
 	if err != nil || len(addresses) == 0 {
 		return errors.New("Agent health endpoint did not resolve")

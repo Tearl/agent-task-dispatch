@@ -253,7 +253,7 @@ func TestHealthRejectsUntrustedFutureAndStaleTimestamps(t *testing.T) {
 }
 
 func TestCheckHealthUsesOnlyEngineObservedProtocolResult(t *testing.T) {
-	store := &testStore{getAgent: Agent{ID: "agent-1", OwnerID: "provider", EndpointURL: "https://agent.example/health", AggregateVersion: 3}}
+	store := &testStore{getAgent: Agent{ID: "agent-1", OwnerID: "provider", EndpointURL: "https://agent.example", AggregateVersion: 3}}
 	checker := &testHealthChecker{results: []error{nil, errors.New("unreachable")}}
 	service, err := NewServiceWithHealthChecker(store, checker)
 	if err != nil {
@@ -279,7 +279,7 @@ func TestCheckHealthUsesOnlyEngineObservedProtocolResult(t *testing.T) {
 }
 
 func TestCheckHealthRejectsUntrustedCallersAndMissingChecker(t *testing.T) {
-	store := &testStore{getAgent: Agent{ID: "agent-1", EndpointURL: "https://agent.example/health"}}
+	store := &testStore{getAgent: Agent{ID: "agent-1", EndpointURL: "https://agent.example"}}
 	checker := &testHealthChecker{}
 	service, _ := NewServiceWithHealthChecker(store, checker)
 	if _, _, err := service.CheckHealth(context.Background(), auth.Session{UserID: "publisher", Roles: []string{"publisher"}}, "check", "agent-1", HealthCheckInput{ExpectedVersion: 1}); !errors.Is(err, ErrForbidden) {
@@ -363,7 +363,7 @@ func validCreateInput() CreateInput {
 		Languages:                []string{"zh-CN", "en"},
 		EstimatedDurationSeconds: 300,
 		AuthorBio:                "Provider",
-		EndpointURL:              "https://agent.example/health",
+		EndpointURL:              "https://agent.example",
 		ControllerAddress:        "0x1111111111111111111111111111111111111111",
 		PayoutAddress:            "0x2222222222222222222222222222222222222222",
 		MaxConcurrency:           2,

@@ -44,6 +44,15 @@ func (service *Service) Create(ctx context.Context, spec Spec) (Execution, bool,
 	return service.repository.GetOrCreate(ctx, spec)
 }
 
+// Get exposes the sanitized domain execution record to trusted Engine
+// orchestrators. Transport credentials remain owned by the runtime provider.
+func (service *Service) Get(ctx context.Context, logicalExecutionID string) (Execution, error) {
+	if logicalExecutionID == "" {
+		return Execution{}, ErrInvalidInput
+	}
+	return service.repository.Get(ctx, logicalExecutionID)
+}
+
 func (service *Service) Dispatch(ctx context.Context, logicalExecutionID string) (Execution, Attempt, bool, error) {
 	execution, attempt, replay, err := service.repository.PrepareAttempt(ctx, logicalExecutionID, service.config.LeaseTTL)
 	if err != nil {

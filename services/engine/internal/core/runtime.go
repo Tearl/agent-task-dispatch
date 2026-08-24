@@ -15,21 +15,56 @@ import (
 	matchingpostgres "github.com/example/agent-platform/engine/internal/matching/postgres"
 	"github.com/example/agent-platform/engine/internal/outbox"
 	outboxpostgres "github.com/example/agent-platform/engine/internal/outbox/postgres"
+	"github.com/example/agent-platform/engine/internal/overview"
+	overviewpostgres "github.com/example/agent-platform/engine/internal/overview/postgres"
 	engineworker "github.com/example/agent-platform/engine/internal/worker"
+	"github.com/example/agent-platform/engine/internal/workflow"
 )
 
 type Config struct {
-	FundsAsset             string
-	MatchingSeedKeyVersion string
-	MatchingSeedSecret     []byte
-	CallbackBaseURL        string
-	NonceKeyVersion        string
-	NonceSecret            []byte
-	CallbackClockSkew      time.Duration
-	ExecutionLeaseTTL      time.Duration
-	AgentRequestTimeout    time.Duration
-	RuntimeCredentials     map[string]execution.RuntimeCredential
-	Outbox                 outbox.Config
+	FundsAsset              string
+	MatchingSeedKeyVersion  string
+	MatchingSeedSecret      []byte
+	CallbackBaseURL         string
+	NonceKeyVersion         string
+	NonceSecret             []byte
+	CallbackClockSkew       time.Duration
+	ExecutionLeaseTTL       time.Duration
+	AgentRequestTimeout     time.Duration
+	RuntimeCredentials      map[string]execution.RuntimeCredential
+	ExecutionInputBaseURL   string
+	OverviewMaximumDuration time.Duration
+	OverviewAllowedTools    []string
+	Outbox                  outbox.Config
+}
+
+type ExecutionConfig struct {
+	CallbackBaseURL     string
+	NonceKeyVersion     string
+	NonceSecret         []byte
+	CallbackClockSkew   time.Duration
+	ExecutionLeaseTTL   time.Duration
+	AgentRequestTimeout time.Duration
+	RuntimeCredentials  map[string]execution.RuntimeCredential
+}
+
+func (config Config) Execution() ExecutionConfig {
+	return ExecutionConfig{
+		CallbackBaseURL:     config.CallbackBaseURL,
+		NonceKeyVersion:     config.NonceKeyVersion,
+		NonceSecret:         config.NonceSecret,
+		CallbackClockSkew:   config.CallbackClockSkew,
+		ExecutionLeaseTTL:   config.ExecutionLeaseTTL,
+		AgentRequestTimeout: config.AgentRequestTimeout,
+		RuntimeCredentials:  config.RuntimeCredentials,
+	}
+}
+
+type ExecutionRuntime struct {
+	Executions      *execution.Service
+	CallbackHandler http.Handler
+	FormalHandler   *engineworker.FormalExecutionHandler
+	Credentials     *execution.RuntimeCredentialProvider
 }
 
 // Runtime owns the process-level assembly of authoritative Engine modules.
@@ -40,6 +75,8 @@ type Runtime struct {
 	Funds             *funds.Service
 	OverviewFunds     *funds.OverviewGateway
 	Executions        *execution.Service
+	Workflow          *workflow.Service
+	ExecutionInputs   http.Handler
 	CallbackHandler   http.Handler
 	OutboxWorker      *outbox.Worker
 }
@@ -71,6 +108,66 @@ func NewRuntime(db *sql.DB, agents *agent.Service, deliveries *delivery.Service,
 		return nil, err
 	}
 
+	executionRuntime, err := NewExecutionRuntime(db, agents, deliveries, config.Execution())
+	if err != nil {
+		return nil, err
+	}
+	workflowStore, err := workflow.NewStore(db)
+	if err != nil {
+		return nil, err
+	}
+	briefs, err := workflow.NewBriefProvider(workflowStore, config.ExecutionInputBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	artifacts, err := workflow.NewArtifactReader(workflowStore, executionRuntime.Credentials, config.AgentRequestTimeout)
+	if err != nil {
+		return nil, err
+	}
+	overviewStore, err := overviewpostgres.NewStore(db)
+	if err != nil {
+		return nil, err
+	}
+	overviewService, err := overview.NewService(overviewStore, matchingStore, briefs, workflow.TargetResolver{Store: workflowStore}, overviewFunds, executionRuntime.Executions, artifacts, workflow.ToolEvidenceReader{Store: workflowStore}, overview.Config{MaximumDuration: config.OverviewMaximumDuration, AllowedTools: config.OverviewAllowedTools})
+	if err != nil {
+		return nil, err
+	}
+	workflowService, err := workflow.NewService(workflowStore, matching.NewService(nil, nil), matchingSnapshots, overviewService)
+	if err != nil {
+		return nil, err
+	}
+	inputHandler, err := workflow.NewInputHandler(workflowStore, executionRuntime.Credentials)
+	if err != nil {
+		return nil, err
+	}
+	outboxStore, err := outboxpostgres.NewStore(db)
+	if err != nil {
+		return nil, err
+	}
+	outboxWorker, err := outbox.NewWorker(outboxStore, map[string]outbox.Handler{
+		engineworker.FormalExecutionTopic: executionRuntime.FormalHandler,
+	}, config.Outbox)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Runtime{
+		Matching:          matching.NewService(nil, nil),
+		MatchingSnapshots: matchingSnapshots,
+		Funds:             fundsService,
+		OverviewFunds:     overviewFunds,
+		Executions:        executionRuntime.Executions,
+		Workflow:          workflowService,
+		ExecutionInputs:   inputHandler,
+		CallbackHandler:   executionRuntime.CallbackHandler,
+		OutboxWorker:      outboxWorker,
+	}, nil
+}
+
+func NewExecutionRuntime(db *sql.DB, agents *agent.Service, deliveries *delivery.Service, config ExecutionConfig) (*ExecutionRuntime, error) {
+	if db == nil || agents == nil || deliveries == nil || config.AgentRequestTimeout <= 0 || config.AgentRequestTimeout > time.Minute {
+		return nil, outbox.ErrInvalidInput
+	}
 	credentials, err := execution.NewRuntimeCredentialProvider(config.RuntimeCredentials)
 	if err != nil {
 		return nil, err
@@ -100,29 +197,9 @@ func NewRuntime(db *sql.DB, agents *agent.Service, deliveries *delivery.Service,
 	if err != nil {
 		return nil, err
 	}
-
 	formalHandler, err := engineworker.NewFormalExecutionHandler(executionService, deliveries)
 	if err != nil {
 		return nil, err
 	}
-	outboxStore, err := outboxpostgres.NewStore(db)
-	if err != nil {
-		return nil, err
-	}
-	outboxWorker, err := outbox.NewWorker(outboxStore, map[string]outbox.Handler{
-		engineworker.FormalExecutionTopic: formalHandler,
-	}, config.Outbox)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Runtime{
-		Matching:          matching.NewService(nil, nil),
-		MatchingSnapshots: matchingSnapshots,
-		Funds:             fundsService,
-		OverviewFunds:     overviewFunds,
-		Executions:        executionService,
-		CallbackHandler:   callbackHandler,
-		OutboxWorker:      outboxWorker,
-	}, nil
+	return &ExecutionRuntime{Executions: executionService, CallbackHandler: callbackHandler, FormalHandler: formalHandler, Credentials: credentials}, nil
 }

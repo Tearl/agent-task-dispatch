@@ -32,12 +32,13 @@ type Score struct {
 }
 
 type Overview struct {
-	SlotID          string   `json:"slotId"`
-	Status          string   `json:"status"`
-	BillingStatus   string   `json:"billingStatus"`
-	ValidationCodes []string `json:"validationCodes"`
-	ContentHash     string   `json:"contentHash,omitempty"`
-	Replacement     bool     `json:"replacement"`
+	SlotID             string   `json:"slotId"`
+	LogicalExecutionID string   `json:"logicalExecutionId"`
+	Status             string   `json:"status"`
+	BillingStatus      string   `json:"billingStatus"`
+	ValidationCodes    []string `json:"validationCodes"`
+	ContentHash        string   `json:"contentHash,omitempty"`
+	Replacement        bool     `json:"replacement"`
 }
 
 type Candidate struct {

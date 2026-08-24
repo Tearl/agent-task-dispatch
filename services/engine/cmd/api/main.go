@@ -36,6 +36,7 @@ import (
 	selectionpostgres "github.com/example/agent-platform/engine/internal/selection/postgres"
 	enginetask "github.com/example/agent-platform/engine/internal/task"
 	taskpostgres "github.com/example/agent-platform/engine/internal/task/postgres"
+	"github.com/example/agent-platform/engine/internal/workspaceview"
 	_ "github.com/lib/pq"
 )
 
@@ -241,18 +242,34 @@ func main() {
 	if address == "" {
 		address = ":8080"
 	}
-	apiHandler := api.NewHandlerWithDisputes(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingViewService, deliveryService, disputeService)
-	rootHandler := http.NewServeMux()
-	rootHandler.Handle("/", apiHandler)
-	var runtime *enginecore.Runtime
-	if booleanEnv(logger, "ENGINE_WORKER_ENABLED", false) {
-		runtime, err = enginecore.NewRuntime(db, agentService, deliveryService, engineRuntimeConfig(logger, fundsAsset))
-		if err != nil {
-			logger.Error("engine core runtime configuration failed", "error", err)
-			os.Exit(1)
-		}
-		rootHandler.Handle("/v1/agent-callbacks/", runtime.CallbackHandler)
+	workerEnabled := booleanEnv(logger, "ENGINE_WORKER_ENABLED", false)
+	formalTransport := os.Getenv("ENGINE_FORMAL_EXECUTION_TRANSPORT")
+	if formalTransport == "" {
+		formalTransport = "database"
 	}
+	if formalTransport != "database" && formalTransport != "sqs" {
+		logger.Error("formal execution transport must be database or sqs")
+		os.Exit(1)
+	}
+	if workerEnabled && formalTransport != "database" {
+		logger.Error("embedded outbox worker requires database formal execution transport")
+		os.Exit(1)
+	}
+	runtime, err := enginecore.NewRuntime(db, agentService, deliveryService, engineRuntimeConfig(logger, fundsAsset))
+	if err != nil {
+		logger.Error("engine core runtime configuration failed", "error", err)
+		os.Exit(1)
+	}
+	workspaceService, err := workspaceview.NewService(db)
+	if err != nil {
+		logger.Error("workspace view configuration failed", "error", err)
+		os.Exit(1)
+	}
+	apiHandler := api.NewHandlerWithWorkspace(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingViewService, deliveryService, disputeService, runtime.Workflow, workspaceService)
+	rootHandler := http.NewServeMux()
+	rootHandler.Handle("/v1/agent-callbacks/", runtime.CallbackHandler)
+	rootHandler.Handle("/v1/execution-inputs/", runtime.ExecutionInputs)
+	rootHandler.Handle("/", apiHandler)
 
 	server := &http.Server{
 		Addr:              address,
@@ -273,7 +290,7 @@ func main() {
 		go runChainProjection(shutdownSignal, logger, chainProjector, chainReconciler)
 	}
 	workerErrors := make(chan error, 1)
-	if runtime != nil {
+	if workerEnabled {
 		go func() {
 			if workerErr := runtime.OutboxWorker.Run(shutdownSignal); workerErr != nil && !errors.Is(workerErr, context.Canceled) {
 				workerErrors <- workerErr

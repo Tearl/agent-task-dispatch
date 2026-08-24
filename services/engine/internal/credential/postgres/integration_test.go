@@ -207,7 +207,7 @@ func assertCredentialCount(t *testing.T, db *sql.DB, query string, argument any,
 }
 
 func credentialAgentInput() agent.CreateInput {
-	return agent.CreateInput{Name: "Credential Agent", Category: "research", Tags: []string{"secure"}, Capabilities: "Secure calls", Languages: []string{"en"}, EstimatedDurationSeconds: 60, AuthorBio: "Owner", EndpointURL: "https://agent.example/health", ControllerAddress: "0x1111111111111111111111111111111111111111", PayoutAddress: "0x2222222222222222222222222222222222222222", MaxConcurrency: 1}
+	return agent.CreateInput{Name: "Credential Agent", Category: "research", Tags: []string{"secure"}, Capabilities: "Secure calls", Languages: []string{"en"}, EstimatedDurationSeconds: 60, AuthorBio: "Owner", EndpointURL: "https://agent.example", ControllerAddress: "0x1111111111111111111111111111111111111111", PayoutAddress: "0x2222222222222222222222222222222222222222", MaxConcurrency: 1}
 }
 
 func credentialSearchPath(databaseURL, schema string) string {

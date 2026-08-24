@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+deployment_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+compose_file="${deployment_dir}/compose.yaml"
+runtime_dir="/dev/shm/agent-platform-agents-$(id -u)"
+runtime_env="${deployment_dir}/.runtime.env"
+deployment_json="${runtime_dir}/deployment.json"
+
+: "${AWS_REGION:?AWS_REGION is required}"
+: "${AGENT_DEPLOYMENT_SECRET_ID:?AGENT_DEPLOYMENT_SECRET_ID is required}"
+
+umask 077
+install -d -m 0700 "${runtime_dir}"
+cleanup() {
+  rm -f "${deployment_json}"
+}
+trap cleanup EXIT
+
+aws secretsmanager get-secret-value \
+  --region "${AWS_REGION}" \
+  --secret-id "${AGENT_DEPLOYMENT_SECRET_ID}" \
+  --query SecretString \
+  --output text > "${deployment_json}"
+
+jq -er '
+      def required: [
+        "CLOUDFLARE_TUNNEL_TOKEN",
+        "IMAGE_AGENT_PUBLIC_BASE_URL",
+        "IMAGE_AGENT_API_TOKEN",
+        "IMAGE_AGENT_CALLBACK_KEY_BASE64",
+        "ZAI_API_KEY",
+        "GLM_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL",
+        "GLM_IMAGE_TO_CODE_AGENT_API_TOKEN",
+        "GLM_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64",
+        "ZHIPU_API_KEY",
+        "QWEN_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL",
+        "QWEN_IMAGE_TO_CODE_AGENT_API_TOKEN",
+        "QWEN_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64",
+        "DASHSCOPE_API_KEY"
+      ];
+      . as $document |
+      if (type != "object") or any(required[]; . as $key | ($document | has($key) | not)) then
+        error("deployment secret is missing required keys")
+      elif any(required[]; . as $key | ($document[$key] | type != "string" or length == 0 or test("[\\r\\n]"))) then
+        error("deployment secret values must be non-empty single-line strings")
+      else
+        true
+      end
+    ' "${deployment_json}" > /dev/null
+
+secret_names=(
+  CLOUDFLARE_TUNNEL_TOKEN
+  IMAGE_AGENT_API_TOKEN
+  IMAGE_AGENT_CALLBACK_KEY_BASE64
+  ZAI_API_KEY
+  GLM_IMAGE_TO_CODE_AGENT_API_TOKEN
+  GLM_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64
+  ZHIPU_API_KEY
+  QWEN_IMAGE_TO_CODE_AGENT_API_TOKEN
+  QWEN_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64
+  DASHSCOPE_API_KEY
+)
+
+for secret_name in "${secret_names[@]}"; do
+  jq -er --arg key "${secret_name}" '.[$key]' "${deployment_json}" > "${runtime_dir}/${secret_name}"
+  chmod 0600 "${runtime_dir}/${secret_name}"
+done
+
+for callback_name in IMAGE_AGENT_CALLBACK_KEY_BASE64 GLM_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64 QWEN_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64; do
+  decoded_bytes="$(base64 --decode "${runtime_dir}/${callback_name}" | wc -c | tr -d ' ')"
+  if [ "${decoded_bytes}" != "32" ]; then
+    echo "callback keys must decode to exactly 32 bytes" >&2
+    exit 1
+  fi
+done
+
+image_base_url="$(jq -er '.IMAGE_AGENT_PUBLIC_BASE_URL' "${deployment_json}")"
+glm_base_url="$(jq -er '.GLM_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL' "${deployment_json}")"
+qwen_base_url="$(jq -er '.QWEN_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL' "${deployment_json}")"
+for base_url in "${image_base_url}" "${glm_base_url}" "${qwen_base_url}"; do
+  if [[ ! "${base_url}" =~ ^https://[^/]+/?$ ]]; then
+    echo "Agent public base URLs must be clean HTTPS origins without paths" >&2
+    exit 1
+  fi
+done
+
+{
+  printf 'AGENT_SECRET_DIR=%s\n' "${runtime_dir}"
+  printf 'IMAGE_AGENT_PUBLIC_BASE_URL=%s\n' "${image_base_url}"
+  printf 'GLM_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL=%s\n' "${glm_base_url}"
+  printf 'QWEN_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL=%s\n' "${qwen_base_url}"
+} > "${runtime_env}"
+chmod 0600 "${runtime_env}"
+
+docker compose --env-file "${runtime_env}" -f "${compose_file}" config --quiet
+docker compose --env-file "${runtime_env}" -f "${compose_file}" up -d --build --remove-orphans
+docker compose --env-file "${runtime_env}" -f "${compose_file}" ps

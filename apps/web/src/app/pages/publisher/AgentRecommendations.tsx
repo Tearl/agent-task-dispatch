@@ -1,10 +1,10 @@
-import { AlertTriangle, Check, Clock, Eye, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
+import { AlertTriangle, Check, Clock, Eye, Play, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import { Page } from "../../components/AppShell";
 import { Bar, GhostButton, InfoNote, PageHeader, Panel, Pill, SectionTitle } from "../../components/kit/primitives";
-import { PlatformAPIError, readMatchingView, readSelection, reconcileSelection, reserveSelection, submitSelectionTransaction, type MatchingView, type SelectionIntent, type WalletProvider } from "../../lib/platform-api";
+import { finalizeOverviewSlot, PlatformAPIError, readMatchingView, readSelection, readTaskExecutions, reconcileSelection, reserveSelection, startMatching, startOverview, submitSelectionTransaction, type ExecutionView, type MatchingView, type SelectionIntent, type WalletProvider } from "../../lib/platform-api";
 import type { PublisherFlowState } from "../../lib/publisher-flow";
 
 export default function AgentRecommendations() {
@@ -16,6 +16,7 @@ export default function AgentRecommendations() {
   const [view, setView] = useState<MatchingView | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [intent, setIntent] = useState<SelectionIntent | null>(null);
+  const [executions, setExecutions] = useState<ExecutionView[]>([]);
   const [localTx, setLocalTx] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,8 +26,9 @@ export default function AgentRecommendations() {
     if (!taskID) return;
     setError(null);
     try {
-      const value = await readMatchingView(taskID);
+      const [value, executionResult] = await Promise.all([readMatchingView(taskID), readTaskExecutions(taskID)]);
       setView(value);
+      setExecutions(executionResult.executions);
       if (value.reservation) setSelected(value.reservation.agentId);
       if (value.reservation?.id) setIntent(await readSelection(taskID, value.reservation.id));
     } catch (cause) {
@@ -35,6 +37,35 @@ export default function AgentRecommendations() {
   };
 
   useEffect(() => { void load(); }, [taskID]);
+
+  const advance = async () => {
+    if (!taskID || busy) return;
+    setBusy(true); setError(null);
+    try {
+      if (!view?.snapshot) {
+        await startMatching(taskID, crypto.randomUUID());
+      } else if (!view.batch) {
+        await startOverview(taskID, crypto.randomUUID());
+      } else {
+        const terminal = new Set(["succeeded", "failed", "cancelled", "cost_stopped"]);
+        const byID = new Map(executions.map((item) => [item.logicalExecutionId, item]));
+        const pendingSlots = view.snapshot.candidates.flatMap((candidate) => candidate.overview?.status === "dispatched" ? [candidate.overview] : []);
+        let finalized = 0;
+        for (const slot of pendingSlots) {
+          const execution = byID.get(slot.logicalExecutionId);
+          if (!execution || !terminal.has(execution.status)) continue;
+          await finalizeOverviewSlot(taskID, view.batch.id, slot.slotId, `${slot.slotId}:finalize`);
+          finalized += 1;
+        }
+        if (finalized === 0 && pendingSlots.length > 0 && [...byID.values()].some((item) => item.stage === "overview" && !terminal.has(item.status))) {
+          setError("概览执行仍在进行中；状态来自 Engine 权威执行记录，请稍后再次同步。");
+        }
+      }
+      await load();
+    } catch (cause) {
+      setError(message(cause));
+    } finally { setBusy(false); }
+  };
 
   const submit = async () => {
     if (!taskID || !view?.batch || !selected || busy) return;
@@ -72,7 +103,7 @@ export default function AgentRecommendations() {
   const txHash = intent?.reservation.transactionHash ?? localTx;
   const reservationStatus = intent?.reservation.status ?? view.reservation?.status;
   return <Page>
-    <PageHeader title="Agent 推荐与概览比较" subtitle={`${view.task.title} · ${view.snapshot ? `不可变快照 R${view.snapshot.revision}` : "等待匹配快照"}`} actions={<GhostButton icon={RefreshCw} onClick={() => void load()}>刷新状态</GhostButton>} />
+    <PageHeader title="Agent 推荐与概览比较" subtitle={`${view.task.title} · ${view.snapshot ? `不可变快照 R${view.snapshot.revision}` : "等待匹配快照"}`} actions={<div className="flex gap-2"><GhostButton icon={RefreshCw} onClick={() => void load()}>刷新状态</GhostButton><button type="button" disabled={busy || Boolean(view.reservation)} onClick={() => void advance()} className="ap-cta inline-flex items-center gap-2 rounded-xl px-4 py-2 text-[13px] disabled:opacity-40"><Play size={15} />{busy ? "处理中…" : workflowAction(view)}</button></div>} />
 
     {!view.snapshot ? <InfoNote tone="cyan"><span role="status">任务已经发布，但权威匹配快照尚未生成。刷新只读取 Latest，不会触发重新排序或增加修订。</span></InfoNote> : null}
     {view.snapshot?.degradations.map((item) => <div key={`${item.dependency}:${item.code}`} role="status" className="flex gap-2 rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-[13px] text-amber-100"><AlertTriangle size={16} className="shrink-0" /><span><b>{item.dependency}</b> · {item.code}：{item.message}</span></div>)}
@@ -80,6 +111,11 @@ export default function AgentRecommendations() {
     {view.snapshot ? <Panel className="p-5">
       <SectionTitle right={<Pill tone="cyan">{view.snapshot.algorithmVersion}</Pill>}>快照审计</SectionTitle>
       <div className="grid gap-3 text-[12px] sm:grid-cols-2 lg:grid-cols-4"><Audit label="修订" value={`R${view.snapshot.revision}`} /><Audit label="候选数量" value={String(candidates.length)} /><Audit label="探索位" value={view.snapshot.explorationTriggered ? "已触发，仅第三位" : "未触发"} /><Audit label="Seed 摘要" value={short(view.snapshot.seedDigest)} /></div>
+    </Panel> : null}
+
+    {executions.length > 0 ? <Panel className="p-5">
+      <SectionTitle right={<Pill tone="gray">{executions.length} 条</Pill>}>权威执行状态</SectionTitle>
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">{executions.map((execution) => <div key={execution.logicalExecutionId} className="rounded-xl border border-[var(--ap-border)] p-3 text-[11px]"><div className="flex items-center justify-between gap-2"><span className="truncate text-[var(--ap-text)]">{execution.agentId}</span><Pill tone={execution.status === "succeeded" ? "green" : execution.status === "failed" ? "red" : "amber"}>{execution.status}</Pill></div><div className="mt-2 text-[var(--ap-muted)]">{execution.stage} · 尝试 {execution.currentAttempt} · 成本 {execution.usedCost}/{execution.costCap}</div><div className="mt-1 break-all text-[var(--ap-muted)]">{short(execution.logicalExecutionId)}</div></div>)}</div>
     </Panel> : null}
 
     <section className="grid gap-4 xl:grid-cols-3" aria-label="Agent 候选比较">
@@ -114,6 +150,7 @@ function short(value: string) { return value.length > 18 ? `${value.slice(0, 10)
 function duration(seconds: number) { const hours=Math.ceil(seconds/3600); return hours<24?`${hours} 小时`:`${Math.ceil(hours/24)} 天`; }
 type CandidateOverview = NonNullable<NonNullable<MatchingView["snapshot"]>["candidates"][number]["overview"]>;
 function overviewLabel(value: CandidateOverview | undefined) { if (!value) return "概览待创建"; if(value.status==="valid"&&value.billingStatus==="captured")return "概览有效"; return `${value.status} / ${value.billingStatus}`; }
+function workflowAction(view: MatchingView) { if (!view.snapshot) return "开始权威匹配"; if (!view.batch) return "生成候选概览"; return view.batch.status === "completed" ? "同步执行状态" : "校验概览结果"; }
 function Audit({label,value}:{label:string;value:string}) { return <div className="rounded-xl border border-[var(--ap-border)] p-3"><dt className="text-[10px] text-[var(--ap-muted)]">{label}</dt><dd className="mt-1 text-[13px] text-[var(--ap-text)]">{value}</dd></div>; }
 function Metric({label,value}:{label:string;value:number}) { return <div className="rounded-lg bg-white/5 p-2"><dt className="text-[var(--ap-muted)]">{label}</dt><dd className="mt-1 text-[var(--ap-text)]">{value}</dd></div>; }
 function Line({label,value}:{label:string;value:string}) { return <div className="flex justify-between"><span className="text-[var(--ap-muted)]">{label}</span><span>{value}</span></div>; }

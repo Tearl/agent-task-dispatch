@@ -549,7 +549,7 @@ func TestAgentTransportAuthenticatesValidatesAndMapsConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := NewHandlerWithServices(slog.New(slog.NewTextHandler(io.Discard, nil)), authService, agentService)
-	body := `{"name":"Research Agent","category":"research","tags":["analysis"],"capabilities":"research","languages":["en"],"estimatedDurationSeconds":300,"authorBio":"provider","endpointUrl":"https://agent.example/health","controllerAddress":"0x1111111111111111111111111111111111111111","payoutAddress":"0x2222222222222222222222222222222222222222","maxConcurrency":2}`
+	body := `{"name":"Research Agent","category":"research","tags":["analysis"],"capabilities":"research","languages":["en"],"estimatedDurationSeconds":300,"authorBio":"provider","endpointUrl":"https://agent.example","controllerAddress":"0x1111111111111111111111111111111111111111","payoutAddress":"0x2222222222222222222222222222222222222222","maxConcurrency":2}`
 
 	unauthorized := httptest.NewRecorder()
 	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/v1/agents", bytes.NewBufferString(body)))
@@ -583,7 +583,7 @@ func TestAgentTransportAuthenticatesValidatesAndMapsConflicts(t *testing.T) {
 }
 
 func TestAgentHealthTransportDoesNotAcceptBrowserSuppliedResult(t *testing.T) {
-	store := &apiAgentStore{agent: engineagent.Agent{ID: "agent-1", OwnerID: "owner", EndpointURL: "https://agent.example/health", AggregateVersion: 3}}
+	store := &apiAgentStore{agent: engineagent.Agent{ID: "agent-1", OwnerID: "owner", EndpointURL: "https://agent.example", AggregateVersion: 3}}
 	agentService, err := engineagent.NewServiceWithHealthChecker(store, passingHealthChecker{})
 	if err != nil {
 		t.Fatal(err)

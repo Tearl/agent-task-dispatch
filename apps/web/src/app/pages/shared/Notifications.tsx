@@ -1,11 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import {
   Bell, ListChecks, Wallet, MessageSquareWarning, ShieldCheck, Check, Settings2,
 } from 'lucide-react';
 import { Page } from '../../components/AppShell';
 import { PageHeader, Panel, SectionTitle, Pill, GhostButton } from '../../components/kit/primitives';
-import { NOTIFICATIONS, type Notification } from '../../lib/mock';
+import { readWorkspaceNotifications, type WorkspaceNotification } from '../../lib/platform-api';
+import { useFinanceView } from '../../lib/use-finance-view';
+
+type Notification={id:string;type:'task'|'fund'|'dispute'|'security';title:string;time:string;read:boolean};
 
 const META: Record<Notification['type'], { icon: typeof Bell; tone: 'cyan' | 'green' | 'red' | 'amber'; label: string }> = {
   task: { icon: ListChecks, tone: 'cyan', label: '任务' },
@@ -17,12 +20,14 @@ const META: Record<Notification['type'], { icon: typeof Bell; tone: 'cyan' | 'gr
 const FILTERS: (Notification['type'] | 'all')[] = ['all', 'task', 'fund', 'dispute', 'security'];
 
 export default function Notifications() {
-  const [items, setItems] = useState(NOTIFICATIONS);
+  const [items, setItems] = useState<Notification[]>([]);
+  const {value,error,loading,reload}=useFinanceView(readWorkspaceNotifications);
   const [f, setF] = useState<Notification['type'] | 'all'>('all');
   const [prefs, setPrefs] = useState({ task: true, fund: true, dispute: true, security: true });
 
   const list = f === 'all' ? items : items.filter((n) => n.type === f);
   const unread = items.filter((n) => !n.read).length;
+  useEffect(()=>{if(value)setItems(value.notifications.map(presentNotification));},[value]);
 
   return (
     <Page>
@@ -47,6 +52,8 @@ export default function Notifications() {
           </div>
 
           <div className="space-y-3">
+            {loading?<div role="status" className="py-8 text-center text-[var(--ap-muted)]">正在读取审计事件…</div>:null}
+            {error?<Panel className="p-4 text-rose-200"><span role="alert">{error}</span><div className="mt-2"><GhostButton onClick={reload}>重试</GhostButton></div></Panel>:null}
             {list.map((n) => {
               const m = META[n.type];
               return (
@@ -90,10 +97,11 @@ export default function Notifications() {
               </div>
             ))}
           </div>
-          <p className="mt-4 text-[12px] text-[var(--ap-muted)]">关闭后仍会在站内保留记录，仅不再推送提醒。</p>
+          <p className="mt-4 text-[12px] text-[var(--ap-muted)]">当前开关和已读状态仅保存在本次页面会话；事件正文来自 Engine 审计投影。</p>
         </Panel>
       </div>
     </Page>
   );
 }
 
+function presentNotification(value:WorkspaceNotification):Notification{const action=value.action.toLowerCase();const type:Notification['type']=action.includes('dispute')||value.resourceType.includes('dispute')?'dispute':action.includes('fund')||action.includes('settle')||action.includes('refund')?'fund':action.includes('credential')||action.includes('auth')?'security':'task';return{id:value.id,type,title:`${value.action} · ${value.resourceType} ${value.resourceId}`,time:new Date(value.occurredAt).toLocaleString(),read:false};}

@@ -1,3 +1,5 @@
+import type { TaskAnalysis } from "./publisher-flow";
+
 export type PublicSession = {
   sessionId: string;
   userId: string;
@@ -29,10 +31,15 @@ export type ReconciliationFinanceView = {
 export type MatchingView = {
   asOf: string;
   task: { id: string; title: string; status: string; specHash: string };
-  snapshot?: { id: string; revision: number; algorithmVersion: string; ruleVersion: string; modelVersion: string; seedDigest: string; explorationTriggered: boolean; createdAt: string; degradations: Array<{ dependency: string; code: string; message: string }>; candidates: Array<{ agentId: string; name: string; category: string; tags: string[]; estimatedDurationSeconds: number; position: number; exploration: boolean; overviewPrice: string; formalPrice: string; externalCostCap: string; score: { taskMatch: number; reputation: number; priceTime: number; availability: number; rule: number; modelDelta: number; ranking: number }; overview?: { slotId: string; status: string; billingStatus: string; validationCodes: string[]; contentHash?: string; replacement: boolean } }> };
+  snapshot?: { id: string; revision: number; algorithmVersion: string; ruleVersion: string; modelVersion: string; seedDigest: string; explorationTriggered: boolean; createdAt: string; degradations: Array<{ dependency: string; code: string; message: string }>; candidates: Array<{ agentId: string; name: string; category: string; tags: string[]; estimatedDurationSeconds: number; position: number; exploration: boolean; overviewPrice: string; formalPrice: string; externalCostCap: string; score: { taskMatch: number; reputation: number; priceTime: number; availability: number; rule: number; modelDelta: number; ranking: number }; overview?: { slotId: string; logicalExecutionId: string; status: string; billingStatus: string; validationCodes: string[]; contentHash?: string; replacement: boolean } }> };
   batch?: { id: string; status: string; deadline: string; replacementUsed: boolean; replacementExhausted: boolean };
   reservation?: { id: string; agentId: string; slotId: string; status: string; transactionHash?: string };
 };
+export type ExecutionView = { logicalExecutionId: string; stage: string; agentId: string; status: string; currentAttempt: number; usedCost: string; costCap: string; contentHash?: string; deliverableRef?: string; deadline: string; createdAt: string; updatedAt: string };
+export type WorkspaceTask = { id: string; title: string; category: string; status: string; overviewBudget: string; formalBudget: string; externalCostCap: string; deadline: string; createdAt: string; updatedAt: string };
+export type WorkspaceAgent = { id: string; name: string; category: string; tags: string[]; capabilities: string; authorBio: string; endpointUrl?: string; status: string; health: string; healthCheckedAt?: string; healthValidUntil?: string; maxConcurrency: number; activeCapacity: number; aggregateVersion: number; estimatedDurationSeconds: number; currentPriceVersion?: number; currentCredentialVersion?: number; overviewPrice?: string; formalPrice?: string; updatedAt: string };
+export type WorkspaceNotification = { id: string; action: string; resourceType: string; resourceId: string; occurredAt: string };
+export type OverviewBatch = { id: string; snapshotId: string; taskId: string; taskSpecHash: string; matchRevision: number; algorithmVersion: string; deadline: string; status: string; replacementUsed: boolean; replacementExhausted: boolean; slots: Array<{ id: string; logicalExecutionId: string; agentId: string; status: string; billingStatus: string; validation: { valid: boolean; codes: string[] } }> };
 export type SelectionProof = { taskId: string; assignmentId: string; agentController: string; payout: string; overviewId: string; allocationId: string; quoteHash: string; taskSpecHash: string; matchRevision: number; priceVersion: number; overviewPrice: string; formalGrossPrice: string; overviewCredit: string; policyHash: string; nonce: string; deadline: number };
 export type SelectionIntent = { reservation: { id: string; publisherWallet: string; taskId: string; batchId: string; slotId: string; agentId: string; chainId: string; contractAddress: string; proof: SelectionProof; formalPayable: string; status: string; transactionHash?: string }; platformSignature: string };
 
@@ -115,6 +122,15 @@ export function readPublisherFinance(request: typeof fetch = fetch) { return api
 export function readAgentFinance(request: typeof fetch = fetch) { return apiRequest<AgentFinanceView>("/api/finance/agent", {}, request); }
 export function readReconciliationFinance(request: typeof fetch = fetch) { return apiRequest<ReconciliationFinanceView>("/api/finance/reconciliation", {}, request); }
 export function readMatchingView(taskID: string, request: typeof fetch = fetch) { return apiRequest<MatchingView>(`/api/tasks/${encodeURIComponent(taskID)}/matching`, {}, request); }
+export function startMatching(taskID: string, operationID: string, request: typeof fetch = fetch) { return mutation<{ snapshotId: string; matchRevision: number; qualified: number; selected: number; replay: boolean }>(`/api/tasks/${encodeURIComponent(taskID)}/matching-runs`, operationID, {}, request); }
+export function startOverview(taskID: string, operationID: string, request: typeof fetch = fetch) { return mutation<{ batch: OverviewBatch; replay: boolean }>(`/api/tasks/${encodeURIComponent(taskID)}/overview-batches`, operationID, {}, request); }
+export function finalizeOverviewSlot(taskID: string, batchID: string, slotID: string, operationID: string, request: typeof fetch = fetch) { return mutation<OverviewBatch>(`/api/tasks/${encodeURIComponent(taskID)}/overview-batches/${encodeURIComponent(batchID)}/slots/${encodeURIComponent(slotID)}/finalize`, operationID, {}, request); }
+export function readTaskExecutions(taskID: string, request: typeof fetch = fetch) { return apiRequest<{ executions: ExecutionView[] }>(`/api/tasks/${encodeURIComponent(taskID)}/executions`, {}, request); }
+export function readWorkspaceTasks(request: typeof fetch = fetch) { return apiRequest<{ tasks: WorkspaceTask[] }>("/api/workspace/tasks", {}, request); }
+export function readWorkspaceAgents(request: typeof fetch = fetch) { return apiRequest<{ agents: WorkspaceAgent[] }>("/api/workspace/agents", {}, request); }
+export function readMarketplaceAgents(request: typeof fetch = fetch) { return apiRequest<{ marketplace: WorkspaceAgent[] }>("/api/workspace/marketplace", {}, request); }
+export function readWorkspaceNotifications(request: typeof fetch = fetch) { return apiRequest<{ notifications: WorkspaceNotification[] }>("/api/workspace/notifications", {}, request); }
+export function checkAgentHealth(agentID: string, expectedVersion: number, request: typeof fetch = fetch) { return mutation<{ aggregateVersion: number; health: string }>(`/api/agents/${encodeURIComponent(agentID)}/health`, `${agentID}:health:${crypto.randomUUID()}`, { expectedVersion }, request); }
 export function reserveSelection(taskID: string, batchID: string, slotID: string, operationID: string, request: typeof fetch = fetch) { return mutation<SelectionIntent>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations`, operationID, { batchId: batchID, slotId: slotID }, request); }
 export function readSelection(taskID: string, reservationID: string, request: typeof fetch = fetch) { return apiRequest<SelectionIntent>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations/${encodeURIComponent(reservationID)}`, {}, request); }
 export function reconcileSelection(taskID: string, reservationID: string, transactionHash: string, request: typeof fetch = fetch) { return mutation<{ reservation: SelectionIntent["reservation"]; assignment: { id: string; workNonce: number } | null }>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations/${encodeURIComponent(reservationID)}/reconcile`, `${reservationID}:reconcile:${transactionHash.toLowerCase()}`, { transactionHash }, request); }
@@ -289,6 +305,27 @@ export type TaskPublishInput = {
   criteria: string[];
 };
 
+export type TaskAnalysisRequest = {
+  prompt: string;
+  category?: string | null;
+  depth?: string;
+  currentAnalysis?: TaskAnalysis;
+  instruction?: string;
+};
+
+export function analyzePublisherTask(input: TaskAnalysisRequest, request: typeof fetch = fetch) {
+  return apiRequest<{ analysis: TaskAnalysis; model: string }>("/api/task-analysis", {
+    method: "POST",
+    body: {
+      prompt: input.prompt,
+      ...(input.category ? { category: input.category } : {}),
+      ...(input.depth ? { depth: input.depth } : {}),
+      ...(input.currentAnalysis ? { currentAnalysis: input.currentAnalysis } : {}),
+      ...(input.instruction ? { instruction: input.instruction } : {}),
+    },
+  }, request);
+}
+
 export async function createAndPublishTask(input: TaskPublishInput, request: typeof fetch = fetch) {
   validateTaskPublishInput(input);
   const criteria = input.criteria.filter((item) => item.trim());
@@ -319,8 +356,8 @@ export async function createAndPublishTask(input: TaskPublishInput, request: typ
 export function validateAgentOnboardingInput(input: AgentOnboardingInput): void {
   if (!input.operationId || !input.name.trim() || input.name.length > 200 || !input.category.trim() || input.category.length > 100 || !input.tagline.trim() || input.tagline.length > 5_000) throw new Error("Agent 基本信息不完整或过长。");
   let endpoint: URL;
-  try { endpoint = new URL(input.endpointUrl); } catch { throw new Error("健康检查地址必须是有效的 HTTPS URL。"); }
-  if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || input.endpointUrl.length > 2_048) throw new Error("健康检查地址必须是不含凭证、查询或片段的 HTTPS URL。");
+  try { endpoint = new URL(input.endpointUrl); } catch { throw new Error("协议基础地址必须是有效的 HTTPS URL。"); }
+  if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || (endpoint.pathname !== "/" && endpoint.pathname !== "") || input.endpointUrl.length > 2_048) throw new Error("协议基础地址必须是不含凭证、路径、查询或片段的 HTTPS URL。");
   if (!/^0x[0-9a-fA-F]{40}$/.test(input.controllerAddress)) throw new Error("当前会话钱包地址无效。");
   if (!Number.isInteger(input.maxConcurrency) || input.maxConcurrency < 1 || input.maxConcurrency > 10_000) throw new Error("并发上限必须为 1–10000。");
   if (input.capabilities.length === 0 || input.capabilities.length > 50 || input.capabilities.some((item) => !item.trim() || item.length > 2_000)) throw new Error("请提供有效的能力标签。");

@@ -78,7 +78,7 @@ export default function OnboardAgent() {
 
   const canNext =
     (step === 0 && Boolean(name.trim()) && Boolean(tagline.trim())) ||
-    (step === 1 && endpointUrl.startsWith("https://") && Number.isInteger(Number(maxConcurrency)) && Number(maxConcurrency) > 0) ||
+    (step === 1 && isProtocolBaseUrl(endpointUrl) && Number.isInteger(Number(maxConcurrency)) && Number(maxConcurrency) > 0) ||
     (step === 2 && secret.trim().length > 0 && /^\d+$/.test(overviewPrice) && /^\d+$/.test(formalPrice)) ||
     step === 3;
 
@@ -313,14 +313,14 @@ export default function OnboardAgent() {
               <SectionTitle>运行容量</SectionTitle>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="min-w-0">
-                  <label htmlFor="agent-endpoint" className="text-[13px] text-[var(--ap-muted)]">协议健康检查 URL</label>
+                  <label htmlFor="agent-endpoint" className="text-[13px] text-[var(--ap-muted)]">协议基础 URL</label>
                   <input
                     id="agent-endpoint"
                     type="url"
                     disabled={submitting || attemptLocked}
                     value={endpointUrl}
                     onChange={(event) => setEndpointUrl(event.target.value)}
-                    placeholder="https://agent.example/health"
+                    placeholder="https://agent.example"
                     className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]"
                   />
                 </div>
@@ -340,7 +340,7 @@ export default function OnboardAgent() {
               </div>
               <InfoNote tone="cyan">
                 <span className="inline-flex items-center gap-1.5">
-                  <Info size={14} /> Engine 将连接该 HTTPS 地址并校验协议版本；浏览器不能自行声明健康。
+                  <Info size={14} /> Engine 将请求该 HTTPS 基础地址的 /health 并校验协议版本；浏览器不能自行声明健康。
                 </span>
               </InfoNote>
             </div>
@@ -519,6 +519,15 @@ export default function OnboardAgent() {
       </div>
     </Page>
   );
+}
+
+function isProtocolBaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash && (url.pathname === "" || url.pathname === "/");
+  } catch {
+    return false;
+  }
 }
 
 function Row({ label, value, tag }: { label: string; value: string; tag?: string }) {

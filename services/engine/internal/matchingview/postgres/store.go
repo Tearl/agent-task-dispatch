@@ -121,7 +121,7 @@ func attachOverviews(candidates []matchingview.Candidate, slots []overview.Slot)
 	}
 	for index := range candidates {
 		if slot, ok := byAgent[candidates[index].AgentID]; ok {
-			candidates[index].Overview = &matchingview.Overview{SlotID: slot.ID, Status: slot.Status, BillingStatus: slot.BillingStatus, ValidationCodes: slot.Validation.Codes, ContentHash: slot.ContentHash, Replacement: slot.Replacement}
+			candidates[index].Overview = &matchingview.Overview{SlotID: slot.ID, LogicalExecutionID: slot.LogicalExecutionID, Status: slot.Status, BillingStatus: slot.BillingStatus, ValidationCodes: slot.Validation.Codes, ContentHash: slot.ContentHash, Replacement: slot.Replacement}
 		}
 	}
 	sort.SliceStable(candidates, func(left, right int) bool { return candidates[left].Position < candidates[right].Position })

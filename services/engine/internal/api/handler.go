@@ -14,10 +14,14 @@ import (
 	"github.com/example/agent-platform/engine/internal/delivery"
 	"github.com/example/agent-platform/engine/internal/dispute"
 	"github.com/example/agent-platform/engine/internal/financeview"
+	"github.com/example/agent-platform/engine/internal/matching"
 	"github.com/example/agent-platform/engine/internal/matchingview"
+	"github.com/example/agent-platform/engine/internal/overview"
 	"github.com/example/agent-platform/engine/internal/persistence"
 	"github.com/example/agent-platform/engine/internal/selection"
 	enginetask "github.com/example/agent-platform/engine/internal/task"
+	"github.com/example/agent-platform/engine/internal/workflow"
+	"github.com/example/agent-platform/engine/internal/workspaceview"
 )
 
 type handler struct {
@@ -31,6 +35,8 @@ type handler struct {
 	matching    *matchingview.Service
 	deliveries  *delivery.Service
 	disputes    *dispute.Service
+	workflow    *workflow.Service
+	workspace   *workspaceview.Service
 }
 
 type nonceRequest struct {
@@ -84,7 +90,15 @@ func NewHandlerWithDelivery(logger *slog.Logger, authService *auth.Service, agen
 }
 
 func NewHandlerWithDisputes(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service, matchingService *matchingview.Service, deliveryService *delivery.Service, disputeService *dispute.Service) http.Handler {
-	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService, tasks: taskService, selections: selectionService, finance: financeService, matching: matchingService, deliveries: deliveryService, disputes: disputeService}
+	return NewHandlerWithWorkflow(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingService, deliveryService, disputeService, nil)
+}
+
+func NewHandlerWithWorkflow(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service, matchingService *matchingview.Service, deliveryService *delivery.Service, disputeService *dispute.Service, workflowService *workflow.Service) http.Handler {
+	return NewHandlerWithWorkspace(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingService, deliveryService, disputeService, workflowService, nil)
+}
+
+func NewHandlerWithWorkspace(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service, matchingService *matchingview.Service, deliveryService *delivery.Service, disputeService *dispute.Service, workflowService *workflow.Service, workspaceService *workspaceview.Service) http.Handler {
+	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService, tasks: taskService, selections: selectionService, finance: financeService, matching: matchingService, deliveries: deliveryService, disputes: disputeService, workflow: workflowService, workspace: workspaceService}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /v1/auth/nonce", h.createNonce)
@@ -126,6 +140,18 @@ func NewHandlerWithDisputes(logger *slog.Logger, authService *auth.Service, agen
 	if matchingService != nil {
 		mux.HandleFunc("GET /v1/tasks/{id}/matching-view", h.matchingView)
 	}
+	if workflowService != nil {
+		mux.HandleFunc("POST /v1/tasks/{id}/matching-runs", h.startMatching)
+		mux.HandleFunc("POST /v1/tasks/{id}/overview-batches", h.startOverview)
+		mux.HandleFunc("POST /v1/tasks/{id}/overview-batches/{batchId}/slots/{slotId}/finalize", h.finalizeOverviewSlot)
+		mux.HandleFunc("GET /v1/tasks/{id}/executions", h.taskExecutions)
+	}
+	if workspaceService != nil {
+		mux.HandleFunc("GET /v1/workspace/tasks", h.workspaceTasks)
+		mux.HandleFunc("GET /v1/workspace/agents", h.workspaceAgents)
+		mux.HandleFunc("GET /v1/workspace/marketplace", h.workspaceMarketplace)
+		mux.HandleFunc("GET /v1/workspace/notifications", h.workspaceNotifications)
+	}
 	if deliveryService != nil {
 		mux.HandleFunc("POST /v1/tasks/{id}/formal-packages/start", h.startFormalVersion)
 		mux.HandleFunc("POST /v1/tasks/{id}/formal-feedback", h.submitFormalFeedback)
@@ -156,6 +182,126 @@ func NewHandlerWithDisputes(logger *slog.Logger, authService *auth.Service, agen
 	}
 
 	return requestLogging(logger, mux)
+}
+
+func (h *handler) workspaceTasks(writer http.ResponseWriter, request *http.Request) {
+	h.workspaceRead(writer, request, "tasks")
+}
+func (h *handler) workspaceAgents(writer http.ResponseWriter, request *http.Request) {
+	h.workspaceRead(writer, request, "agents")
+}
+func (h *handler) workspaceMarketplace(writer http.ResponseWriter, request *http.Request) {
+	h.workspaceRead(writer, request, "marketplace")
+}
+func (h *handler) workspaceNotifications(writer http.ResponseWriter, request *http.Request) {
+	h.workspaceRead(writer, request, "notifications")
+}
+
+func (h *handler) workspaceRead(writer http.ResponseWriter, request *http.Request, kind string) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	var value any
+	var err error
+	switch kind {
+	case "tasks":
+		value, err = h.workspace.Tasks(request.Context(), session)
+	case "agents":
+		value, err = h.workspace.Agents(request.Context(), session, false)
+	case "marketplace":
+		value, err = h.workspace.Agents(request.Context(), session, true)
+	default:
+		value, err = h.workspace.Notifications(request.Context(), session)
+	}
+	if err != nil {
+		if errors.Is(err, workspaceview.ErrForbidden) {
+			writeJSON(writer, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		h.logger.Error("workspace view failed", "kind", kind, "error", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "workspace view temporarily unavailable"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{kind: value})
+}
+
+func (h *handler) startMatching(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.workflow.StartMatching(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"))
+	if err != nil {
+		h.writeWorkflowError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if value.Replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) startOverview(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.workflow.StartOverview(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeWorkflowError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if value.Replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) finalizeOverviewSlot(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.workflow.FinalizeOverviewSlot(request.Context(), session, request.PathValue("id"), request.PathValue("batchId"), request.PathValue("slotId"))
+	if err != nil {
+		h.writeWorkflowError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) taskExecutions(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.workflow.Executions(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeWorkflowError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) writeWorkflowError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, workflow.ErrForbidden):
+		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "forbidden"})
+	case errors.Is(err, workflow.ErrNotFound), errors.Is(err, matching.ErrSnapshotNotFound), errors.Is(err, overview.ErrNotFound):
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "workflow resource not found"})
+	case errors.Is(err, workflow.ErrInvalidInput), errors.Is(err, overview.ErrInvalidInput):
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid workflow request"})
+	case errors.Is(err, workflow.ErrDependencyPending), errors.Is(err, overview.ErrDependencyPending):
+		writeJSON(writer, http.StatusTooEarly, map[string]string{"error": "workflow dependency is not ready"})
+	case errors.Is(err, overview.ErrInvalidState), errors.Is(err, overview.ErrContentConflict), errors.Is(err, overview.ErrObsolete):
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "workflow conflict"})
+	default:
+		h.logger.Error("workflow operation failed", "error", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "workflow temporarily unavailable"})
+	}
 }
 
 func (h *handler) createFormalAcceptanceIntent(writer http.ResponseWriter, request *http.Request) {

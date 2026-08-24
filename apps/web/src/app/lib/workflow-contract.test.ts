@@ -130,7 +130,14 @@ test("matching comparison uses authoritative snapshots and exposes degraded and 
   assert.match(page, /billingStatus !== "captured"/);
   assert.match(page, /检查链上确认/);
   assert.match(page, /operationID\.current/);
+  for (const token of ["startMatching", "startOverview", "readTaskExecutions", "finalizeOverviewSlot", "权威执行状态"]) assert.match(page, new RegExp(token));
   assert.doesNotMatch(page, /from "\.\.\/\.\.\/lib\/mock"/);
+});
+
+test("primary workspaces load Engine read models instead of static fixtures",async()=>{
+  const pages=await Promise.all(["publisher/Tasks.tsx","publisher/Dashboard.tsx","publisher/Marketplace.tsx","agent/Dashboard.tsx","agent/Integration.tsx","shared/Notifications.tsx"].map((name)=>readFile(new URL(`../pages/${name}`,import.meta.url),"utf8")));
+  for(const page of pages)assert.doesNotMatch(page,/lib\/mock|TASKS|MY_AGENTS|NOTIFICATIONS|REVENUE_SERIES/);
+  for(const token of ["readWorkspaceTasks","readMarketplaceAgents","readWorkspaceAgents","readWorkspaceNotifications"])assert.equal(pages.some((page)=>page.includes(token)),true,`${token} is not used`);
 });
 
 test("formal delivery UI exposes accessible append-only revision and three-state acceptance flows", async () => {

@@ -65,6 +65,38 @@ func TestOutboxWorkerRollbackPreservesDeadLetterEvidence(t *testing.T) {
 	}
 }
 
+func TestProcessedMessagesMigrationCreatesImmutableConsumerLedger(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000020_processed_messages.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS processed_messages",
+		"PRIMARY KEY (consumer_name, message_id)",
+		"envelope_hash ~ '^sha256:[0-9a-f]{64}$'",
+		"broker_message_id text NOT NULL",
+		"processed_messages_processed_at_idx",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("processed-message migration missing %q", required)
+		}
+	}
+}
+
+func TestProcessedMessagesRollbackPreservesIdempotencyEvidence(t *testing.T) {
+	contents, err := os.ReadFile("migrations/000020_processed_messages.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(contents))
+	for _, forbidden := range []string{"drop table", "delete from", "truncate"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("processed-message rollback destroys idempotency evidence with %q", forbidden)
+		}
+	}
+}
+
 func TestMigrationFilesAreOrderedAndTransactionManagedByRunner(t *testing.T) {
 	contents, err := migrationFiles.ReadFile("migrations/000001_foundation.up.sql")
 	if err != nil {
@@ -73,6 +105,19 @@ func TestMigrationFilesAreOrderedAndTransactionManagedByRunner(t *testing.T) {
 	upper := strings.ToUpper(string(contents))
 	if strings.Contains(upper, "BEGIN;") || strings.Contains(upper, "COMMIT;") {
 		t.Fatal("embedded migrations must not manage transactions; ApplyMigrations owns the transaction")
+	}
+}
+
+func TestAgentProtocolBaseURLMigrationNormalizesLegacyHealthPaths(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000022_agent_protocol_base_url.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{"regexp_replace(endpoint_url, '/health/?$', '')", "health = 'unknown'", "health_checked_at = NULL", "health_valid_until = NULL", "aggregate_version = aggregate_version + 1"} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("Agent protocol base URL migration missing %q", required)
+		}
 	}
 }
 

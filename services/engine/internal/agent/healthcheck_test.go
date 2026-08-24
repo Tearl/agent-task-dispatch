@@ -11,7 +11,12 @@ import (
 
 func TestProtocolHealthCheckerRequiresCompatibleHealthyHTTPSResponse(t *testing.T) {
 	response := `{"status":"healthy","protocolVersion":"1"}`
-	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/health" {
+			t.Errorf("health checker requested %q instead of /health", request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
 		writer.Header().Set("content-type", "application/json")
 		_, _ = writer.Write([]byte(response))
 	}))
@@ -32,10 +37,13 @@ func TestProtocolHealthCheckerRequiresCompatibleHealthyHTTPSResponse(t *testing.
 }
 
 func TestProtocolHealthCheckerRejectsUnsafeTargetsAndURLs(t *testing.T) {
-	for _, raw := range []string{"http://agent.example/health", "https://user:secret@agent.example/health", "https://agent.example/health?token=secret", "file:///tmp/health"} {
+	for _, raw := range []string{"http://agent.example", "https://user:secret@agent.example", "https://agent.example/health", "https://agent.example?token=secret", "file:///tmp/agent"} {
 		if ValidEndpointURL(raw) {
 			t.Fatalf("unsafe endpoint accepted: %s", raw)
 		}
+	}
+	if !ValidEndpointURL("https://agent.example") {
+		t.Fatal("clean HTTPS protocol base URL rejected")
 	}
 	for _, raw := range []string{"127.0.0.1", "10.0.0.1", "169.254.1.1", "::1", "::"} {
 		address := netip.MustParseAddr(raw)

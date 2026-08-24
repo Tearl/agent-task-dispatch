@@ -18,7 +18,10 @@ export function createPlatformRuntime(config: ExecutionAdapterConfig) {
     artifacts,
     executions: new AgentExecutionAdapter({
       executor: createImageToCodePlatformExecutor(generateCodeFromImage),
-      inputs: new SafeJsonExecutionInputResolver({ userAgent: "QwenImageToCodeAgent/0.1" }),
+      inputs: new SafeJsonExecutionInputResolver({
+        userAgent: "QwenImageToCodeAgent/0.1",
+        authorization: config.apiToken ? `Bearer ${config.apiToken}` : undefined,
+      }),
       artifacts,
       callbacks,
       callbackKeyVersion: config.callbackKeyVersion,

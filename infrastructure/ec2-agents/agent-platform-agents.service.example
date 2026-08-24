@@ -1,0 +1,22 @@
+[Unit]
+Description=Agent Platform visual Agents
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=ubuntu
+Group=docker
+WorkingDirectory=/opt/agent-task-dispatch
+EnvironmentFile=/etc/agent-platform/agents-deployment.env
+ExecStart=/opt/agent-task-dispatch/infrastructure/ec2-agents/deploy.sh
+ExecReload=/opt/agent-task-dispatch/infrastructure/ec2-agents/deploy.sh
+ExecStop=/usr/bin/docker compose --env-file /opt/agent-task-dispatch/infrastructure/ec2-agents/.runtime.env -f /opt/agent-task-dispatch/infrastructure/ec2-agents/compose.yaml down
+TimeoutStartSec=1800
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
+

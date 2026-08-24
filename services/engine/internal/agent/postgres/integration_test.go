@@ -356,7 +356,7 @@ func TestPostgresAgentOwnershipLifecyclePricesIdempotencyAndCapacity(t *testing.
 		t.Fatalf("endpoint Agent health setup: agent=%#v err=%v", endpointAgent, err)
 	}
 	endpointProfile := profileFrom(endpointAgent, 2)
-	endpointProfile.EndpointURL = "https://replacement-agent.example/health"
+	endpointProfile.EndpointURL = "https://replacement-agent.example"
 	endpointAgent, _, err = service.UpdateProfile(ctx, ownerA, "change-endpoint", endpointAgent.ID, endpointProfile)
 	if err != nil || endpointAgent.Health != agent.HealthUnknown || endpointAgent.HealthCheckedAt != nil || endpointAgent.HealthValidUntil != nil {
 		t.Fatalf("endpoint change did not invalidate health: agent=%#v err=%v", endpointAgent, err)
@@ -375,7 +375,7 @@ func integrationCreateInput() agent.CreateInput {
 		Languages:                []string{"zh-CN", "en"},
 		EstimatedDurationSeconds: 300,
 		AuthorBio:                "Provider",
-		EndpointURL:              "https://agent.example/health",
+		EndpointURL:              "https://agent.example",
 		ControllerAddress:        "0x1111111111111111111111111111111111111111",
 		PayoutAddress:            "0x2222222222222222222222222222222222222222",
 		MaxConcurrency:           2,

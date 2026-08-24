@@ -1,5 +1,6 @@
 export type EngineResourceKind = "agents" | "tasks";
 export type EngineFinanceKind = "publisher" | "agent" | "reconciliation";
+export type EngineWorkspaceKind = "tasks" | "agents" | "marketplace" | "notifications";
 
 export type EngineAggregateResult = {
   status: number;
@@ -24,9 +25,12 @@ const sensitiveKeys = new Set([
   "ciphertext",
   "credential",
   "credentialvalue",
+	"callbackkey",
+	"callbacknonce",
   "plaintext",
   "privatekey",
   "password",
+	"inputref",
   "refreshtoken",
   "secret",
   "sessiontoken",
@@ -100,6 +104,30 @@ export async function aggregateEngineMatching(
   return { status: 200, body: value as Record<string, unknown> };
 }
 
+export async function aggregateEngineExecutions(
+	taskID: string,
+	sessionToken: string,
+	options: { fetch?: typeof fetch; engineBaseUrl?: string } = {},
+): Promise<EngineAggregateResult> {
+	if (!validID(taskID)) throw new InvalidResourceIdError("invalid resource id");
+	if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
+	const response = await (options.fetch ?? fetch)(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}/v1/tasks/${encodeURIComponent(taskID)}/executions`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
+	if (!response.ok) return engineError(response);
+	const value = sanitizePayload(await readEngineJSON(response));
+	if (!Array.isArray(value) || !value.every(validExecutionView)) throw new InvalidEngineResponseError("invalid engine execution response");
+	return { status: 200, body: { executions: value } };
+}
+
+export async function aggregateEngineWorkspace(kind: EngineWorkspaceKind, sessionToken: string, options: { fetch?: typeof fetch; engineBaseUrl?: string } = {}): Promise<EngineAggregateResult> {
+	if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
+	const response = await (options.fetch ?? fetch)(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}/v1/workspace/${kind}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
+	if (!response.ok) return engineError(response);
+	const value = sanitizePayload(await readEngineJSON(response));
+	const body = record(value);
+	if (!body || !Array.isArray(body[kind])) throw new InvalidEngineResponseError("invalid engine workspace response");
+	return { status: 200, body };
+}
+
 export async function aggregateEngineFormalDelivery(
   taskID: string,
   sessionToken: string,
@@ -169,7 +197,9 @@ export async function forwardEngineMutation(
 
 function validMutationPath(path: string): boolean {
   if (path === "/v1/agents" || path === "/v1/tasks") return true;
-  return /^\/v1\/agents\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:credentials|health|prices|lifecycle)$/.test(path)
+	return /^\/v1\/agents\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:credentials|health|prices|lifecycle)$/.test(path)
+		|| /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:matching-runs|overview-batches)$/.test(path)
+		|| /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/overview-batches\/sha256(?::|%3A)[0-9a-f]{64}\/slots\/sha256(?::|%3A)[0-9a-f]{64}\/finalize$/.test(path)
     || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/publish$/.test(path)
     || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/formal-packages\/start$/.test(path)
     || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/formal-feedback$/.test(path)
@@ -179,6 +209,11 @@ function validMutationPath(path: string): boolean {
     || /^\/v1\/disputes\/sha256(?::|%3A)[0-9a-f]{64}\/(?:claims|freeze-submission|freeze-reconcile|evidence|evidence-access|assignments|decisions|settlements|reviews|finalize)$/.test(path)
     || path === "/v1/admin/operations"
     || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/selection-reservations(?:\/sha256(?::|%3A)[0-9a-f]{64}\/reconcile)?$/.test(path);
+}
+
+function validExecutionView(value: unknown): boolean {
+	const item = record(value);
+	return Boolean(item && typeof item.logicalExecutionId === "string" && typeof item.stage === "string" && typeof item.agentId === "string" && typeof item.status === "string" && Number.isSafeInteger(item.currentAttempt) && typeof item.usedCost === "string" && typeof item.costCap === "string" && typeof item.deadline === "string" && typeof item.createdAt === "string" && typeof item.updatedAt === "string");
 }
 
 function validID(value: string): boolean { return /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value); }

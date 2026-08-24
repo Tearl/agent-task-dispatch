@@ -36,6 +36,9 @@ func TestServiceRejectsExpiredWrongBindingAndReplay(t *testing.T) {
 	if err != nil || session.Token == "" {
 		t.Fatalf("verify: %#v %v", session, err)
 	}
+	if len(session.Roles) != 2 || session.Roles[0] != "publisher" || session.Roles[1] != "agent_provider" {
+		t.Fatalf("new client must receive both client roles: %#v", session.Roles)
+	}
 	if _, err = service.Verify(context.Background(), VerifyRequest{Message: challenge.Message, Signature: sign(challenge.Message)}); !errors.Is(err, ErrNonceConsumed) {
 		t.Fatalf("expected replay rejection, got %v", err)
 	}

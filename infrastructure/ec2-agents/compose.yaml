@@ -1,0 +1,167 @@
+name: agent-platform-agents
+
+x-agent-service: &agent-service
+  build:
+    context: ../..
+    dockerfile: infrastructure/ec2-agents/Dockerfile
+  image: agent-platform/agents:local
+  init: true
+  restart: unless-stopped
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  networks:
+    - agents
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  image-generator:
+    <<: *agent-service
+    command: ["node", "agents/image-generator/dist/main.js"]
+    environment:
+      NODE_ENV: production
+      IMAGE_AGENT_PORT: "8092"
+      IMAGE_AGENT_DATA_DIR: /var/lib/agent
+      IMAGE_AGENT_PUBLIC_BASE_URL: ${IMAGE_AGENT_PUBLIC_BASE_URL:?required}
+      IMAGE_AGENT_CALLBACK_KEY_VERSION: image-agent-callback-v1
+      IMAGE_AGENT_JOB_CONCURRENCY: "1"
+      IMAGE_AGENT_PLANNER_MODEL: glm-4.5-flash
+      ZAI_BASE_URL: https://open.bigmodel.cn/api/paas/v4
+      AGENT_API_TOKEN_ENV: IMAGE_AGENT_API_TOKEN
+      AGENT_CALLBACK_KEY_ENV: IMAGE_AGENT_CALLBACK_KEY_BASE64
+      PROVIDER_API_KEY_ENV: ZAI_API_KEY
+    secrets:
+      - source: image_agent_api_token
+        target: agent_api_token
+      - source: image_agent_callback_key
+        target: agent_callback_key
+      - source: zai_api_key
+        target: provider_api_key
+    volumes:
+      - image-generator-data:/var/lib/agent
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8092/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  glm-image-to-code:
+    <<: *agent-service
+    command: ["node", "agents/glm-image-to-code/dist/main.js"]
+    environment:
+      NODE_ENV: production
+      GLM_IMAGE_TO_CODE_AGENT_PORT: "8093"
+      GLM_IMAGE_TO_CODE_AGENT_DATA_DIR: /var/lib/agent
+      GLM_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL: ${GLM_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL:?required}
+      GLM_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_VERSION: glm-image-to-code-callback-v1
+      GLM_IMAGE_TO_CODE_MODEL: zai/glm-4.6v
+      AGENT_API_TOKEN_ENV: GLM_IMAGE_TO_CODE_AGENT_API_TOKEN
+      AGENT_CALLBACK_KEY_ENV: GLM_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64
+      PROVIDER_API_KEY_ENV: ZHIPU_API_KEY
+    secrets:
+      - source: glm_agent_api_token
+        target: agent_api_token
+      - source: glm_agent_callback_key
+        target: agent_callback_key
+      - source: zhipu_api_key
+        target: provider_api_key
+    volumes:
+      - glm-image-to-code-data:/var/lib/agent
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8093/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  qwen-image-to-code:
+    <<: *agent-service
+    command: ["node", "agents/qwen-image-to-code/dist/main.js"]
+    environment:
+      NODE_ENV: production
+      QWEN_IMAGE_TO_CODE_AGENT_PORT: "8094"
+      QWEN_IMAGE_TO_CODE_AGENT_DATA_DIR: /var/lib/agent
+      QWEN_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL: ${QWEN_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL:?required}
+      QWEN_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_VERSION: qwen-image-to-code-callback-v1
+      QWEN_IMAGE_TO_CODE_MODEL: alibaba-cn/qwen3.7-plus
+      AGENT_API_TOKEN_ENV: QWEN_IMAGE_TO_CODE_AGENT_API_TOKEN
+      AGENT_CALLBACK_KEY_ENV: QWEN_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64
+      PROVIDER_API_KEY_ENV: DASHSCOPE_API_KEY
+    secrets:
+      - source: qwen_agent_api_token
+        target: agent_api_token
+      - source: qwen_agent_callback_key
+        target: agent_callback_key
+      - source: dashscope_api_key
+        target: provider_api_key
+    volumes:
+      - qwen-image-to-code-data:/var/lib/agent
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8094/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    pull_policy: always
+    command: ["tunnel", "--no-autoupdate", "run", "--token-file", "/run/secrets/tunnel_token"]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      image-generator:
+        condition: service_healthy
+      glm-image-to-code:
+        condition: service_healthy
+      qwen-image-to-code:
+        condition: service_healthy
+    networks:
+      - agents
+    secrets:
+      - source: cloudflare_tunnel_token
+        target: tunnel_token
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  agents:
+    driver: bridge
+
+volumes:
+  image-generator-data:
+  glm-image-to-code-data:
+  qwen-image-to-code-data:
+
+secrets:
+  cloudflare_tunnel_token:
+    file: ${AGENT_SECRET_DIR:?required}/CLOUDFLARE_TUNNEL_TOKEN
+  image_agent_api_token:
+    file: ${AGENT_SECRET_DIR:?required}/IMAGE_AGENT_API_TOKEN
+  image_agent_callback_key:
+    file: ${AGENT_SECRET_DIR:?required}/IMAGE_AGENT_CALLBACK_KEY_BASE64
+  zai_api_key:
+    file: ${AGENT_SECRET_DIR:?required}/ZAI_API_KEY
+  glm_agent_api_token:
+    file: ${AGENT_SECRET_DIR:?required}/GLM_IMAGE_TO_CODE_AGENT_API_TOKEN
+  glm_agent_callback_key:
+    file: ${AGENT_SECRET_DIR:?required}/GLM_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64
+  zhipu_api_key:
+    file: ${AGENT_SECRET_DIR:?required}/ZHIPU_API_KEY
+  qwen_agent_api_token:
+    file: ${AGENT_SECRET_DIR:?required}/QWEN_IMAGE_TO_CODE_AGENT_API_TOKEN
+  qwen_agent_callback_key:
+    file: ${AGENT_SECRET_DIR:?required}/QWEN_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64
+  dashscope_api_key:
+    file: ${AGENT_SECRET_DIR:?required}/DASHSCOPE_API_KEY

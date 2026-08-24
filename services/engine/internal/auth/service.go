@@ -62,8 +62,11 @@ type Config struct {
 	Version      string
 	ChallengeTTL time.Duration
 	SessionTTL   time.Duration
-	DefaultRole  string
-	Now          func() time.Time
+	DefaultRoles []string
+	// DefaultRole is kept for callers that intentionally provision one initial
+	// role. New client accounts use DefaultRoles and receive both client roles.
+	DefaultRole string
+	Now         func() time.Time
 }
 
 type Service struct {
@@ -82,8 +85,12 @@ func NewService(store Store, verifier SignatureVerifier, config Config) (*Servic
 	if config.SessionTTL <= 0 {
 		config.SessionTTL = 24 * time.Hour
 	}
-	if config.DefaultRole == "" {
-		config.DefaultRole = "publisher"
+	if len(config.DefaultRoles) == 0 {
+		if config.DefaultRole != "" {
+			config.DefaultRoles = []string{config.DefaultRole}
+		} else {
+			config.DefaultRoles = []string{"publisher", "agent_provider"}
+		}
 	}
 	if config.Version == "" {
 		config.Version = "1"
@@ -126,7 +133,7 @@ func (s *Service) Verify(ctx context.Context, request VerifyRequest) (Session, e
 	if err != nil {
 		return Session{}, fmt.Errorf("generate session: %w", err)
 	}
-	session := Session{Token: token, SessionID: hash("session:" + token), UserID: hash("user:" + challenge.WalletAddress), Wallet: challenge.WalletAddress, Roles: []string{s.config.DefaultRole}, ExpiresAt: s.config.Now().UTC().Add(s.config.SessionTTL)}
+	session := Session{Token: token, SessionID: hash("session:" + token), UserID: hash("user:" + challenge.WalletAddress), Wallet: challenge.WalletAddress, Roles: append([]string(nil), s.config.DefaultRoles...), ExpiresAt: s.config.Now().UTC().Add(s.config.SessionTTL)}
 	return s.store.ConsumeChallenge(ctx, challenge, hash(token), session)
 }
 

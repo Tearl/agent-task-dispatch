@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ActionBlockedError, authenticateWallet, clientRolesForEngineRoles, createAndPublishTask, createFormalAcceptance, onboardAgent, readAgentFinance, readFormalDelivery, readPublisherFinance, readReconciliationFinance, recordFormalAcceptanceSubmission, requireAllowed, revokeSession, startFormalVersion, submitDisputeFreezeTransaction, submitFormalAcceptanceTransaction, submitSelectionTransaction, submitWorkNonceTransaction, type DisputeView, type FormalAcceptance, type FormalVersion, type SelectionIntent } from "./platform-api.ts";
+import { ActionBlockedError, analyzePublisherTask, authenticateWallet, clientRolesForEngineRoles, createAndPublishTask, createFormalAcceptance, onboardAgent, readAgentFinance, readFormalDelivery, readPublisherFinance, readReconciliationFinance, recordFormalAcceptanceSubmission, requireAllowed, revokeSession, startFormalVersion, submitDisputeFreezeTransaction, submitFormalAcceptanceTransaction, submitSelectionTransaction, submitWorkNonceTransaction, type DisputeView, type FormalAcceptance, type FormalVersion, type SelectionIntent } from "./platform-api.ts";
+
+test("publisher analysis stays same-origin and sends refinement context", async () => {
+  let call: { url: string; body: Record<string, unknown> } | undefined;
+  const analysis = { title: "Task", summary: "Summary", category: "数据分析", depth: "深度", budget: 100, deliveryDays: 2, tags: ["data"], deliverables: ["table"], acceptanceCriteria: ["complete"], risk: "none" };
+  const request: typeof fetch = async (input, init) => {
+    call = { url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> };
+    return Response.json({ analysis: { ...analysis, budget: 150 }, model: "deepseek-v4-flash" });
+  };
+  const result = await analyzePublisherTask({ prompt: "Analyze", currentAnalysis: analysis, instruction: "Increase budget" }, request);
+  assert.equal(call?.url, "/api/task-analysis");
+  assert.deepEqual(call?.body.currentAnalysis, analysis);
+  assert.equal(call?.body.instruction, "Increase budget");
+  assert.equal(result.analysis.budget, 150);
+});
 
 test("wallet authentication requests a nonce, signs it, and creates an HttpOnly-backed session", async () => {
   const walletCalls: unknown[] = [];
@@ -116,11 +130,11 @@ test("Agent onboarding uses stable stage keys and follows Engine activation deci
     if (url === "/api/agents/agent-1") return Response.json({ agent: { id: "agent-1", aggregateVersion: 4, status: "draft" }, availableActions: { aggregateVersion: 4, actions: [{ action: "activate", allowed: true, reasons: [] }] } });
     return Response.json({ id: "agent-1", status: "active", aggregateVersion: 5 });
   };
-  await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example/health", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request);
+  await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request);
   assert.deepEqual(calls.map((call) => call.key), ["agent-op:create", "agent-op:credential", "agent-op:price", null, "agent-op:health:3", null, "agent-op:activate"]);
   assert.equal(calls[0]?.body?.controllerAddress, "0x1111111111111111111111111111111111111111");
   assert.equal(calls[0]?.body?.payoutAddress, "0x1111111111111111111111111111111111111111");
-  assert.equal(calls[0]?.body?.endpointUrl, "https://agent.example/health");
+  assert.equal(calls[0]?.body?.endpointUrl, "https://agent.example");
   assert.equal(calls[2]?.body?.overviewPrice, "10");
   assert.equal(calls[2]?.body?.formalPackageGrossPrice, "20");
 });
@@ -159,7 +173,7 @@ test("Agent flow recovers a lost successful activation response from the authori
     if (url === "/api/agents/agent-1") return Response.json({ agent: { id: "agent-1", aggregateVersion: 5, status: "active" }, availableActions: { aggregateVersion: 5, actions: [{ action: "activate", allowed: false, reasons: [{ code: "activation_transition_not_allowed", message: "Already active." }] }] } });
     throw new Error(`unexpected request: ${url}`);
   };
-  const result = await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example/health", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request);
+  const result = await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request);
   assert.equal(result.status, "active");
   assert.equal(calls.at(-1), "/api/agents/agent-1");
 });
@@ -181,7 +195,7 @@ test("Agent flow refreshes an expired health check with a version-bound idempote
     if (url.endsWith("health")) return Response.json({ aggregateVersion: 5 });
     return Response.json({ id: "agent-1", status: "active", aggregateVersion: 6 });
   };
-  await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example/health", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request);
+  await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request);
   const health = calls.find((call) => call.url.endsWith("health"));
   assert.equal(health?.key, "agent-op:health:4");
   assert.equal(health?.body?.expectedVersion, 4);
@@ -192,8 +206,9 @@ test("invalid correctable inputs fail before any mutation", async () => {
   let calls = 0;
   const request: typeof fetch = async () => { calls += 1; return Response.json({}); };
   await assert.rejects(() => createAndPublishTask({ operationId: "op", title: "Task", description: "Description", category: "research", amount: "01", deadline: "2026-09-01", criteria: ["Correct"] }, request), /前导零/);
-  await assert.rejects(() => onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example/health", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "30", formalPrice: "20" }, request), /不得高于/);
+  await assert.rejects(() => onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "30", formalPrice: "20" }, request), /不得高于/);
   await assert.rejects(() => onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "http://127.0.0.1/health", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request), /HTTPS URL/);
+  await assert.rejects(() => onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example/health", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request), /路径/);
   assert.equal(calls, 0);
 });
 

@@ -15,6 +15,8 @@
     "dev:web": "nx run web:dev",
     "dev:bff": "nx run @agent-platform/bff:dev",
     "dev:engine": "nx run @agent-platform/engine:dev",
+    "dev:publisher": "pnpm --filter @agent-platform/engine dev:publisher",
+    "dev:consumer": "pnpm --filter @agent-platform/engine dev:consumer",
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
     "infra:logs": "docker compose logs -f"

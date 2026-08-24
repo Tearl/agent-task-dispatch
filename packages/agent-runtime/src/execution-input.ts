@@ -8,10 +8,12 @@ export interface ExecutionInputResolver {
 export class SafeJsonExecutionInputResolver implements ExecutionInputResolver {
   private readonly maxBytes: number;
   private readonly userAgent: string;
+  private readonly authorization?: string;
 
-  constructor(options: { maxBytes?: number; userAgent?: string } = {}) {
+  constructor(options: { maxBytes?: number; userAgent?: string; authorization?: string } = {}) {
     this.maxBytes = options.maxBytes ?? 16 * 1024 * 1024;
     this.userAgent = options.userAgent ?? "AgentPlatformExecutionAdapter/1";
+    this.authorization = options.authorization;
   }
 
   async resolve(inputRef: string, expectedHash: string): Promise<unknown> {
@@ -32,7 +34,11 @@ export class SafeJsonExecutionInputResolver implements ExecutionInputResolver {
     const url = await assertPublicHttpsUrl(rawUrl);
     const response = await fetch(url, {
       redirect: "error",
-      headers: { Accept: "application/json", "User-Agent": this.userAgent },
+      headers: {
+        Accept: "application/json",
+        "User-Agent": this.userAgent,
+        ...(this.authorization ? { Authorization: this.authorization } : {}),
+      },
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) throw new Error(`input reference returned ${response.status}`);

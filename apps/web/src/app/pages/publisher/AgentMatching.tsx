@@ -13,15 +13,15 @@ import {
   Target,
   X,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { toast } from "sonner";
 
 import { Page } from "../../components/AppShell";
 import { GhostButton, InfoNote, PageHeader, Panel, Pill } from "../../components/kit/primitives";
+import { analyzePublisherTask } from "../../lib/platform-api";
 import {
   buildTaskAnalysis,
-  refineTaskAnalysis,
   type PublisherFlowState,
   type TaskAnalysis,
 } from "../../lib/publisher-flow";
@@ -47,10 +47,39 @@ export default function AgentMatching() {
   const [isEditingAnalysis, setIsEditingAnalysis] = useState(false);
   const [analysisRevision, setAnalysisRevision] = useState(flowState.analysisRevision ?? 1);
   const [message, setMessage] = useState("");
+  const [isAnalyzing, setIsAnalyzing] = useState(!flowState.analysis);
+  const [analysisModel, setAnalysisModel] = useState<string | null>(null);
+  const initialRequestStarted = useRef(false);
   const [conversation, setConversation] = useState<ConversationMessage[]>([
     { id: 1, role: "user", content: prompt },
-    { id: 2, role: "assistant", content: "已生成第一版任务分析。你可以继续补充要求，确认后发布不可变任务规格。" },
+    { id: 2, role: "assistant", content: flowState.analysis ? "已恢复任务分析。你可以继续补充要求，确认后发布不可变任务规格。" : "正在请求 DeepSeek 生成第一版任务分析…" },
   ]);
+
+  const loadInitialAnalysis = async () => {
+    setIsAnalyzing(true);
+    try {
+      const result = await analyzePublisherTask({ prompt, category: flowState.category, depth: flowState.depth });
+      setAnalysis(result.analysis);
+      setAnalysisDraft(cloneAnalysis(result.analysis));
+      setAnalysisModel(result.model);
+      setConversation((items) => [...items, { id: nextMessageId(), role: "assistant", content: "DeepSeek 已生成第一版任务分析。你可以继续补充要求，确认后发布不可变任务规格。" }]);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "模型服务暂时不可用";
+      setConversation((items) => [...items, { id: nextMessageId(), role: "assistant", content: `AI 分析失败：${detail}。当前显示本地草稿，你可以重试。` }]);
+      toast.error("DeepSeek 任务分析失败", { description: detail });
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (flowState.analysis || initialRequestStarted.current) return;
+    initialRequestStarted.current = true;
+    void loadInitialAnalysis();
+    // This request must run once per screen entry; including the local callback
+    // would repeat a billable model call after every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flowState.analysis, flowState.category, flowState.depth, prompt]);
 
   const startEditingAnalysis = () => {
     setAnalysisDraft(cloneAnalysis(analysis));
@@ -79,17 +108,27 @@ export default function AgentMatching() {
     toast.success("分析结果已更新");
   };
 
-  const sendMessage = (preset?: string) => {
+  const sendMessage = async (preset?: string) => {
     const content = (preset ?? message).trim();
     if (!content) {
       toast.error("请输入需要补充或修改的要求");
       return;
     }
 
-    const next = refineTaskAnalysis(analysis, content);
     setConversation((items) => [...items, { id: nextMessageId(), role: "user", content }]);
-    applyAnalysis(next, describeChanges(analysis, next));
     setMessage("");
+    setIsAnalyzing(true);
+    try {
+      const result = await analyzePublisherTask({ prompt, category: flowState.category, depth: flowState.depth, currentAnalysis: analysis, instruction: content });
+      setAnalysisModel(result.model);
+      applyAnalysis(result.analysis, describeChanges(analysis, result.analysis));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "模型服务暂时不可用";
+      setConversation((items) => [...items, { id: nextMessageId(), role: "assistant", content: `没有应用这次修改：${detail}` }]);
+      toast.error("DeepSeek 更新分析失败", { description: detail });
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   const continueToPublication = () => {
@@ -118,12 +157,15 @@ export default function AgentMatching() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--ap-border)] bg-[linear-gradient(120deg,rgba(34,211,238,.12),rgba(139,92,246,.08))] px-6 py-4">
           <div className="flex items-center gap-3">
             <Pill tone="cyan" dot>AI 分析结果</Pill>
-            <span className="text-[11px] text-[var(--ap-muted)]">分析版本 R{analysisRevision} · {isEditingAnalysis ? "正在编辑" : "待你确认"}</span>
+            <span className="text-[11px] text-[var(--ap-muted)]">分析版本 R{analysisRevision} · {isAnalyzing ? "DeepSeek 分析中" : isEditingAnalysis ? "正在编辑" : "待你确认"}{analysisModel ? ` · ${analysisModel}` : ""}</span>
           </div>
           {!isEditingAnalysis ? (
-            <button type="button" onClick={startEditingAnalysis} className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-300/25 bg-cyan-300/8 px-3 py-2 text-[12px] text-[var(--ap-cyan)] hover:border-cyan-300/50">
-              <PencilLine size={13} /> 编辑分析结果
-            </button>
+            <div className="flex items-center gap-2">
+              {!flowState.analysis && !analysisModel && !isAnalyzing ? <button type="button" onClick={() => void loadInitialAnalysis()} className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300/25 px-3 py-2 text-[12px] text-amber-200 hover:border-amber-300/50"><Sparkles size={13} />重试 AI 分析</button> : null}
+              <button type="button" disabled={isAnalyzing} onClick={startEditingAnalysis} className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-300/25 bg-cyan-300/8 px-3 py-2 text-[12px] text-[var(--ap-cyan)] hover:border-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-40">
+                <PencilLine size={13} /> 编辑分析结果
+              </button>
+            </div>
           ) : null}
         </div>
 
@@ -152,20 +194,20 @@ export default function AgentMatching() {
 
         <div className="border-t border-[var(--ap-border)] p-5">
           <div className="mb-3 flex flex-wrap gap-2">
-            {QUICK_REFINEMENTS.map((item) => <button key={item} type="button" onClick={() => sendMessage(item)} className="rounded-full border border-[var(--ap-border)] px-3 py-1.5 text-[11px] text-[var(--ap-muted)] hover:border-[var(--ap-border-strong)] hover:text-[var(--ap-text-2)]">{item}</button>)}
+            {QUICK_REFINEMENTS.map((item) => <button key={item} type="button" disabled={isAnalyzing} onClick={() => void sendMessage(item)} className="rounded-full border border-[var(--ap-border)] px-3 py-1.5 text-[11px] text-[var(--ap-muted)] hover:border-[var(--ap-border-strong)] hover:text-[var(--ap-text-2)] disabled:cursor-not-allowed disabled:opacity-40">{item}</button>)}
           </div>
           <div className="flex items-end gap-3 rounded-2xl border border-[var(--ap-border)] bg-[rgba(5,9,20,.55)] p-3 focus-within:border-[var(--ap-border-strong)]">
             <textarea
               value={message}
               onChange={(event) => setMessage(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) sendMessage();
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) void sendMessage();
               }}
               rows={2}
               placeholder="继续补充：调整预算、修改周期、增加交付格式或补充验收要求…  ⌘/Ctrl + Enter 发送"
               className="min-h-14 flex-1 resize-none bg-transparent px-2 py-1 text-[13px] leading-relaxed text-white outline-none placeholder:text-[var(--ap-muted)]"
             />
-            <button type="button" onClick={() => sendMessage()} aria-label="发送补充要求" className="ap-cta grid h-10 w-10 shrink-0 place-items-center rounded-xl"><Send size={16} /></button>
+            <button type="button" disabled={isAnalyzing} onClick={() => void sendMessage()} aria-label="发送补充要求" className="ap-cta grid h-10 w-10 shrink-0 place-items-center rounded-xl disabled:cursor-not-allowed disabled:opacity-40"><Send size={16} /></button>
           </div>
         </div>
 
@@ -174,7 +216,7 @@ export default function AgentMatching() {
             <div className="text-[11px] text-[var(--ap-muted)]">即将锁定</div>
             <div className="mt-1 truncate text-[14px] text-[var(--ap-text)]">任务分析 R{analysisRevision}</div>
           </div>
-          <button type="button" disabled={isEditingAnalysis} onClick={continueToPublication} className="ap-cta inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-[14px] disabled:cursor-not-allowed disabled:opacity-40">
+          <button type="button" disabled={isEditingAnalysis || isAnalyzing} onClick={continueToPublication} className="ap-cta inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-[14px] disabled:cursor-not-allowed disabled:opacity-40">
             确认任务分析，发布任务规格 <ArrowRight size={16} />
           </button>
         </div>

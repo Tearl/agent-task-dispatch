@@ -75,11 +75,44 @@ same-origin `/api/*` requests to the server-only `BFF_URL` origin (default
 cookies remain first-party; `VITE_BFF_URL` is used only by the Vite development
 proxy.
 
-Agent onboarding stores an HTTPS health endpoint. Engine probes it directly
-with a three-second timeout and expects a bounded JSON response:
+Agent onboarding stores a clean HTTPS protocol base URL. Engine probes its
+`/health` endpoint with a three-second timeout and expects a bounded JSON response:
 `{"status":"healthy","protocolVersion":"1"}`. Redirects and private-network
 targets are rejected by default; `AGENT_HEALTH_ALLOW_PRIVATE_NETWORKS=true` is
 for explicit local testing only and must remain disabled in production.
+
+### Matching, overview, and execution APIs
+
+The browser calls the same-origin BFF only. The BFF forwards these publisher-
+owned workflow APIs to Engine:
+
+- `POST /v1/tasks/{taskId}/matching-runs` creates or replays a sealed matching
+  revision from the current immutable task spec, active Agent records, live
+  capacity, health, and frozen prices.
+- `POST /v1/tasks/{taskId}/overview-batches` authorizes discovery funds and
+  dispatches one overview execution for each selected snapshot slot.
+- `POST /v1/tasks/{taskId}/overview-batches/{batchId}/slots/{slotId}/finalize`
+  validates a terminal artifact and settles or releases its allocation.
+- `GET /v1/tasks/{taskId}/executions` returns a sanitized execution projection;
+  it never returns input references, callback nonces, or transport credentials.
+
+Workflow commands advance the task aggregate through `matching`,
+`overview_generating`, and `awaiting_selection` under a database row lock. Each
+transition increments the aggregate version and appends domain and audit events;
+draft, unfunded, assigned, and terminal tasks cannot enter the workflow.
+
+`EXECUTION_INPUT_BASE_URL` is the public HTTPS Engine origin used in non-secret
+input references. Agents authenticate those reads with their existing runtime
+bearer credential. Engine verifies that the credential is bound to the exact
+Agent, task input reference, execution stage, and deadline before regenerating
+the immutable, specification-bound input. Only Agent-contract allowlisted fields
+are emitted and common credential or identity patterns in text are redacted.
+Artifact downloads use the same credential and are pinned
+to the registered Agent endpoint origin to prevent credential forwarding.
+
+The main publisher and Agent workspaces now read task, catalog, runtime, finance,
+execution, and audit-event projections through `/v1/workspace/*`; the former
+sample records are no longer imported by those pages.
 
 ### Engine Outbox worker
 
@@ -94,6 +127,63 @@ The worker claims only registered command topics with PostgreSQL leases and
 exponential backoff and move to dead-letter state after the configured attempt
 limit or a permanent validation failure. Other Outbox topics remain pending for
 their dedicated publishers/consumers.
+
+### Independent SNS/SQS Outbox publisher
+
+Run the publisher as a separate process from the Engine API:
+
+```bash
+pnpm --filter @agent-platform/engine dev:publisher
+```
+
+It claims only its configured topics with the same fenced PostgreSQL leases.
+`task-events` and `agent-events` publish to separate SNS topics;
+`admin.operation.requested` publishes to a dedicated SQS FIFO queue. Each AWS
+message contains an `outbox-envelope-v1` body plus `message_id`, `dedupe_key`,
+`topic`, and `version` message attributes. The Outbox row is completed only
+after AWS returns a broker message ID.
+
+Delivery is intentionally at least once: a process can stop after AWS accepts a
+message but before PostgreSQL records `published_at`. Every downstream consumer
+must therefore record `(consumer_name, message_id)` in an idempotency ledger.
+Consumers whose domain effect is a single PostgreSQL transaction must write the
+ledger row in that transaction. Workflows that cross an external boundary must
+additionally reuse stable domain idempotency and fencing identities across a
+crash window. SQS FIFO deduplication reduces short-window duplicates but does
+not replace either guarantee.
+
+`ENGINE_FORMAL_EXECUTION_TRANSPORT=database` leaves formal commands on the
+embedded Engine Worker and prevents the independent publisher from claiming
+them. Setting it to `sqs` makes the publisher route
+`agent.execution.formal.requested` to `TASK_EXECUTION_QUEUE_URL`; the API keeps
+the signed Agent callback endpoint active but refuses to start its database
+Worker. This prevents both transports from consuming the same topic.
+
+Run the independent formal-execution consumer with the same execution secrets
+as the API:
+
+```bash
+pnpm --filter @agent-platform/engine dev:consumer
+```
+
+The consumer long-polls one FIFO message at a time, strictly binds the four SQS
+message attributes to `outbox-envelope-v1`, and renews visibility while the
+authoritative Engine handler is running. A failed handler changes visibility
+with bounded exponential backoff; the queue redrive policy moves repeated poison
+messages to its DLQ. A successful handler inserts immutable
+`processed_messages(consumer_name, message_id)` evidence before deleting the SQS
+message. Redelivery after that point skips the handler. A stop between the
+business effect and ledger insert is also safe because formal execution creation,
+network attempts, Agent calls, and delivery transitions reuse their existing
+logical idempotency and fencing identities.
+
+LocalStack provisions separate task/Agent event topics, projection queues,
+formal/admin FIFO command queues, and one DLQ per queue. In production, omit
+`AWS_ENDPOINT_URL` and grant the publisher ECS Task Role only `sns:Publish` on
+the two topics and `sqs:SendMessage` on the command queues. Grant the consumer
+role only `sqs:ReceiveMessage`, `sqs:DeleteMessage`, and
+`sqs:ChangeMessageVisibility` on the formal queue. Do not configure long-lived
+AWS keys in production task definitions.
 
 ## Quality commands
 

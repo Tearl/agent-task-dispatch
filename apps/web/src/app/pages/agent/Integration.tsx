@@ -1,15 +1,18 @@
-import { Activity, Boxes, Cpu, Eye, EyeOff, PlusCircle, RefreshCw, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { Activity, Boxes, Cpu, PlusCircle, RefreshCw, ShieldCheck } from "lucide-react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
 import { Page } from "../../components/AppShell";
 import { Bar, CtaButton, GhostButton, PageHeader, Panel, Pill, SectionTitle } from "../../components/kit/primitives";
-import { MY_AGENTS } from "../../lib/mock";
+import { checkAgentHealth, readWorkspaceAgents } from "../../lib/platform-api";
+import { useFinanceView } from "../../lib/use-finance-view";
 
 export default function AgentIntegration() {
-  const [reveal, setReveal] = useState(false);
   const navigate = useNavigate();
+  const {value,error,loading,reload}=useFinanceView(readWorkspaceAgents);
+  const agents=value?.agents??[];
+
+  const checkHealth=async(agent:typeof agents[number])=>{try{await checkAgentHealth(agent.id,agent.aggregateVersion);toast.success(`${agent.name} 健康检查已完成`);reload();}catch(cause){toast.error(cause instanceof Error?cause.message:"健康检查失败");}};
 
   return (
     <Page>
@@ -24,7 +27,7 @@ export default function AgentIntegration() {
       />
 
       <div className="grid gap-4 lg:grid-cols-3">
-        {MY_AGENTS.map((agent) => (
+        {agents.map((agent) => (
           <Panel key={agent.id} hover className="p-5">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -36,8 +39,8 @@ export default function AgentIntegration() {
                   <div className="text-[12px] text-[var(--ap-muted)]">{agent.category}</div>
                 </div>
               </div>
-              <Pill tone={agent.status === "online" ? "green" : agent.status === "degraded" ? "amber" : "red"} dot>
-                {agent.status === "online" ? "在线" : agent.status === "degraded" ? "降级" : "离线"}
+              <Pill tone={agent.health === "healthy" ? "green" : agent.health === "degraded" ? "amber" : "red"} dot>
+                {agent.health === "healthy" ? "健康" : agent.health === "degraded" ? "降级" : agent.health}
               </Pill>
             </div>
 
@@ -47,21 +50,21 @@ export default function AgentIntegration() {
                   <span className="inline-flex items-center gap-1.5">
                     <Activity size={13} /> 健康度
                   </span>
-                  <span>{agent.health}%</span>
+                  <span>{healthPercent(agent.health)}%</span>
                 </div>
                 <div className="mt-1.5">
-                  <Bar value={agent.health} tone={agent.health > 90 ? "#34d399" : agent.health > 0 ? "#fbbf24" : "#fb7185"} />
+                  <Bar value={healthPercent(agent.health)} tone={agent.health === "healthy" ? "#34d399" : agent.health === "degraded" ? "#fbbf24" : "#fb7185"} />
                 </div>
               </div>
               <div className="flex items-center justify-between gap-3">
                 <span className="text-[var(--ap-muted)]">调用端点</span>
-                <span className="max-w-[150px] truncate text-[var(--ap-text-2)]">{agent.endpoint}</span>
+                <span className="max-w-[150px] truncate text-[var(--ap-text-2)]">{agent.endpointUrl || "未配置"}</span>
               </div>
               <div className="flex items-center justify-between gap-3">
                 <span className="inline-flex items-center gap-1.5 text-[var(--ap-muted)]">
                   <ShieldCheck size={13} /> 协议校验
                 </span>
-                <Pill tone={agent.protocol.includes("✓") ? "green" : "red"}>{agent.protocol}</Pill>
+                <Pill tone={agent.status === "active" ? "green" : "amber"}>agent-execution-v1</Pill>
               </div>
             </div>
 
@@ -69,7 +72,7 @@ export default function AgentIntegration() {
               <GhostButton
                 icon={RefreshCw}
                 className="flex-1"
-                onClick={() => toast.success(`${agent.name} 健康检查已触发`)}
+                onClick={() => void checkHealth(agent)}
               >
                 健康检查
               </GhostButton>
@@ -78,6 +81,9 @@ export default function AgentIntegration() {
           </Panel>
         ))}
       </div>
+
+      {loading?<div role="status" className="py-8 text-center text-[var(--ap-muted)]">正在读取 Agent 配置…</div>:null}
+      {error?<Panel className="p-4 text-rose-200"><span role="alert">{error}</span><div className="mt-2"><GhostButton onClick={reload}>重试</GhostButton></div></Panel>:null}
 
       <Panel className="p-6">
         <SectionTitle
@@ -90,31 +96,18 @@ export default function AgentIntegration() {
           凭证与密钥（脱敏展示）
         </SectionTitle>
         <div className="space-y-3">
-          {[
-            { name: "DataForge · API Key", val: "sk_live_9f2a...4c1d" },
-            { name: "LinguaX · Bearer Token", val: "brt_2b8e...77af" },
-          ].map((credential) => (
+          {agents.map((agent) => (
             <div
-              key={credential.name}
+              key={agent.id}
               className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--ap-border)] bg-[rgba(10,18,38,0.4)] px-4 py-3"
             >
               <div>
-                <div className="text-[14px] text-[var(--ap-text)]">{credential.name}</div>
+                <div className="text-[14px] text-[var(--ap-text)]">{agent.name} · 运行凭据</div>
                 <div className="mt-0.5 font-mono text-[13px] text-[var(--ap-muted)]">
-                  {reveal ? credential.val : "••••••••••••••••••"}
+                  {agent.currentCredentialVersion ? `已配置 · 版本 ${agent.currentCredentialVersion}` : "尚未配置"}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  aria-label={reveal ? "隐藏凭证" : "显示凭证"}
-                  onClick={() => setReveal((value) => !value)}
-                  className="grid h-9 w-9 place-items-center rounded-lg border border-[var(--ap-border)] text-[var(--ap-text-2)]"
-                >
-                  {reveal ? <EyeOff size={15} /> : <Eye size={15} />}
-                </button>
-                <GhostButton onClick={() => toast.success("已生成新密钥并轮换")}>轮换</GhostButton>
-              </div>
+              <Pill tone="gray">明文不可读取</Pill>
             </div>
           ))}
         </div>
@@ -125,3 +118,5 @@ export default function AgentIntegration() {
     </Page>
   );
 }
+
+function healthPercent(health:string){return health==="healthy"?100:health==="degraded"?60:health==="unhealthy"?10:0;}

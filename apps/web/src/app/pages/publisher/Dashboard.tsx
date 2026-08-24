@@ -14,7 +14,9 @@ import { useNavigate } from "react-router";
 import { Page } from "../../components/AppShell";
 import { AiComposer } from "../../components/kit/AiComposer";
 import { Panel, Pill, SectionTitle, StatCard } from "../../components/kit/primitives";
-import { STATUS_LABEL, STATUS_TONE, TASKS } from "../../lib/mock";
+import { readPublisherFinance, readWorkspaceTasks } from "../../lib/platform-api";
+import { statusLabel, statusTone, taskAmount } from "../../lib/task-presentation";
+import { useFinanceView } from "../../lib/use-finance-view";
 
 const STEPS = [
   {
@@ -45,7 +47,12 @@ const STEPS = [
 
 export default function PublisherDashboard() {
   const navigate = useNavigate();
-  const todo = TASKS.filter((task) => ["delivered", "matching", "disputed"].includes(task.status));
+  const tasksView=useFinanceView(readWorkspaceTasks);
+  const financeView=useFinanceView(readPublisherFinance);
+  const tasks=tasksView.value?.tasks??[];
+  const todo = tasks.filter((task) => ["formal_review", "matching", "overview_generating", "awaiting_selection", "disputed", "dispute_requested"].includes(task.status));
+  const principal=financeView.value?sumMoney(financeView.value.totals.discovery,financeView.value.totals.formal,financeView.value.totals.changeOrders,financeView.value.totals.disputeFees):"0";
+  const active=tasks.filter((task)=>!["draft","settled","cancelled","refunded","failed"].includes(task.status)).length;
 
   return (
     <Page>
@@ -92,10 +99,10 @@ export default function PublisherDashboard() {
       </Panel>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="托管本金" value="10,120" unit="USDC" icon={Wallet} delta={4} hint="较上周" accent="#22d3ee" />
-        <StatCard label="托管期实际收益" value="46.5" unit="USDC" icon={TrendingUp} delta={12} accent="#34d399" />
-        <StatCard label="进行中任务" value="3" unit="个" icon={ListChecks} accent="#8b5cf6" hint="1 个待验收" />
-        <StatCard label="累计已结算" value="28" unit="笔" icon={PackageCheck} delta={7} accent="#38bdf8" />
+        <StatCard label="托管资金" value={principal} unit="最小单位" icon={Wallet} accent="#22d3ee" />
+        <StatCard label="可退款金额" value={financeView.value?.totals.refundable??"0"} unit="最小单位" icon={TrendingUp} accent="#34d399" />
+        <StatCard label="进行中任务" value={String(active)} unit="个" icon={ListChecks} accent="#8b5cf6" hint={`${todo.length} 个待处理`} />
+        <StatCard label="累计已结算" value={String(tasks.filter((task)=>task.status==="settled").length)} unit="笔" icon={PackageCheck} accent="#38bdf8" />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -120,10 +127,10 @@ export default function PublisherDashboard() {
                 type="button"
                 onClick={() =>
                   navigate(
-                    task.status === "delivered"
-                      ? "/publisher/settlement"
-                      : task.status === "matching"
-                        ? "/publisher/recommendations"
+                    task.status === "formal_review"
+                      ? `/publisher/tasks/${encodeURIComponent(task.id)}/delivery`
+                      : ["matching","overview_generating","awaiting_selection"].includes(task.status)
+                        ? `/publisher/recommendations?taskId=${encodeURIComponent(task.id)}`
                         : "/publisher/disputes",
                   )
                 }
@@ -132,11 +139,11 @@ export default function PublisherDashboard() {
                 <div className="min-w-0">
                   <div className="truncate text-[14px] text-[var(--ap-text)]">{task.title}</div>
                   <div className="mt-1 text-[12px] text-[var(--ap-muted)]">
-                    {task.id} · {task.next}
+                    {task.id} · 更新于 {new Date(task.updatedAt).toLocaleString()}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2 sm:gap-3">
-                  <Pill tone={STATUS_TONE[task.status]}>{STATUS_LABEL[task.status]}</Pill>
+                  <Pill tone={statusTone(task.status)}>{statusLabel(task.status)}</Pill>
                   <ArrowRight size={15} className="text-[var(--ap-muted)]" />
                 </div>
               </button>
@@ -159,7 +166,7 @@ export default function PublisherDashboard() {
             最近任务
           </SectionTitle>
           <div className="space-y-3">
-            {TASKS.slice(0, 4).map((task) => (
+            {tasks.slice(0, 4).map((task) => (
               <div
                 key={task.id}
                 className="flex items-center justify-between gap-3 rounded-xl border border-[var(--ap-border)] bg-[rgba(10,18,38,0.4)] px-4 py-3"
@@ -167,12 +174,11 @@ export default function PublisherDashboard() {
                 <div className="min-w-0">
                   <div className="truncate text-[14px] text-[var(--ap-text)]">{task.title}</div>
                   <div className="mt-1 truncate text-[12px] text-[var(--ap-muted)]">
-                    {task.category} · {task.amount.toLocaleString()} USDC ·{" "}
-                    <span className="text-[var(--ap-success)]">收益 +{task.yield}</span>
+                    {task.category} · {taskAmount(task)} 最小单位
                   </div>
                 </div>
                 <span className="shrink-0">
-                  <Pill tone={STATUS_TONE[task.status]}>{STATUS_LABEL[task.status]}</Pill>
+                  <Pill tone={statusTone(task.status)}>{statusLabel(task.status)}</Pill>
                 </span>
               </div>
             ))}
@@ -189,3 +195,5 @@ export default function PublisherDashboard() {
     </Page>
   );
 }
+
+function sumMoney(...values:string[]){return values.reduce((total,value)=>total+BigInt(value||"0"),0n).toString();}

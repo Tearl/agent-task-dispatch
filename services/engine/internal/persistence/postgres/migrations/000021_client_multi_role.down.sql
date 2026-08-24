@@ -1,0 +1,2 @@
+-- Role grants may have been used after this migration and cannot be safely
+-- distinguished from grants that predated it, so rollback intentionally keeps them.
