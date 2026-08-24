@@ -84,8 +84,9 @@ contract TaskEscrowTest {
         bytes32 taskId = keccak256("leaf-dispute");
         _fund(taskId, 4 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
+        bytes memory signature = _sign(proof);
         vm.prank(publisher);
-        escrow.selectAgent(proof, _sign(proof));
+        escrow.selectAgent(proof, signature);
         TaskEscrow.FrozenLeaf[] memory leaves = new TaskEscrow.FrozenLeaf[](2);
         leaves[0] = TaskEscrow.FrozenLeaf(0, publisher, 3 ether, 0);
         leaves[1] = TaskEscrow.FrozenLeaf(1, payout, 3 ether, 1);
@@ -107,15 +108,19 @@ contract TaskEscrowTest {
         escrow.finalizeDisputeAllocation(taskId, allocation, 0.5 ether);
         require(publisher.balance == publisherBefore + 1 ether, "publisher leaf not paid");
         require(escrow.claimableEarnings(agentController, payout) == 1.5 ether, "agent leaf not isolated");
-        require(address(escrow).balance == 0, "allocation did not conserve value");
+        require(
+            address(escrow).balance == escrow.totalClaimableEarnings(),
+            "escrow balance did not retain isolated Agent earnings"
+        );
     }
 
     function testFrozenLeafAllocationRejectsOwnerReplacementAndReplay() public {
         bytes32 taskId = keccak256("leaf-owner");
         _fund(taskId, 3 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 3 ether, 0, 0);
+        bytes memory signature = _sign(proof);
         vm.prank(publisher);
-        escrow.selectAgent(proof, _sign(proof));
+        escrow.selectAgent(proof, signature);
         TaskEscrow.FrozenLeaf[] memory leaves = new TaskEscrow.FrozenLeaf[](2);
         leaves[0] = TaskEscrow.FrozenLeaf(0, publisher, 3 ether, 0);
         leaves[1] = TaskEscrow.FrozenLeaf(1, payout, 3 ether, 1);
@@ -435,8 +440,9 @@ contract TaskEscrowTest {
         bytes32 taskId = keccak256("deprecated-dispute");
         _fund(taskId, 1 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 1 ether, 0, 0);
+		bytes memory signature = _sign(proof);
         vm.prank(publisher);
-        escrow.selectAgent(proof, _sign(proof));
+		escrow.selectAgent(proof, signature);
         vm.expectRevert(TaskEscrow.InvalidState.selector);
         vm.prank(publisher);
         escrow.openDispute(taskId);

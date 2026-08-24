@@ -363,6 +363,20 @@ func (s *apiAgentStore) UpdateHealth(_ context.Context, _ engineagent.Mutation, 
 	s.healthInput = input
 	return engineagent.Agent{ID: "agent-1", Health: input.Health, AggregateVersion: input.ExpectedVersion + 1}, false, nil
 }
+func (s *apiAgentStore) CheckHealth(ctx context.Context, mutation engineagent.Mutation, id string, input engineagent.HealthCheckInput, probe func(context.Context, string) error) (engineagent.Agent, bool, error) {
+	if s.agent.ID != id || s.agent.OwnerID != mutation.ActorID {
+		return engineagent.Agent{}, false, engineagent.ErrNotFound
+	}
+	if s.agent.AggregateVersion != input.ExpectedVersion {
+		return engineagent.Agent{}, false, engineagent.ErrStaleVersion
+	}
+	health := engineagent.HealthHealthy
+	if err := probe(ctx, s.agent.EndpointURL); err != nil {
+		health = engineagent.HealthUnhealthy
+	}
+	s.healthInput = engineagent.HealthInput{Health: health, ExpectedVersion: input.ExpectedVersion, CheckedAt: mutation.Now}
+	return engineagent.Agent{ID: id, Health: health, AggregateVersion: input.ExpectedVersion + 1}, false, nil
+}
 func (*apiAgentStore) UpdateCapacity(context.Context, engineagent.Mutation, string, engineagent.CapacityInput) (engineagent.Agent, bool, error) {
 	return engineagent.Agent{}, false, nil
 }

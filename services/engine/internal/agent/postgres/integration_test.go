@@ -21,6 +21,13 @@ import (
 	"github.com/lib/pq"
 )
 
+type countingHealthChecker struct{ calls int }
+
+func (c *countingHealthChecker) Check(context.Context, string) error {
+	c.calls++
+	return nil
+}
+
 func TestPostgresAgentOwnershipLifecyclePricesIdempotencyAndCapacity(t *testing.T) {
 	baseURL := os.Getenv("ENGINE_TEST_POSTGRES_URL")
 	if baseURL == "" {
@@ -76,6 +83,49 @@ func TestPostgresAgentOwnershipLifecyclePricesIdempotencyAndCapacity(t *testing.
 	}
 	if _, err = service.AvailableActions(ctx, ownerB, created.ID); !errors.Is(err, agent.ErrNotFound) {
 		t.Fatalf("other owner available actions: %v", err)
+	}
+	probeInput := input
+	probeInput.Name = "Health Probe Agent"
+	probeAgent, _, err := service.Create(ctx, ownerA, "create-health-probe-agent", probeInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checker := &countingHealthChecker{}
+	probeService, err := agent.NewServiceWithHealthChecker(store, checker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked, replay, err := probeService.CheckHealth(ctx, ownerA, "probe-health", probeAgent.ID, agent.HealthCheckInput{ExpectedVersion: 1})
+	if err != nil || replay || checked.AggregateVersion != 2 || checked.Health != agent.HealthHealthy {
+		t.Fatalf("health probe: agent=%#v replay=%v err=%v", checked, replay, err)
+	}
+	checkedReplay, replay, err := probeService.CheckHealth(ctx, ownerA, "probe-health", probeAgent.ID, agent.HealthCheckInput{ExpectedVersion: 1})
+	if err != nil || !replay || checkedReplay.AggregateVersion != 2 || checker.calls != 1 {
+		t.Fatalf("health probe replay performed an external call: agent=%#v replay=%v calls=%d err=%v", checkedReplay, replay, checker.calls, err)
+	}
+	releaseProbeSlot, err := store.acquireHealthProbeSlot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkedBusyReplay, replay, err := probeService.CheckHealth(ctx, ownerA, "probe-health", probeAgent.ID, agent.HealthCheckInput{ExpectedVersion: 1})
+	if err != nil || !replay || checkedBusyReplay.AggregateVersion != 2 || checker.calls != 1 {
+		releaseProbeSlot()
+		t.Fatalf("busy health probe admission blocked completed replay: agent=%#v replay=%v calls=%d err=%v", checkedBusyReplay, replay, checker.calls, err)
+	}
+	if _, replay, err = probeService.CheckHealth(ctx, ownerA, "probe-health-while-busy", probeAgent.ID, agent.HealthCheckInput{ExpectedVersion: 2}); !errors.Is(err, agent.ErrHealthCheckUnavailable) || replay || checker.calls != 1 {
+		releaseProbeSlot()
+		t.Fatalf("busy health probe admission allowed a new probe: replay=%v calls=%d err=%v", replay, checker.calls, err)
+	}
+	releaseProbeSlot()
+	if _, _, err = probeService.CheckHealth(ctx, ownerA, "stale-probe-health", probeAgent.ID, agent.HealthCheckInput{ExpectedVersion: 1}); !errors.Is(err, agent.ErrStaleVersion) || checker.calls != 1 {
+		t.Fatalf("stale health probe reached checker: calls=%d err=%v", checker.calls, err)
+	}
+	probeRetired, _, err := probeService.Transition(ctx, ownerA, "retire-health-probe-agent", probeAgent.ID, agent.LifecycleInput{Status: agent.StatusRetired, ExpectedVersion: 2})
+	if err != nil || probeRetired.AggregateVersion != 3 {
+		t.Fatalf("retire probe Agent: agent=%#v err=%v", probeRetired, err)
+	}
+	if _, _, err = probeService.CheckHealth(ctx, ownerA, "retired-probe-health", probeAgent.ID, agent.HealthCheckInput{ExpectedVersion: 3}); !errors.Is(err, agent.ErrInvalidState) || checker.calls != 1 {
+		t.Fatalf("retired health probe reached checker: calls=%d err=%v", checker.calls, err)
 	}
 	replayed, replay, err := service.Create(ctx, ownerA, "create-agent", input)
 	if err != nil || !replay || replayed.ID != created.ID || replayed.AggregateVersion != 1 {

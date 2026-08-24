@@ -5,6 +5,8 @@
 | --- | --- | --- |
 | v1 | 2026-08-20 | 初始计划 |
 | v2 | 2026-08-21 | 纳入 Agent 地址首次激活后永久冻结决策 |
+| v3 | 2026-08-24 | 增加健康探测安全与托管争议测试发布修复 |
+| v4 | 2026-08-24 | SQ ledger 对账：T-107 无可验证完成收据，保留代码并恢复为 pending，待按状态机重新验收 |
 
 ## 任务
 
@@ -56,10 +58,18 @@
   - Risk: medium
   - Verification: BFF 契约测试证明浏览器隔离及不可执行原因来自 Engine
 
-- [x] [T-107] [done] 接入可访问的身份、Agent 和任务 Web 流程
+- [ ] [T-107] [pending] 接入可访问的身份、Agent 和任务 Web 流程
   - Repository: .
   - Covers: F-101, F-103, F-105, F-106, AC-101, AC-103, AC-105
   - Depends on: T-102, T-104, T-106
   - Estimate: 8h
   - Risk: medium
   - Verification: Web 类型检查/构建，以及键盘、钱包错误、重复提交和响应式流程测试
+
+- [x] [T-108] [done] 修复健康探测安全门与托管争议测试回归
+  - Repository: .
+  - Covers: F-108, F-109, AC-107, AC-108
+  - Depends on: T-106
+  - Estimate: 5h
+  - Risk: critical
+  - Verification: Engine 单元与 PostgreSQL 集成测试覆盖探测前幂等/版本/状态门控和特殊网段拒绝；Foundry 覆盖完整叶子、稳定所有者、价值守恒与弃用路径安全失败

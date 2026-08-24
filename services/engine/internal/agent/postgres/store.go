@@ -13,13 +13,30 @@ import (
 	"github.com/lib/pq"
 )
 
-type Store struct{ db *sql.DB }
+const healthProbeConcurrency = 1
+
+type Store struct {
+	db               *sql.DB
+	healthProbeSlots chan struct{}
+}
 
 func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, errors.New("database is required")
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, healthProbeSlots: make(chan struct{}, healthProbeConcurrency)}, nil
+}
+
+func (s *Store) acquireHealthProbeSlot(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case s.healthProbeSlots <- struct{}{}:
+		return func() { <-s.healthProbeSlots }, nil
+	default:
+		return nil, agent.ErrHealthCheckUnavailable
+	}
 }
 
 func (s *Store) Create(ctx context.Context, m agent.Mutation, input agent.CreateInput, id string) (result agent.Agent, replay bool, err error) {
@@ -157,6 +174,67 @@ func (s *Store) UpdateHealth(ctx context.Context, m agent.Mutation, id string, i
 			return nil, err
 		}
 		if err = recordChange(ctx, tx, m, updated, "agent.health_updated"); err != nil {
+			return nil, err
+		}
+		return updated, nil
+	})
+	if err != nil {
+		return result, false, err
+	}
+	err = json.Unmarshal(body, &result)
+	return result, replay, err
+}
+
+// CheckHealth admits only a bounded number of probes before opening a database
+// transaction. It then keeps the idempotency advisory lock and Agent aggregate
+// row lock while the checker performs its bounded DNS and HTTP probe. This
+// prevents slow endpoints from consuming the connection pool while ensuring
+// rejected, stale, retired, and replayed requests have no network side effect.
+func (s *Store) CheckHealth(ctx context.Context, m agent.Mutation, id string, input agent.HealthCheckInput, probe func(context.Context, string) error) (result agent.Agent, replay bool, err error) {
+	release, err := s.acquireHealthProbeSlot(ctx)
+	if err != nil {
+		if errors.Is(err, agent.ErrHealthCheckUnavailable) {
+			body, found, replayErr := s.completedReplay(ctx, m, "agents.health:"+m.ActorID+":"+id)
+			if replayErr != nil {
+				return result, false, replayErr
+			}
+			if found {
+				if replayErr = json.Unmarshal(body, &result); replayErr != nil {
+					return result, false, replayErr
+				}
+				return result, true, nil
+			}
+		}
+		return result, false, err
+	}
+	defer release()
+	body, replay, err := s.execute(ctx, m, "agents.health:"+m.ActorID+":"+id, func(tx *sql.Tx) (any, error) {
+		current, err := loadOwned(ctx, tx, m.ActorID, id, input.ExpectedVersion)
+		if err != nil {
+			return nil, err
+		}
+		if current.Status == agent.StatusRetired {
+			return nil, agent.ErrInvalidState
+		}
+		health := agent.HealthHealthy
+		if err = probe(ctx, current.EndpointURL); err != nil {
+			health = agent.HealthUnhealthy
+		}
+		var checkedAt time.Time
+		if err = tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&checkedAt); err != nil {
+			return nil, err
+		}
+		validUntil := checkedAt.Add(agent.HealthFreshnessTTL)
+		if _, err = tx.ExecContext(ctx, `UPDATE agents SET health=$1,health_checked_at=$2,health_valid_until=$3,aggregate_version=aggregate_version+1,updated_at=$2 WHERE agent_id=$4`, health, checkedAt, validUntil, id); err != nil {
+			return nil, fmt.Errorf("record Agent health probe: %w", err)
+		}
+		updated, err := scanAgent(tx.QueryRowContext(ctx, agentSelect+` WHERE agent_id=$1`, id))
+		if err != nil {
+			return nil, err
+		}
+		change := m
+		change.Now = checkedAt
+		if err = recordChange(ctx, tx, change, updated, "agent.health_updated"); err != nil {
 			return nil, err
 		}
 		return updated, nil
@@ -366,6 +444,29 @@ func (s *Store) ReleaseCapacity(ctx context.Context, reservationID string, fenci
 }
 
 type work func(*sql.Tx) (any, error)
+
+// completedReplay is the read-only escape hatch for a completed request when
+// an unrelated network probe occupies the admission slot. It never treats a
+// missing record as a replay, so new requests remain fail-fast and cannot
+// produce a network side effect while the probe slot is busy.
+func (s *Store) completedReplay(ctx context.Context, m agent.Mutation, scope string) (json.RawMessage, bool, error) {
+	if m.IdempotencyKey == "" || m.RequestHash == "" {
+		return nil, false, agent.ErrInvalidInput
+	}
+	var previousHash string
+	var previous []byte
+	err := s.db.QueryRowContext(ctx, `SELECT request_hash,response_body FROM idempotency_records WHERE scope=$1 AND idempotency_key=$2`, scope, m.IdempotencyKey).Scan(&previousHash, &previous)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if previousHash != m.RequestHash {
+		return nil, false, persistence.ErrIdempotencyConflict
+	}
+	return previous, true, nil
+}
 
 func (s *Store) execute(ctx context.Context, m agent.Mutation, scope string, fn work) (json.RawMessage, bool, error) {
 	if m.IdempotencyKey == "" || m.RequestHash == "" {

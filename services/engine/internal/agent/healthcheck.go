@@ -18,6 +18,49 @@ import (
 
 const maxHealthResponseBytes = 4_096
 
+var publicIPv6Network = netip.MustParsePrefix("2000::/3")
+
+var restrictedNetworkPrefixes = []netip.Prefix{
+	// IPv4 special-purpose, private, loopback, link-local, documentation,
+	// benchmarking, multicast, and reserved ranges.
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.31.196.0/24"),
+	netip.MustParsePrefix("192.52.193.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("192.175.48.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	// IPv6 unspecified/loopback, translation/discard, IETF special-purpose,
+	// documentation, 6to4, segment-routing, private, link-local and multicast.
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("::ffff:0:0:0/96"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("2620:4f:8000::/48"),
+	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("5f00::/16"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fec0::/10"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+}
+
 type ProtocolHealthChecker struct {
 	allowPrivateNetworks bool
 	resolver             *net.Resolver
@@ -52,21 +95,17 @@ func (c *ProtocolHealthChecker) Check(ctx context.Context, raw string) error {
 	if !ValidEndpointURL(raw) {
 		return errors.New("invalid Agent protocol base URL")
 	}
+	probeContext, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
 	endpoint, _ := url.Parse(raw)
 	endpoint.Path = "/health"
-	addresses, err := c.resolver.LookupNetIP(ctx, "ip", endpoint.Hostname())
+	addresses, err := c.resolver.LookupNetIP(probeContext, "ip", endpoint.Hostname())
 	if err != nil || len(addresses) == 0 {
 		return errors.New("Agent health endpoint did not resolve")
 	}
-	allowed := make([]netip.Addr, 0, len(addresses))
-	for _, address := range addresses {
-		address = address.Unmap()
-		if c.allowPrivateNetworks || publicAddress(address) {
-			allowed = append(allowed, address)
-		}
-	}
-	if len(allowed) == 0 {
-		return errors.New("Agent health endpoint resolves to a restricted network")
+	allowed, err := validateHealthAddresses(addresses, c.allowPrivateNetworks)
+	if err != nil {
+		return err
 	}
 	dialer := &net.Dialer{Timeout: c.timeout}
 	transport := &http.Transport{
@@ -98,7 +137,7 @@ func (c *ProtocolHealthChecker) Check(ctx context.Context, raw string) error {
 			return errors.New("Agent health endpoint redirects are not allowed")
 		},
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	request, err := http.NewRequestWithContext(probeContext, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return err
 	}
@@ -126,5 +165,40 @@ func (c *ProtocolHealthChecker) Check(ctx context.Context, raw string) error {
 }
 
 func publicAddress(address netip.Addr) bool {
-	return address.IsValid() && !address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast() && !address.IsLinkLocalMulticast() && !address.IsMulticast() && !address.IsUnspecified()
+	if !address.IsValid() {
+		return false
+	}
+	if address.Is4In6() {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() {
+		return false
+	}
+	// netip considers reserved IPv6 space global-unicast. Limit IPv6 targets
+	// to the IANA global-unicast allocation before applying the special-use
+	// exclusions below.
+	if address.Is6() && !publicIPv6Network.Contains(address) {
+		return false
+	}
+	for _, prefix := range restrictedNetworkPrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
+func validateHealthAddresses(addresses []netip.Addr, allowPrivateNetworks bool) ([]netip.Addr, error) {
+	if len(addresses) == 0 {
+		return nil, errors.New("Agent health endpoint did not resolve")
+	}
+	allowed := make([]netip.Addr, 0, len(addresses))
+	for _, address := range addresses {
+		if !allowPrivateNetworks && !publicAddress(address) {
+			return nil, errors.New("Agent health endpoint resolves to a restricted network")
+		}
+		allowed = append(allowed, address.Unmap())
+	}
+	return allowed, nil
 }

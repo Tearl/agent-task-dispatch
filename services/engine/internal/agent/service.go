@@ -147,6 +147,7 @@ type Store interface {
 	UpdateProfile(context.Context, Mutation, string, ProfileInput) (Agent, bool, error)
 	Transition(context.Context, Mutation, string, LifecycleInput) (Agent, bool, error)
 	UpdateHealth(context.Context, Mutation, string, HealthInput) (Agent, bool, error)
+	CheckHealth(context.Context, Mutation, string, HealthCheckInput, func(context.Context, string) error) (Agent, bool, error)
 	UpdateCapacity(context.Context, Mutation, string, CapacityInput) (Agent, bool, error)
 	PublishPrice(context.Context, Mutation, string, PriceInput) (PriceVersion, bool, error)
 	Get(context.Context, string, string) (Agent, error)
@@ -258,15 +259,7 @@ func (s *Service) CheckHealth(ctx context.Context, session auth.Session, key, id
 	if err != nil {
 		return Agent{}, false, err
 	}
-	value, err := s.store.Get(ctx, session.UserID, id)
-	if err != nil {
-		return Agent{}, false, err
-	}
-	health := HealthHealthy
-	if err = s.healthChecker.Check(ctx, value.EndpointURL); err != nil {
-		health = HealthUnhealthy
-	}
-	return s.store.UpdateHealth(ctx, m, id, HealthInput{Health: health, ExpectedVersion: input.ExpectedVersion, CheckedAt: m.Now})
+	return s.store.CheckHealth(ctx, m, id, input, s.healthChecker.Check)
 }
 func (s *Service) UpdateCapacity(ctx context.Context, session auth.Session, key, id string, input CapacityInput) (Agent, bool, error) {
 	if !hasRole(session, "agent_provider") {

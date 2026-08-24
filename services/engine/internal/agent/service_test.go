@@ -18,6 +18,8 @@ type testStore struct {
 	getAgent        Agent
 	getErr          error
 	databaseNow     time.Time
+	healthChecks    map[string]Agent
+	healthHashes    map[string]string
 }
 
 type testHealthChecker struct {
@@ -50,6 +52,47 @@ func (s *testStore) UpdateHealth(_ context.Context, mutation Mutation, _ string,
 	s.healthMutations = append(s.healthMutations, mutation)
 	s.healthInputs = append(s.healthInputs, input)
 	return Agent{}, false, nil
+}
+func (s *testStore) CheckHealth(ctx context.Context, mutation Mutation, id string, input HealthCheckInput, probe func(context.Context, string) error) (Agent, bool, error) {
+	if s.healthChecks == nil {
+		s.healthChecks = map[string]Agent{}
+		s.healthHashes = map[string]string{}
+	}
+	if result, ok := s.healthChecks[mutation.IdempotencyKey]; ok {
+		if s.healthHashes[mutation.IdempotencyKey] != mutation.RequestHash {
+			return Agent{}, false, ErrInvalidInput
+		}
+		return result, true, nil
+	}
+	if s.getErr != nil {
+		return Agent{}, false, s.getErr
+	}
+	if s.getAgent.ID != id || s.getAgent.OwnerID != mutation.ActorID {
+		return Agent{}, false, ErrNotFound
+	}
+	if s.getAgent.AggregateVersion != input.ExpectedVersion {
+		return Agent{}, false, ErrStaleVersion
+	}
+	if s.getAgent.Status == StatusRetired {
+		return Agent{}, false, ErrInvalidState
+	}
+	health := HealthHealthy
+	if err := probe(ctx, s.getAgent.EndpointURL); err != nil {
+		health = HealthUnhealthy
+	}
+	checkedAt := mutation.Now
+	validUntil := checkedAt.Add(HealthFreshnessTTL)
+	result := s.getAgent
+	result.Health = health
+	result.HealthCheckedAt = &checkedAt
+	result.HealthValidUntil = &validUntil
+	result.AggregateVersion++
+	s.healthMutations = append(s.healthMutations, mutation)
+	s.healthInputs = append(s.healthInputs, HealthInput{Health: health, ExpectedVersion: input.ExpectedVersion, CheckedAt: checkedAt})
+	s.healthChecks[mutation.IdempotencyKey] = result
+	s.healthHashes[mutation.IdempotencyKey] = mutation.RequestHash
+	s.getAgent = result
+	return result, false, nil
 }
 func (*testStore) UpdateCapacity(context.Context, Mutation, string, CapacityInput) (Agent, bool, error) {
 	return Agent{}, false, nil
@@ -261,20 +304,39 @@ func TestCheckHealthUsesOnlyEngineObservedProtocolResult(t *testing.T) {
 	}
 	session := auth.Session{UserID: "provider", Roles: []string{"agent_provider"}}
 	input := HealthCheckInput{ExpectedVersion: 3}
-	if _, _, err = service.CheckHealth(context.Background(), session, "check-1", "agent-1", input); err != nil {
+	first, replay, err := service.CheckHealth(context.Background(), session, "check-1", "agent-1", input)
+	if err != nil || replay || first.Health != HealthHealthy {
 		t.Fatal(err)
 	}
-	if _, _, err = service.CheckHealth(context.Background(), session, "check-1", "agent-1", input); err != nil {
-		t.Fatal(err)
+	second, replay, err := service.CheckHealth(context.Background(), session, "check-1", "agent-1", input)
+	if err != nil || !replay || second.Health != HealthHealthy {
+		t.Fatalf("health replay: result=%#v replay=%v err=%v", second, replay, err)
 	}
-	if len(checker.calls) != 2 || checker.calls[0] != store.getAgent.EndpointURL {
+	if len(checker.calls) != 1 || checker.calls[0] != "https://agent.example" {
 		t.Fatalf("unexpected protocol checks: %#v", checker.calls)
 	}
-	if len(store.healthInputs) != 2 || store.healthInputs[0].Health != HealthHealthy || store.healthInputs[1].Health != HealthUnhealthy {
+	if len(store.healthInputs) != 1 || store.healthInputs[0].Health != HealthHealthy {
 		t.Fatalf("Engine did not derive health results: %#v", store.healthInputs)
 	}
-	if store.healthMutations[0].RequestHash != store.healthMutations[1].RequestHash {
-		t.Fatalf("same check request produced unstable idempotency hashes: %#v", store.healthMutations)
+	if store.healthMutations[0].RequestHash == "" {
+		t.Fatal("health check mutation omitted its request hash")
+	}
+}
+
+func TestCheckHealthRejectsStaleAndRetiredAgentsBeforeProbe(t *testing.T) {
+	checker := &testHealthChecker{}
+	store := &testStore{getAgent: Agent{ID: "agent-1", OwnerID: "provider", EndpointURL: "https://agent.example", Status: StatusDraft, AggregateVersion: 3}}
+	service, _ := NewServiceWithHealthChecker(store, checker)
+	session := auth.Session{UserID: "provider", Roles: []string{"agent_provider"}}
+	if _, _, err := service.CheckHealth(context.Background(), session, "stale", "agent-1", HealthCheckInput{ExpectedVersion: 2}); !errors.Is(err, ErrStaleVersion) {
+		t.Fatalf("stale check: %v", err)
+	}
+	store.getAgent.Status = StatusRetired
+	if _, _, err := service.CheckHealth(context.Background(), session, "retired", "agent-1", HealthCheckInput{ExpectedVersion: 3}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("retired check: %v", err)
+	}
+	if len(checker.calls) != 0 {
+		t.Fatalf("rejected health checks reached the network: %#v", checker.calls)
 	}
 }
 

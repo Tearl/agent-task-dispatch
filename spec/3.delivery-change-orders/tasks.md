@@ -9,10 +9,11 @@
 | v4 | 2026-08-22 | 完成 T-303 |
 | v5 | 2026-08-23 | 完成 T-304 |
 | v6 | 2026-08-23 | 完成 T-305 |
+| v7 | 2026-08-24 | SQ ledger 对账：历史实现记录缺少可验证完成收据，保留代码并将 T-301 至 T-305 恢复为 pending，待逐项重新验收 |
 
 ## 任务
 
-- [x] [T-301] [done] 实现冻结范围与正式版本状态机
+- [ ] [T-301] [pending] 实现冻结范围与正式版本状态机
   - Repository: .
   - Covers: F-301, F-304, AC-301, AC-302
   - Depends on: T-203, T-205
@@ -20,7 +21,7 @@
   - Risk: high
   - Verification: 迁移与并发测试覆盖 V1–V3、单活动执行、重试和范围不可变
 
-- [x] [T-302] [done] 实现结构化反馈、差异、证明与 work nonce 门控
+- [ ] [T-302] [pending] 实现结构化反馈、差异、证明与 work nonce 门控
   - Repository: .
   - Covers: F-302, F-303, AC-302, AC-303
   - Depends on: T-301, T-403
@@ -28,7 +29,7 @@
   - Risk: critical
   - Verification: 覆盖父版本/哈希、过时聚合、work nonce、重复回调、证明替换与链上确认
 
-- [x] [T-303] [done] 实现变更单生命周期与责任策略
+- [ ] [T-303] [pending] 实现变更单生命周期与责任策略
   - Repository: .
   - Covers: F-304, F-305, F-306, AC-304, AC-305
   - Depends on: T-302, T-401
@@ -36,7 +37,7 @@
   - Risk: critical
   - Verification: 覆盖全部责任/资金组合、并发生效、V4/V5 授权和永久拒绝 V6
 
-- [x] [T-304] [done] 集成验收与结算资格
+- [ ] [T-304] [pending] 集成验收与结算资格
   - Repository: .
   - Covers: F-303, F-305, AC-303, AC-304
   - Depends on: T-303, T-404
@@ -44,7 +45,7 @@
   - Risk: critical
   - Verification: 覆盖意图/待确认/已确认、过时证明、V1 提前验收与结算集成
 
-- [x] [T-305] [done] 交付正式时间线、反馈、差异与变更单 UI
+- [ ] [T-305] [pending] 交付正式时间线、反馈、差异与变更单 UI
   - Repository: .
   - Covers: F-302, F-303, F-305, AC-302, AC-303, AC-304
   - Depends on: T-302, T-303, T-304
