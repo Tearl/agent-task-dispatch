@@ -470,6 +470,26 @@ func TestExecutionMigrationSeparatesLogicalWorkAttemptsAndCallbackEvidence(t *te
 	}
 }
 
+func TestPollReconciliationMigrationKeepsIndependentImmutableEvidence(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000027_execution_poll_reconciliation.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(contents)
+	for _, expected := range []string{"execution_poll_reconciliations", "attempt_id text NOT NULL UNIQUE", "payload_hash text NOT NULL", "result_body jsonb NOT NULL", "execution_poll_reconciliations_immutable", "BEFORE UPDATE OR DELETE"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("poll reconciliation migration missing %q", expected)
+		}
+	}
+	down, err := os.ReadFile("migrations/000027_execution_poll_reconciliation.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToUpper(string(down)), "DROP TABLE") {
+		t.Fatal("poll reconciliation rollback must preserve immutable execution evidence")
+	}
+}
+
 func TestExecutionDownMigrationPreservesCallbackEvidence(t *testing.T) {
 	contents, err := os.ReadFile("migrations/000008_agent_executions.down.sql")
 	if err != nil {

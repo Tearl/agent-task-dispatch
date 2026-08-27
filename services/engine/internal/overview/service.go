@@ -85,9 +85,14 @@ func (service *Service) Start(ctx context.Context, request StartRequest) (Batch,
 	}
 	batch := Batch{ID: batchID, SnapshotID: snapshot.ID, TaskID: snapshot.TaskID, TaskSpecHash: snapshot.TaskSpecHash, MatchRevision: snapshot.MatchRevision, AlgorithmVersion: snapshot.AlgorithmVersion, BriefRef: brief.Ref, BriefHash: brief.Hash, Deadline: deadline, Status: BatchRunning, CreatedAt: now, UpdatedAt: now}
 	for index, selection := range snapshot.Selections {
-		slot, planErr := service.planSlot(ctx, batch, selection.Candidate.Candidate, index+1, selection.Position, false)
+		slot, allocationDeadline, planErr := service.planSlot(ctx, batch, selection.Candidate.Candidate, index+1, selection.Position, false)
 		if planErr != nil {
 			return Batch{}, false, planErr
+		}
+		if index == 0 {
+			batch.Deadline = allocationDeadline
+		} else if !allocationDeadline.Equal(batch.Deadline) {
+			return Batch{}, false, ErrContentConflict
 		}
 		batch.Slots = append(batch.Slots, slot)
 	}
@@ -123,6 +128,15 @@ func (service *Service) FinalizeSlot(ctx context.Context, batchID, slotID string
 	work, err := service.executions.Get(ctx, slot.LogicalExecutionID)
 	if err != nil {
 		return Batch{}, err
+	}
+	if work.Status == execution.ExecutionRunning {
+		if _, pollErr := service.executions.Poll(ctx, slot.LogicalExecutionID); pollErr != nil && !errors.Is(pollErr, execution.ErrCostCapExceeded) {
+			return Batch{}, ErrDependencyPending
+		}
+		work, err = service.executions.Get(ctx, slot.LogicalExecutionID)
+		if err != nil {
+			return Batch{}, err
+		}
 	}
 	var validation Validation
 	contentHash, deliverableRef := work.ContentHash, work.DeliverableRef
@@ -186,30 +200,30 @@ func (service *Service) ObsoleteBefore(ctx context.Context, taskID string, match
 	return len(changed), combined
 }
 
-func (service *Service) planSlot(ctx context.Context, batch Batch, candidate matching.Candidate, ordinal, sourcePosition int, replacement bool) (Slot, error) {
+func (service *Service) planSlot(ctx context.Context, batch Batch, candidate matching.Candidate, ordinal, sourcePosition int, replacement bool) (Slot, time.Time, error) {
 	target, err := service.targets.ResolveOverviewTarget(ctx, candidate.AgentID, candidate.PriceVersion)
 	if err != nil {
-		return Slot{}, err
+		return Slot{}, time.Time{}, err
 	}
 	if target.AgentID != candidate.AgentID || target.ProviderID != candidate.ProviderID || target.PriceVersion != candidate.PriceVersion || target.OverviewPrice != candidate.OverviewPrice || target.ExternalCostCap != candidate.ExternalCostCap || !validDigest(target.QuoteHash) || !validBaseURL(target.Endpoint) {
-		return Slot{}, ErrContentConflict
+		return Slot{}, time.Time{}, ErrContentConflict
 	}
 	slotID := stableID("overview-slot", batch.ID, fmt.Sprintf("%d", ordinal), target.AgentID, fmt.Sprintf("%t", replacement), ReplacementVersion)
 	allocationKey := stableID("overview-allocation", slotID, target.QuoteHash)
 	allocation, _, err := service.allocations.AuthorizeOverview(ctx, AllocationRequest{IdempotencyKey: allocationKey, TaskID: batch.TaskID, TaskSpecHash: batch.TaskSpecHash, SnapshotID: batch.SnapshotID, MatchRevision: batch.MatchRevision, AgentID: target.AgentID, PriceVersion: target.PriceVersion, QuoteHash: target.QuoteHash, OverviewPrice: target.OverviewPrice, ExternalCostCap: target.ExternalCostCap, Deadline: batch.Deadline})
 	if err != nil {
-		return Slot{}, err
+		return Slot{}, time.Time{}, err
 	}
-	if strings.TrimSpace(allocation.ID) == "" || allocation.CostCap != target.ExternalCostCap {
-		return Slot{}, ErrContentConflict
+	if strings.TrimSpace(allocation.ID) == "" || allocation.CostCap != target.ExternalCostCap || allocation.Deadline.After(batch.Deadline) || !allocation.Deadline.After(service.now()) {
+		return Slot{}, time.Time{}, ErrContentConflict
 	}
 	logicalID := stableID("overview-execution", slotID, OrchestrationVersion)
-	_, _, err = service.executions.Create(ctx, execution.Spec{LogicalExecutionID: logicalID, Stage: execution.StageOverview, TaskID: batch.TaskID, TaskSpecHash: batch.TaskSpecHash, InputRef: batch.BriefRef, InputHash: batch.BriefHash, AgentID: target.AgentID, AgentEndpoint: target.Endpoint, ResponsibilityCode: "overview_candidate", CostCap: allocation.CostCap, ToolPolicy: execution.ToolPolicy{Mode: execution.ToolPolicyReadOnly, AllowedTools: slices.Clone(service.config.AllowedTools)}, Deadline: batch.Deadline, IdempotencyKey: logicalID, Overview: &execution.OverviewBinding{MatchRevision: batch.MatchRevision, AllocationID: allocation.ID, QuoteHash: target.QuoteHash}})
+	_, _, err = service.executions.Create(ctx, execution.Spec{LogicalExecutionID: logicalID, Stage: execution.StageOverview, TaskID: batch.TaskID, TaskSpecHash: batch.TaskSpecHash, InputRef: batch.BriefRef, InputHash: batch.BriefHash, AgentID: target.AgentID, AgentEndpoint: target.Endpoint, ResponsibilityCode: "overview_candidate", CostCap: allocation.CostCap, ToolPolicy: execution.ToolPolicy{Mode: execution.ToolPolicyReadOnly, AllowedTools: slices.Clone(service.config.AllowedTools)}, Deadline: allocation.Deadline, IdempotencyKey: logicalID, Overview: &execution.OverviewBinding{MatchRevision: batch.MatchRevision, AllocationID: allocation.ID, QuoteHash: target.QuoteHash}})
 	if err != nil {
-		return Slot{}, err
+		return Slot{}, time.Time{}, err
 	}
 	now := service.now()
-	return Slot{ID: slotID, BatchID: batch.ID, Ordinal: ordinal, SourcePosition: sourcePosition, Replacement: replacement, AgentID: target.AgentID, ProviderID: target.ProviderID, PriceVersion: target.PriceVersion, QuoteHash: target.QuoteHash, OverviewPrice: target.OverviewPrice, ExternalCostCap: target.ExternalCostCap, AllocationID: allocation.ID, LogicalExecutionID: logicalID, Status: SlotPlanned, BillingStatus: BillingAuthorized, CreatedAt: now, UpdatedAt: now}, nil
+	return Slot{ID: slotID, BatchID: batch.ID, Ordinal: ordinal, SourcePosition: sourcePosition, Replacement: replacement, AgentID: target.AgentID, ProviderID: target.ProviderID, PriceVersion: target.PriceVersion, QuoteHash: target.QuoteHash, OverviewPrice: target.OverviewPrice, ExternalCostCap: target.ExternalCostCap, AllocationID: allocation.ID, LogicalExecutionID: logicalID, Status: SlotPlanned, BillingStatus: BillingAuthorized, CreatedAt: now, UpdatedAt: now}, allocation.Deadline, nil
 }
 
 func (service *Service) dispatchOutstanding(ctx context.Context, batch Batch) (Batch, error) {
@@ -292,9 +306,12 @@ func (service *Service) addReplacement(ctx context.Context, batch Batch) (Batch,
 		if _, capped := usedProviders[candidate.ProviderID]; capped {
 			continue
 		}
-		replacement, planErr := service.planSlot(ctx, batch, candidate, len(batch.Slots)+1, index+1, true)
+		replacement, allocationDeadline, planErr := service.planSlot(ctx, batch, candidate, len(batch.Slots)+1, index+1, true)
 		if planErr != nil {
 			return batch, planErr
+		}
+		if !allocationDeadline.Equal(batch.Deadline) {
+			return batch, ErrContentConflict
 		}
 		batch, _, err = service.repository.AddReplacement(ctx, batch.ID, replacement)
 		if err != nil {
@@ -306,7 +323,7 @@ func (service *Service) addReplacement(ctx context.Context, batch Batch) (Batch,
 }
 
 func validateSnapshotForOverview(snapshot matching.Snapshot, requestedID string) error {
-	if snapshot.ID != requestedID || !validDigest(snapshot.ID) || !validDigest(snapshot.TaskSpecHash) || snapshot.TaskID == "" || snapshot.MatchRevision < 1 || snapshot.AlgorithmVersion != matching.FairShuffleAlgorithmVersion || len(snapshot.Selections) == 0 || len(snapshot.Selections) > matching.DefaultSelectionLimit {
+	if snapshot.ID != requestedID || !validDigest(snapshot.ID) || !validDigest(snapshot.TaskSpecHash) || snapshot.TaskID == "" || snapshot.MatchRevision < 1 || !slices.Contains([]string{matching.FairShuffleAlgorithmVersion, matching.CategoryTagsAlgorithmVersion}, snapshot.AlgorithmVersion) || len(snapshot.Selections) == 0 || len(snapshot.Selections) > matching.DefaultSelectionLimit {
 		return ErrInvalidInput
 	}
 	return nil

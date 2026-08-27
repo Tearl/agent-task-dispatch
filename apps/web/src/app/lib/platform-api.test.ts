@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ActionBlockedError, analyzePublisherTask, authenticateWallet, clientRolesForEngineRoles, createAndPublishTask, createFormalAcceptance, onboardAgent, readAgentFinance, readFormalDelivery, readPublisherFinance, readReconciliationFinance, recordFormalAcceptanceSubmission, requireAllowed, revokeSession, startFormalVersion, submitDisputeFreezeTransaction, submitFormalAcceptanceTransaction, submitSelectionTransaction, submitWorkNonceTransaction, type DisputeView, type FormalAcceptance, type FormalVersion, type SelectionIntent } from "./platform-api.ts";
+import { ActionBlockedError, analyzePublisherTask, authenticateWallet, clientRolesForEngineRoles, createAndPublishTask, createFormalAcceptance, createOrchestrationPlan, onboardAgent, readAgentFinance, readAgentProfile, readFormalDelivery, readOrchestrationPlan, readPublisherFinance, readReconciliationFinance, recordFormalAcceptanceSubmission, requestTaskDeletion, requireAllowed, revokeSession, startFormalVersion, submitDisputeFreezeTransaction, submitFormalAcceptanceTransaction, submitSelectionTransaction, submitTaskFundingTransaction, submitTaskRefundTransaction, submitWorkNonceTransaction, updateAgentProfile, type AgentProfile, type DisputeView, type FormalAcceptance, type FormalVersion, type SelectionIntent, type TaskFundingIntent } from "./platform-api.ts";
+
+test("orchestration planning stays same-origin and preserves idempotency", async () => {
+  const calls: Array<{ url: string; method: string; key: string | null }> = [];
+  const plan = { id: `sha256:${"1".repeat(64)}`, taskId: "task-1", taskSpecHash: `sha256:${"2".repeat(64)}`, mode: "multi", summary: "two stages", rationale: ["dependency"], confidence: .9, steps: [{ id: "step-1", title: "Research", objective: "collect", requiredCapabilities: ["research"], dependsOn: [], output: "data" }, { id: "step-2", title: "Analyze", objective: "analyze", requiredCapabilities: ["analysis"], dependsOn: ["step-1"], output: "report" }], model: "local", graphVersion: "langgraph-v1", createdAt: "2026-08-25T00:00:00Z" } as const;
+  const request: typeof fetch = async (input, init) => { calls.push({ url: String(input), method: init?.method ?? "GET", key: new Headers(init?.headers).get("idempotency-key") }); return Response.json({ plan, replay: false }, { status: init?.method === "POST" ? 201 : 200 }); };
+  assert.equal((await createOrchestrationPlan("task-1", "op-1", request)).mode, "multi");
+  assert.equal((await readOrchestrationPlan("task-1", request)).steps[1]?.dependsOn[0], "step-1");
+  assert.deepEqual(calls, [{ url: "/api/tasks/task-1/orchestration-plans", method: "POST", key: "op-1" }, { url: "/api/tasks/task-1/orchestration-plan", method: "GET", key: null }]);
+});
 
 test("publisher analysis stays same-origin and sends refinement context", async () => {
   let call: { url: string; body: Record<string, unknown> } | undefined;
@@ -65,6 +74,37 @@ test("selection transaction encodes the frozen proof and never asks the wallet t
   assert.equal(data.length, 2 + 8 + 21 * 64);
 });
 
+test("task funding transaction binds chain, publisher, contract, task id and exact value", async () => {
+  const calls: Array<{ method: string; params?: unknown[] }> = [];
+  const provider = { request: async (input: { method: string; params?: unknown[] }) => {
+    calls.push(input);
+    if (input.method === "eth_chainId") return "0x7a69";
+    if (input.method === "eth_requestAccounts") return ["0x1111111111111111111111111111111111111111"];
+    return `0x${"9".repeat(64)}`;
+  } };
+  const intent: TaskFundingIntent = { id:`sha256:${"1".repeat(64)}`,taskId:"task-1",publisherWallet:"0x1111111111111111111111111111111111111111",chainId:"31337",contractAddress:"0x2222222222222222222222222222222222222222",chainTaskId:`0x${"3".repeat(64)}`,overviewAmount:"10",formalAmount:"90",externalCostAmount:"5",totalAmount:"105",status:"prepared",aggregateVersion:1,createdAt:"2026-01-01T00:00:00Z",updatedAt:"2026-01-01T00:00:00Z" };
+  await submitTaskFundingTransaction(provider,intent);
+  const transaction = calls.find((call)=>call.method==="eth_sendTransaction")?.params?.[0] as Record<string,string>;
+  assert.equal(transaction.to,intent.contractAddress);
+  assert.equal(transaction.from,intent.publisherWallet);
+  assert.equal(transaction.value,"0x69");
+  assert.equal(transaction.data,`0xb293e81c${intent.chainTaskId.slice(2)}`);
+});
+
+test("task deletion stays same-origin and escrowed deletion uses the refund selector", async () => {
+  const calls: Array<{ url: string; key: string | null; body: string }> = [];
+  const deletion = { taskId: "task-1", status: "escrowed", refundRequired: true, chainId: "31337", contractAddress: "0x3333333333333333333333333333333333333333", chainTaskId: `0x${"4".repeat(64)}`, publisherWallet: "0x2222222222222222222222222222222222222222" };
+  const request: typeof fetch = async (input, init) => { calls.push({ url: String(input), key: new Headers(init?.headers).get("idempotency-key"), body: String(init?.body) }); return Response.json(deletion, { status: 201 }); };
+  assert.equal((await requestTaskDeletion("task-1", 3, "delete-op", request)).refundRequired, true);
+  assert.deepEqual(calls, [{ url: "/api/tasks/task-1/deletion-requests", key: "delete-op", body: JSON.stringify({ expectedVersion: 3 }) }]);
+  const walletCalls: Array<{ method: string; params?: unknown[] }> = [];
+  const provider = { request: async (input: { method: string; params?: unknown[] }) => { walletCalls.push(input); if (input.method === "eth_chainId") return "0x7a69"; if (input.method === "eth_requestAccounts") return [deletion.publisherWallet]; return `0x${"5".repeat(64)}`; } };
+  await submitTaskRefundTransaction(provider, deletion);
+  const transaction = walletCalls.find((call) => call.method === "eth_sendTransaction")?.params?.[0] as Record<string, string>;
+  assert.equal(transaction.data, `0x7249fbb6${deletion.chainTaskId.slice(2)}`);
+  assert.equal(transaction.to, deletion.contractAddress);
+});
+
 test("formal acceptance and work nonce calls use only authoritative chain bindings", async () => {
   const calls: unknown[]=[];
   const provider={request:async(input:{method:string;params?:unknown[]})=>{calls.push(input);return input.method==="eth_chainId"?"0x1":`0x${"77".repeat(32)}`;}};
@@ -107,15 +147,16 @@ test("blocked actions preserve Engine reasons", () => {
 });
 
 test("task publishing uses one operation id and Engine publication eligibility", async () => {
-  const calls: Array<{ url: string; key: string | null }> = [];
+  const calls: Array<{ url: string; key: string | null; body?: Record<string, unknown> }> = [];
   const request: typeof fetch = async (input, init) => {
-    const url = String(input); calls.push({ url, key: new Headers(init?.headers).get("idempotency-key") });
+    const url = String(input); calls.push({ url, key: new Headers(init?.headers).get("idempotency-key"), ...(init?.body ? { body: JSON.parse(String(init.body)) as Record<string, unknown> } : {}) });
     if (url === "/api/tasks") return Response.json({ id: "task-1", aggregateVersion: 1 }, { status: 201 });
     if (url === "/api/tasks/task-1") return Response.json({ task: { aggregateVersion: 1 }, availableActions: { aggregateVersion: 1, actions: [{ action: "publish", allowed: true, reasons: [] }] } });
     return Response.json({ task: { id: "task-1", status: "pending_escrow" }, spec: { contentHash: "sha256:spec" }, acceptance: { contentHash: "sha256:acceptance" } }, { status: 201 });
   };
-  await createAndPublishTask({ operationId: "op-1", title: "Task", description: "Description", category: "research", amount: "10", deadline: "2026-09-01", criteria: ["Correct", "Complete"] }, request);
-  assert.deepEqual(calls, [{ url: "/api/tasks", key: "op-1:create" }, { url: "/api/tasks/task-1", key: null }, { url: "/api/tasks/task-1/publish", key: "op-1:publish" }]);
+  await createAndPublishTask({ operationId: "op-1", title: "Task", description: "Description", category: "research", tags: ["analysis", "report"], amount: "10", deadline: "2026-09-01", criteria: ["Correct", "Complete"] }, request);
+  assert.deepEqual(calls.map(({ url, key }) => ({ url, key })), [{ url: "/api/tasks", key: "op-1:create" }, { url: "/api/tasks/task-1", key: null }, { url: "/api/tasks/task-1/publish", key: "op-1:publish" }]);
+  assert.deepEqual(calls[0]?.body?.tags, ["analysis", "report"]);
 });
 
 test("Agent onboarding uses stable stage keys and follows Engine activation decision", async () => {
@@ -130,13 +171,25 @@ test("Agent onboarding uses stable stage keys and follows Engine activation deci
     if (url === "/api/agents/agent-1") return Response.json({ agent: { id: "agent-1", aggregateVersion: 4, status: "draft" }, availableActions: { aggregateVersion: 4, actions: [{ action: "activate", allowed: true, reasons: [] }] } });
     return Response.json({ id: "agent-1", status: "active", aggregateVersion: 5 });
   };
-  await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request);
+  await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, bearerToken: "secret", callbackKeyBase64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", callbackKeyVersion: "callback-v1", overviewPrice: "10", formalPrice: "20" }, request);
   assert.deepEqual(calls.map((call) => call.key), ["agent-op:create", "agent-op:credential", "agent-op:price", null, "agent-op:health:3", null, "agent-op:activate"]);
   assert.equal(calls[0]?.body?.controllerAddress, "0x1111111111111111111111111111111111111111");
   assert.equal(calls[0]?.body?.payoutAddress, "0x1111111111111111111111111111111111111111");
   assert.equal(calls[0]?.body?.endpointUrl, "https://agent.example");
   assert.equal(calls[2]?.body?.overviewPrice, "10");
   assert.equal(calls[2]?.body?.formalPackageGrossPrice, "20");
+});
+
+test("Agent endpoint updates preserve the complete profile and use a version-bound PUT", async () => {
+  const profile = { id: "agent-1", name: "Agent", category: "image", tags: ["image"], capabilities: "Generate images", authorBio: "Image Agent", endpointUrl: "https://old.example", status: "active", health: "unhealthy", maxConcurrency: 1, activeCapacity: 0, aggregateVersion: 4, estimatedDurationSeconds: 3600, updatedAt: "2026-08-27T00:00:00Z", languages: ["zh-CN"], controllerAddress: `0x${"1".repeat(40)}`, payoutAddress: `0x${"2".repeat(40)}` } satisfies AgentProfile;
+  const calls: Array<{ url: string; method: string; key: string | null; body?: Record<string, unknown> }> = [];
+  const request: typeof fetch = async (input, init) => { calls.push({ url: String(input), method: init?.method ?? "GET", key: new Headers(init?.headers).get("idempotency-key"), ...(init?.body ? { body: JSON.parse(String(init.body)) as Record<string, unknown> } : {}) }); return String(input).endsWith("/profile") ? Response.json({ ...profile, endpointUrl: "https://new.example", aggregateVersion: 5 }) : Response.json({ agent: profile, availableActions: { aggregateVersion: 4, actions: [] } }); };
+  const view = await readAgentProfile(profile.id, request);
+  const updated = await updateAgentProfile(view.agent, "https://new.example", "profile-op", request);
+  assert.equal(updated.endpointUrl, "https://new.example");
+  assert.deepEqual(calls.map(({ url, method, key }) => ({ url, method, key })), [{ url: "/api/agents/agent-1", method: "GET", key: null }, { url: "/api/agents/agent-1/profile", method: "PUT", key: "profile-op" }]);
+  assert.equal(calls[1]?.body?.expectedVersion, 4);
+  assert.equal(calls[1]?.body?.controllerAddress, profile.controllerAddress);
 });
 
 test("task flow does not publish when Engine blocks the action", async () => {
@@ -173,7 +226,7 @@ test("Agent flow recovers a lost successful activation response from the authori
     if (url === "/api/agents/agent-1") return Response.json({ agent: { id: "agent-1", aggregateVersion: 5, status: "active" }, availableActions: { aggregateVersion: 5, actions: [{ action: "activate", allowed: false, reasons: [{ code: "activation_transition_not_allowed", message: "Already active." }] }] } });
     throw new Error(`unexpected request: ${url}`);
   };
-  const result = await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request);
+  const result = await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, bearerToken: "secret", callbackKeyBase64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", callbackKeyVersion: "callback-v1", overviewPrice: "10", formalPrice: "20" }, request);
   assert.equal(result.status, "active");
   assert.equal(calls.at(-1), "/api/agents/agent-1");
 });
@@ -195,7 +248,7 @@ test("Agent flow refreshes an expired health check with a version-bound idempote
     if (url.endsWith("health")) return Response.json({ aggregateVersion: 5 });
     return Response.json({ id: "agent-1", status: "active", aggregateVersion: 6 });
   };
-  await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request);
+  await onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, bearerToken: "secret", callbackKeyBase64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", callbackKeyVersion: "callback-v1", overviewPrice: "10", formalPrice: "20" }, request);
   const health = calls.find((call) => call.url.endsWith("health"));
   assert.equal(health?.key, "agent-op:health:4");
   assert.equal(health?.body?.expectedVersion, 4);
@@ -206,9 +259,9 @@ test("invalid correctable inputs fail before any mutation", async () => {
   let calls = 0;
   const request: typeof fetch = async () => { calls += 1; return Response.json({}); };
   await assert.rejects(() => createAndPublishTask({ operationId: "op", title: "Task", description: "Description", category: "research", amount: "01", deadline: "2026-09-01", criteria: ["Correct"] }, request), /前导零/);
-  await assert.rejects(() => onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "30", formalPrice: "20" }, request), /不得高于/);
-  await assert.rejects(() => onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "http://127.0.0.1/health", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request), /HTTPS URL/);
-  await assert.rejects(() => onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example/health", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, credentialType: "api_key", secret: "secret", overviewPrice: "10", formalPrice: "20" }, request), /路径/);
+  await assert.rejects(() => onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, bearerToken: "secret", callbackKeyBase64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", callbackKeyVersion: "callback-v1", overviewPrice: "30", formalPrice: "20" }, request), /不得高于/);
+  await assert.rejects(() => onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "http://127.0.0.1/health", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, bearerToken: "secret", callbackKeyBase64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", callbackKeyVersion: "callback-v1", overviewPrice: "10", formalPrice: "20" }, request), /HTTPS URL/);
+  await assert.rejects(() => onboardAgent({ operationId: "agent-op", name: "Agent", category: "research", tagline: "Research", endpointUrl: "https://agent.example/health", capabilities: ["analysis"], controllerAddress: "0x1111111111111111111111111111111111111111", maxConcurrency: 2, bearerToken: "secret", callbackKeyBase64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", callbackKeyVersion: "callback-v1", overviewPrice: "10", formalPrice: "20" }, request), /路径/);
   assert.equal(calls, 0);
 });
 

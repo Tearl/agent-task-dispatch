@@ -123,6 +123,25 @@ type Allocation struct {
 	UpdatedAt         time.Time
 }
 
+func CompatibleAuthorizationReplay(existing, draft Allocation) bool {
+	return existing.Status == AllocationAuthorized &&
+		draft.Status == AllocationAuthorized &&
+		existing.ID == draft.ID &&
+		existing.IdempotencyKey == draft.IdempotencyKey &&
+		existing.Asset == draft.Asset &&
+		existing.TaskID == draft.TaskID &&
+		existing.TaskSpecHash == draft.TaskSpecHash &&
+		existing.SnapshotID == draft.SnapshotID &&
+		existing.MatchRevision == draft.MatchRevision &&
+		existing.AgentID == draft.AgentID &&
+		existing.PriceVersion == draft.PriceVersion &&
+		existing.QuoteHash == draft.QuoteHash &&
+		existing.OverviewPrice == draft.OverviewPrice &&
+		existing.CostCap == draft.CostCap &&
+		existing.ReserveAmount == draft.ReserveAmount &&
+		!draft.Deadline.Before(existing.Deadline)
+}
+
 type Entry struct {
 	Index     int
 	AccountID string

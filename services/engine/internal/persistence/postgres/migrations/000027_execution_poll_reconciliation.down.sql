@@ -1,0 +1,2 @@
+-- Poll reconciliation rows are immutable execution evidence and are
+-- intentionally retained during rollback.

@@ -418,6 +418,9 @@ func (*apiTaskStore) UpdateDraft(context.Context, enginetask.Mutation, string, e
 func (*apiTaskStore) Publish(context.Context, enginetask.Mutation, string, enginetask.PublishInput) (enginetask.Publication, bool, error) {
 	return enginetask.Publication{}, false, enginetask.ErrInvalidState
 }
+func (*apiTaskStore) RequestDelete(_ context.Context, _ enginetask.Mutation, id string, _ enginetask.DeleteInput) (enginetask.DeleteResult, bool, error) {
+	return enginetask.DeleteResult{TaskID: id}, false, nil
+}
 func (*apiTaskStore) Get(context.Context, string, string) (enginetask.Task, error) {
 	return enginetask.Task{}, enginetask.ErrNotFound
 }

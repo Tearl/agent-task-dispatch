@@ -1,0 +1,11 @@
+tunnel: 285e2b7d-2e9f-4bf3-b47d-1645cd7e7404
+credentials-file: /run/secrets/tunnel_credentials
+
+ingress:
+  - hostname: image-agent.toton123.xyz
+    service: http://image-generator:8092
+  - hostname: qwen-ui-agent.toton123.xyz
+    service: http://qwen-ui-prototype:8095
+  - hostname: seedream-agent.toton123.xyz
+    service: http://seedream-visual-design:8096
+  - service: http_status:404

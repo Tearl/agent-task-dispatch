@@ -56,7 +56,7 @@ func (stub *allocationStub) AuthorizeOverview(_ context.Context, request Allocat
 	if existing, ok := stub.authorized[request.IdempotencyKey]; ok {
 		return existing, true, nil
 	}
-	value := Allocation{ID: fmt.Sprintf("allocation-%d", len(stub.authorized)+1), CostCap: request.ExternalCostCap}
+	value := Allocation{ID: fmt.Sprintf("allocation-%d", len(stub.authorized)+1), CostCap: request.ExternalCostCap, Deadline: request.Deadline}
 	stub.authorized[request.IdempotencyKey] = value
 	stub.authorizeLog = append(stub.authorizeLog, request)
 	return value, false, nil
@@ -83,6 +83,7 @@ type executionStub struct {
 	values         map[string]execution.Execution
 	specs          map[string]execution.Spec
 	deliverables   map[string]execution.DeliverableResponse
+	pollResponses  map[string]execution.StatusResponse
 	createCalls    int
 	dispatchCalls  int
 	cancelCalls    int
@@ -148,6 +149,25 @@ func (stub *executionStub) Get(_ context.Context, id string) (execution.Executio
 		return execution.Execution{}, execution.ErrNotFound
 	}
 	return value, nil
+}
+
+func (stub *executionStub) Poll(_ context.Context, id string) (execution.StatusResponse, error) {
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	response, ok := stub.pollResponses[id]
+	if !ok {
+		return execution.StatusResponse{Status: execution.ExecutionRunning, UsedCost: "0"}, nil
+	}
+	value := stub.values[id]
+	value.Status = response.Status
+	value.UsedCost = response.UsedCost
+	if response.Status == execution.ExecutionSucceeded {
+		deliverable := stub.deliverables[id]
+		value.ContentHash = deliverable.ContentHash
+		value.DeliverableRef = deliverable.DeliverableRef
+	}
+	stub.values[id] = value
+	return response, nil
 }
 
 func (stub *executionStub) Deliverable(_ context.Context, id string) (execution.DeliverableResponse, error) {
@@ -224,6 +244,54 @@ func TestStartFansOutThreeBoundExecutionsAndReplays(t *testing.T) {
 	}
 }
 
+func TestStartAcceptsCategoryTagsSnapshot(t *testing.T) {
+	service, _, _, allocations, executions, _, _, clock := overviewFixture(t)
+	snapshot := overviewSnapshot()
+	snapshot.AlgorithmVersion = matching.CategoryTagsAlgorithmVersion
+	service.snapshots = snapshotStub{value: snapshot}
+
+	batch, replay, err := service.Start(context.Background(), StartRequest{SnapshotID: snapshot.ID, Deadline: clock.now.Add(5 * time.Minute)})
+	if err != nil || replay || batch.AlgorithmVersion != matching.CategoryTagsAlgorithmVersion || len(batch.Slots) != 3 {
+		t.Fatalf("category-tags start: batch=%#v replay=%v err=%v", batch, replay, err)
+	}
+	if len(allocations.authorizeLog) != 3 || executions.createCalls != 3 || executions.dispatchCalls != 3 {
+		t.Fatalf("category-tags fanout: auth=%d creates=%d dispatch=%d", len(allocations.authorizeLog), executions.createCalls, executions.dispatchCalls)
+	}
+}
+
+func TestStartRejectsUnknownSnapshotAlgorithm(t *testing.T) {
+	service, _, _, allocations, executions, _, _, clock := overviewFixture(t)
+	snapshot := overviewSnapshot()
+	snapshot.AlgorithmVersion = "unknown-v1"
+	service.snapshots = snapshotStub{value: snapshot}
+
+	_, _, err := service.Start(context.Background(), StartRequest{SnapshotID: snapshot.ID, Deadline: clock.now.Add(5 * time.Minute)})
+	if err != ErrInvalidInput {
+		t.Fatalf("unknown algorithm error = %v, want %v", err, ErrInvalidInput)
+	}
+	if len(allocations.authorizeLog) != 0 || executions.createCalls != 0 || executions.dispatchCalls != 0 {
+		t.Fatalf("unknown algorithm created effects: auth=%d creates=%d dispatch=%d", len(allocations.authorizeLog), executions.createCalls, executions.dispatchCalls)
+	}
+}
+
+func TestPlanSlotRetryUsesEarlierAuthorizedDeadline(t *testing.T) {
+	service, _, briefs, allocations, executions, _, _, clock := overviewFixture(t)
+	snapshot := overviewSnapshot()
+	firstDeadline := clock.now.Add(5 * time.Minute)
+	batch := Batch{ID: stableID("overview-batch", snapshot.ID, OrchestrationVersion), SnapshotID: snapshot.ID, TaskID: snapshot.TaskID, TaskSpecHash: snapshot.TaskSpecHash, MatchRevision: snapshot.MatchRevision, BriefRef: briefs.value.Ref, BriefHash: briefs.value.Hash, Deadline: firstDeadline}
+	candidate := snapshot.Selections[0].Candidate.Candidate
+
+	_, effectiveDeadline, err := service.planSlot(context.Background(), batch, candidate, 1, 1, false)
+	if err != nil || !effectiveDeadline.Equal(firstDeadline) {
+		t.Fatalf("initial plan: deadline=%v err=%v", effectiveDeadline, err)
+	}
+	batch.Deadline = firstDeadline.Add(5 * time.Minute)
+	_, replayDeadline, err := service.planSlot(context.Background(), batch, candidate, 1, 1, false)
+	if err != nil || !replayDeadline.Equal(firstDeadline) || len(allocations.authorizeLog) != 1 || executions.createCalls != 1 {
+		t.Fatalf("replayed plan: deadline=%v auth=%d creates=%d err=%v", replayDeadline, len(allocations.authorizeLog), executions.createCalls, err)
+	}
+}
+
 func TestValidationBillingDuplicateAndOneDeterministicReplacement(t *testing.T) {
 	service, _, _, allocations, executions, artifacts, evidence, clock := overviewFixture(t)
 	batch, _, err := service.Start(context.Background(), StartRequest{SnapshotID: overviewSnapshot().ID, Deadline: clock.now.Add(5 * time.Minute)})
@@ -257,6 +325,26 @@ func TestValidationBillingDuplicateAndOneDeterministicReplacement(t *testing.T) 
 	_, err = service.FinalizeSlot(context.Background(), batch.ID, batch.Slots[0].ID)
 	if err != nil || allocations.captures[batch.Slots[0].AllocationID] != 1 {
 		t.Fatalf("billing replay duplicated capture: captures=%v err=%v", allocations.captures, err)
+	}
+}
+
+func TestFinalizeSlotPollsAndRecoversACompletedExecution(t *testing.T) {
+	service, _, _, allocations, executions, artifacts, evidence, clock := overviewFixture(t)
+	batch, _, err := service.Start(context.Background(), StartRequest{SnapshotID: overviewSnapshot().ID, Deadline: clock.now.Add(5 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := batch.Slots[0]
+	body := validResultBody("polled")
+	contentHash := digestBytes(body)
+	ref := "artifact://" + slot.ID
+	executions.deliverables[slot.LogicalExecutionID] = execution.DeliverableResponse{ContentHash: contentHash, DeliverableRef: ref}
+	executions.pollResponses[slot.LogicalExecutionID] = execution.StatusResponse{Status: execution.ExecutionSucceeded, UsedCost: "3"}
+	artifacts.values[ref] = body
+	evidence.values[slot.LogicalExecutionID] = ToolEvidence{Complete: true, Tools: []string{"read"}}
+	batch, err = service.FinalizeSlot(context.Background(), batch.ID, slot.ID)
+	if err != nil || batch.Slots[0].Status != SlotValid || allocations.captures[slot.AllocationID] != 1 {
+		t.Fatalf("polled completion was not finalized: slot=%#v captures=%v err=%v", batch.Slots[0], allocations.captures, err)
 	}
 }
 
@@ -325,7 +413,7 @@ func overviewFixture(t *testing.T) (*Service, *MemoryRepository, *briefStub, *al
 		targets.values[candidate.AgentID] = DispatchTarget{AgentID: candidate.AgentID, ProviderID: candidate.ProviderID, Endpoint: "https://" + candidate.AgentID + ".example", PriceVersion: candidate.PriceVersion, OverviewPrice: candidate.OverviewPrice, ExternalCostCap: candidate.ExternalCostCap, QuoteHash: digestBytes([]byte("quote:" + candidate.AgentID))}
 	}
 	allocations := &allocationStub{authorized: make(map[string]Allocation), captures: make(map[string]int), releases: make(map[string]int)}
-	executions := &executionStub{values: make(map[string]execution.Execution), specs: make(map[string]execution.Spec), deliverables: make(map[string]execution.DeliverableResponse), barrier: make(chan struct{}), barrierTarget: 3}
+	executions := &executionStub{values: make(map[string]execution.Execution), specs: make(map[string]execution.Spec), deliverables: make(map[string]execution.DeliverableResponse), pollResponses: make(map[string]execution.StatusResponse), barrier: make(chan struct{}), barrierTarget: 3}
 	artifacts := &artifactStub{values: make(map[string][]byte)}
 	evidence := &evidenceStub{values: make(map[string]ToolEvidence)}
 	service, err := NewService(repository, snapshotStub{value: snapshot}, briefs, targets, allocations, executions, artifacts, evidence, Config{MaximumDuration: 10 * time.Minute, AllowedTools: []string{"search", "read"}})

@@ -37,6 +37,12 @@ func (repository *MemoryRepository) SetEligibility(publisherID string, value Eli
 	repository.eligibility[eligibilityKey(publisherID, value.TaskID, value.BatchID, value.SlotID)] = value
 }
 
+func (repository *MemoryRepository) ClearEligibility(publisherID string, value Eligibility) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	delete(repository.eligibility, eligibilityKey(publisherID, value.TaskID, value.BatchID, value.SlotID))
+}
+
 func (repository *MemoryRepository) Replay(_ context.Context, publisherID, key, requestHash string) (Reservation, bool, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
@@ -64,6 +70,10 @@ func (repository *MemoryRepository) Eligibility(_ context.Context, publisherID, 
 func (repository *MemoryRepository) Prepare(_ context.Context, mutation Mutation, draft Reservation) (Reservation, bool, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
+	eligible, ok := repository.eligibility[eligibilityKey(mutation.PublisherID, draft.TaskID, draft.BatchID, draft.SlotID)]
+	if !ok {
+		return Reservation{}, false, ErrInvalidState
+	}
 	requestKey := mutation.PublisherID + "\x00" + mutation.IdempotencyKey
 	if id, ok := repository.requestIndex[requestKey]; ok {
 		record := repository.records[id]
@@ -72,8 +82,7 @@ func (repository *MemoryRepository) Prepare(_ context.Context, mutation Mutation
 		}
 		return record.reservation, true, nil
 	}
-	eligible, ok := repository.eligibility[eligibilityKey(mutation.PublisherID, draft.TaskID, draft.BatchID, draft.SlotID)]
-	if !ok || !reservationMatchesEligibility(draft, eligible) {
+	if !reservationMatchesEligibility(draft, eligible) {
 		return Reservation{}, false, ErrContentConflict
 	}
 	if _, exists := repository.activeTasks[draft.TaskID]; exists {

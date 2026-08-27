@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	ruleVersion  = "matching-rules-v1"
-	modelVersion = "ranking-model-disabled-v1"
+	ruleVersion  = "category-tags-rules-v1"
+	modelVersion = "ranking-model-not-used-v1"
 )
 
 type Service struct {
@@ -50,8 +50,9 @@ func (service *Service) StartMatching(ctx context.Context, session auth.Session,
 	if err != nil {
 		return StartMatchingResult{}, err
 	}
-	request := matching.Request{TaskID: task.ID, PublisherID: task.PublisherID, Category: task.ExpertType, Language: task.Language, Terms: matchingTerms(task), RequiredCapabilities: []string{}, RequiredProtocolVersion: "agent-execution-v1", RequiredVectorVersion: vectorVersion, OverviewBudget: task.OverviewBudget, FormalBudget: task.FormalBudget, ExternalCostCap: task.ExternalCostCap, Deadline: task.Deadline, Now: now}
-	result, err := service.matcher.Match(ctx, request, candidates)
+	tags := matchingTags(task)
+	request := matching.Request{TaskID: task.ID, PublisherID: task.PublisherID, Category: task.ExpertType, Language: task.Language, Terms: tags, Tags: tags, RequiredCapabilities: []string{}, RequiredProtocolVersion: "agent-execution-v1", RequiredVectorVersion: vectorVersion, OverviewBudget: task.OverviewBudget, FormalBudget: task.FormalBudget, ExternalCostCap: task.ExternalCostCap, Deadline: task.Deadline, Now: now}
+	result, err := service.matcher.MatchCategoryTags(ctx, request, candidates)
 	if err != nil {
 		return StartMatchingResult{}, err
 	}
@@ -65,7 +66,7 @@ func (service *Service) StartMatching(ctx context.Context, session auth.Session,
 	if err != nil {
 		return StartMatchingResult{}, err
 	}
-	snapshot, replay, err := service.snapshots.CreateRevision(ctx, matching.SnapshotDraft{Key: matching.SnapshotKey{TaskID: task.ID, TaskSpecHash: task.SpecHash, AlgorithmVersion: matching.FairShuffleAlgorithmVersion, EffectiveInputHash: effectiveHash}, RuleVersion: ruleVersion, ModelVersion: modelVersion, Result: result})
+	snapshot, replay, err := service.snapshots.CreateRevision(ctx, matching.SnapshotDraft{Key: matching.SnapshotKey{TaskID: task.ID, TaskSpecHash: task.SpecHash, AlgorithmVersion: matching.CategoryTagsAlgorithmVersion, EffectiveInputHash: effectiveHash}, RuleVersion: ruleVersion, ModelVersion: modelVersion, Result: result})
 	if err != nil {
 		return StartMatchingResult{}, err
 	}
@@ -89,7 +90,7 @@ func (service *Service) StartOverview(ctx context.Context, session auth.Session,
 	if !workflowMayRun(task.Status) || !task.Deadline.After(service.now()) {
 		return StartOverviewResult{}, ErrInvalidInput
 	}
-	snapshot, err := service.snapshots.Latest(ctx, task.ID, task.SpecHash, matching.FairShuffleAlgorithmVersion)
+	snapshot, err := service.snapshots.Latest(ctx, task.ID, task.SpecHash, matching.CategoryTagsAlgorithmVersion)
 	if err != nil {
 		return StartOverviewResult{}, err
 	}
@@ -100,7 +101,7 @@ func (service *Service) StartOverview(ctx context.Context, session auth.Session,
 	if err != nil {
 		return StartOverviewResult{}, err
 	}
-	latest, err := service.snapshots.Latest(ctx, task.ID, task.SpecHash, matching.FairShuffleAlgorithmVersion)
+	latest, err := service.snapshots.Latest(ctx, task.ID, task.SpecHash, matching.CategoryTagsAlgorithmVersion)
 	if err != nil {
 		return StartOverviewResult{}, err
 	}
@@ -145,8 +146,11 @@ func workflowMayRun(status string) bool {
 	}
 }
 
-func matchingTerms(task TaskInput) []string {
-	values := strings.FieldsFunc(task.Title+" "+task.Description+" "+task.ExpertType, func(r rune) bool {
+func matchingTags(task TaskInput) []string {
+	if len(task.Tags) > 0 {
+		return slices.Clone(task.Tags)
+	}
+	values := strings.FieldsFunc(task.Title+" "+task.Description+" "+task.ExpertType+" "+strings.Join(task.AllowedTools, " ")+" "+task.DeliveryFormat, func(r rune) bool {
 		return r == ' ' || r == '\n' || r == '\t' || r == ',' || r == ';' || r == '，' || r == '。'
 	})
 	if len(values) > 100 {

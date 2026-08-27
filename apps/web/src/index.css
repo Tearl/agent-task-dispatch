@@ -389,6 +389,160 @@ body {
   animation: ap-rise-in 400ms ease-out both;
 }
 
+.agent-match-constellation {
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 20% 48%, rgba(34, 211, 238, 0.12), transparent 26%),
+    radial-gradient(circle at 74% 50%, rgba(139, 92, 246, 0.09), transparent 30%),
+    linear-gradient(180deg, rgba(5, 9, 20, 0.52), rgba(10, 18, 38, 0.28));
+}
+
+.ap-match-link {
+  fill: none;
+  stroke: rgba(139, 92, 246, 0.48);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-dasharray: 5 9;
+  animation: ap-match-flow 2.6s linear infinite;
+  transition:
+    stroke 220ms ease,
+    stroke-width 220ms ease,
+    filter 220ms ease;
+}
+
+.ap-match-link--active {
+  stroke: #22d3ee;
+  stroke-width: 3;
+  filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.9));
+  animation-duration: 1.25s;
+}
+
+.ap-match-task-node {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ap-match-task-breathe 4.8s ease-in-out infinite;
+}
+
+.ap-match-halo {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ap-match-halo-pulse 2.8s ease-out infinite;
+}
+
+.ap-match-agent-node {
+  cursor: pointer;
+  outline: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ap-match-node-drift 4s ease-in-out infinite;
+}
+
+.ap-match-agent-node:focus-visible circle:nth-of-type(1),
+.ap-match-agent-node:hover circle:nth-of-type(1) {
+  stroke: rgba(165, 243, 252, 0.9);
+  stroke-width: 2;
+}
+
+.ap-match-agent-node--disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.ap-match-selection-ring {
+  fill: rgba(34, 211, 238, 0.06);
+  stroke: rgba(103, 232, 249, 0.8);
+  stroke-width: 1.5;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ap-match-selection-pulse 1.8s ease-out infinite;
+}
+
+.ap-match-task-kicker {
+  fill: rgba(4, 18, 28, 0.66);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.ap-match-task-title {
+  fill: #04121c;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.ap-match-agent-score {
+  fill: #f8fafc;
+  font-size: 12px;
+  font-weight: 650;
+  pointer-events: none;
+}
+
+.ap-match-agent-label {
+  fill: var(--ap-text-2);
+  font-size: 11px;
+  transition: fill 180ms ease;
+  pointer-events: none;
+}
+
+.ap-match-agent-label--active {
+  fill: #a5f3fc;
+}
+
+.ap-match-agent-meta {
+  fill: var(--ap-muted);
+  font-size: 9px;
+  pointer-events: none;
+}
+
+@keyframes ap-match-flow {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+@keyframes ap-match-task-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.025);
+  }
+}
+
+@keyframes ap-match-halo-pulse {
+  0%,
+  100% {
+    opacity: 0.52;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 0.12;
+    transform: scale(1.16);
+  }
+}
+
+@keyframes ap-match-node-drift {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes ap-match-selection-pulse {
+  0% {
+    opacity: 0.85;
+    transform: scale(0.88);
+  }
+  75%,
+  100% {
+    opacity: 0;
+    transform: scale(1.22);
+  }
+}
+
 @media (max-width: 639px) {
   .capability-orbit-outer {
     width: min(280px, 78vw);
@@ -406,7 +560,12 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ap-float {
+  .ap-float,
+  .ap-match-link,
+  .ap-match-task-node,
+  .ap-match-halo,
+  .ap-match-agent-node,
+  .ap-match-selection-ring {
     animation: none;
   }
 

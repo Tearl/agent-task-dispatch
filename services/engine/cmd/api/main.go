@@ -31,11 +31,13 @@ import (
 	financepostgres "github.com/example/agent-platform/engine/internal/financeview/postgres"
 	"github.com/example/agent-platform/engine/internal/matchingview"
 	matchingviewpostgres "github.com/example/agent-platform/engine/internal/matchingview/postgres"
+	"github.com/example/agent-platform/engine/internal/orchestration"
 	persistencepostgres "github.com/example/agent-platform/engine/internal/persistence/postgres"
 	"github.com/example/agent-platform/engine/internal/selection"
 	selectionpostgres "github.com/example/agent-platform/engine/internal/selection/postgres"
 	enginetask "github.com/example/agent-platform/engine/internal/task"
 	taskpostgres "github.com/example/agent-platform/engine/internal/task/postgres"
+	"github.com/example/agent-platform/engine/internal/taskfunding"
 	"github.com/example/agent-platform/engine/internal/workspaceview"
 	_ "github.com/lib/pq"
 )
@@ -181,6 +183,7 @@ func main() {
 		os.Exit(1)
 	}
 	var selectionService *selection.Service
+	var taskFundingService *taskfunding.Service
 	var chainProjector *chainprojection.Projector
 	var chainReconciler *chainprojection.Reconciler
 	selectionContract := escrowContract
@@ -237,6 +240,11 @@ func main() {
 			logger.Error("selection service failed", "error", err)
 			os.Exit(1)
 		}
+		taskFundingService, err = taskfunding.NewService(db, taskfunding.Config{ChainID: chainID, ContractAddress: selectionContract, Asset: fundsAsset})
+		if err != nil {
+			logger.Error("task funding configuration failed", "error", err)
+			os.Exit(1)
+		}
 	}
 	address := os.Getenv("ENGINE_ADDR")
 	if address == "" {
@@ -260,12 +268,36 @@ func main() {
 		logger.Error("engine core runtime configuration failed", "error", err)
 		os.Exit(1)
 	}
+	credentialService.SetProtocolObserver(runtime.Credentials)
+	if err = credentialService.RestoreProtocolBundles(startupContext); err != nil {
+		logger.Error("Agent protocol credential restore failed")
+		os.Exit(1)
+	}
 	workspaceService, err := workspaceview.NewService(db)
 	if err != nil {
 		logger.Error("workspace view configuration failed", "error", err)
 		os.Exit(1)
 	}
-	apiHandler := api.NewHandlerWithWorkspace(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingViewService, deliveryService, disputeService, runtime.Workflow, workspaceService)
+	orchestrationStore, err := orchestration.NewStore(db)
+	if err != nil {
+		logger.Error("orchestration store failed", "error", err)
+		os.Exit(1)
+	}
+	orchestrationURL := os.Getenv("ORCHESTRATOR_BASE_URL")
+	if orchestrationURL == "" {
+		orchestrationURL = "http://127.0.0.1:8090"
+	}
+	orchestrationPlanner, err := orchestration.NewHTTPPlanner(orchestrationURL, os.Getenv("ORCHESTRATOR_INTERNAL_TOKEN"), 50*time.Second)
+	if err != nil {
+		logger.Error("orchestration planner configuration failed")
+		os.Exit(1)
+	}
+	orchestrationService, err := orchestration.NewService(orchestrationStore, orchestrationPlanner)
+	if err != nil {
+		logger.Error("orchestration service failed", "error", err)
+		os.Exit(1)
+	}
+	apiHandler := api.NewHandlerWithOrchestration(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingViewService, deliveryService, disputeService, runtime.Workflow, workspaceService, taskFundingService, orchestrationService)
 	rootHandler := http.NewServeMux()
 	rootHandler.Handle("/v1/agent-callbacks/", runtime.CallbackHandler)
 	rootHandler.Handle("/v1/execution-inputs/", runtime.ExecutionInputs)

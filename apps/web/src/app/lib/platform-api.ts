@@ -30,18 +30,22 @@ export type ReconciliationFinanceView = {
 };
 export type MatchingView = {
   asOf: string;
-  task: { id: string; title: string; status: string; specHash: string };
+  task: { id: string; title: string; status: string; specHash: string; deletionPending: boolean };
   snapshot?: { id: string; revision: number; algorithmVersion: string; ruleVersion: string; modelVersion: string; seedDigest: string; explorationTriggered: boolean; createdAt: string; degradations: Array<{ dependency: string; code: string; message: string }>; candidates: Array<{ agentId: string; name: string; category: string; tags: string[]; estimatedDurationSeconds: number; position: number; exploration: boolean; overviewPrice: string; formalPrice: string; externalCostCap: string; score: { taskMatch: number; reputation: number; priceTime: number; availability: number; rule: number; modelDelta: number; ranking: number }; overview?: { slotId: string; logicalExecutionId: string; status: string; billingStatus: string; validationCodes: string[]; contentHash?: string; replacement: boolean } }> };
   batch?: { id: string; status: string; deadline: string; replacementUsed: boolean; replacementExhausted: boolean };
   reservation?: { id: string; agentId: string; slotId: string; status: string; transactionHash?: string };
 };
+export type OrchestrationPlan = { id: string; taskId: string; taskSpecHash: string; mode: "single" | "multi"; summary: string; rationale: string[]; confidence: number; steps: Array<{ id: string; title: string; objective: string; requiredCapabilities: string[]; dependsOn: string[]; output: string }>; model: string; graphVersion: string; createdAt: string };
 export type ExecutionView = { logicalExecutionId: string; stage: string; agentId: string; status: string; currentAttempt: number; usedCost: string; costCap: string; contentHash?: string; deliverableRef?: string; deadline: string; createdAt: string; updatedAt: string };
-export type WorkspaceTask = { id: string; title: string; category: string; status: string; overviewBudget: string; formalBudget: string; externalCostCap: string; deadline: string; createdAt: string; updatedAt: string };
+export type WorkspaceTask = { id: string; title: string; category: string; status: string; overviewBudget: string; formalBudget: string; externalCostCap: string; aggregateVersion: number; deletionPending: boolean; deadline: string; createdAt: string; updatedAt: string };
+export type TaskDeletion = { taskId: string; status: string; refundRequired: boolean; chainId?: string; contractAddress?: string; chainTaskId?: string; publisherWallet?: string };
 export type WorkspaceAgent = { id: string; name: string; category: string; tags: string[]; capabilities: string; authorBio: string; endpointUrl?: string; status: string; health: string; healthCheckedAt?: string; healthValidUntil?: string; maxConcurrency: number; activeCapacity: number; aggregateVersion: number; estimatedDurationSeconds: number; currentPriceVersion?: number; currentCredentialVersion?: number; overviewPrice?: string; formalPrice?: string; updatedAt: string };
+export type AgentProfile = WorkspaceAgent & { endpointUrl: string; languages: string[]; controllerAddress: string; payoutAddress: string };
 export type WorkspaceNotification = { id: string; action: string; resourceType: string; resourceId: string; occurredAt: string };
 export type OverviewBatch = { id: string; snapshotId: string; taskId: string; taskSpecHash: string; matchRevision: number; algorithmVersion: string; deadline: string; status: string; replacementUsed: boolean; replacementExhausted: boolean; slots: Array<{ id: string; logicalExecutionId: string; agentId: string; status: string; billingStatus: string; validation: { valid: boolean; codes: string[] } }> };
 export type SelectionProof = { taskId: string; assignmentId: string; agentController: string; payout: string; overviewId: string; allocationId: string; quoteHash: string; taskSpecHash: string; matchRevision: number; priceVersion: number; overviewPrice: string; formalGrossPrice: string; overviewCredit: string; policyHash: string; nonce: string; deadline: number };
 export type SelectionIntent = { reservation: { id: string; publisherWallet: string; taskId: string; batchId: string; slotId: string; agentId: string; chainId: string; contractAddress: string; proof: SelectionProof; formalPayable: string; status: string; transactionHash?: string }; platformSignature: string };
+export type TaskFundingIntent = { id: string; taskId: string; publisherWallet: string; chainId: string; contractAddress: string; chainTaskId: string; overviewAmount: string; formalAmount: string; externalCostAmount: string; totalAmount: string; status: "prepared" | "submitted" | "confirmed" | "orphaned" | "failed"; transactionHash?: string; failureReasonCode?: string; aggregateVersion: number; createdAt: string; updatedAt: string };
 
 export type FormalProofRecord = {
   proof: { version: string; taskId: string; assignmentId: string; deliveryUnit: string; packageId: string; scopeHash: string; formalVersion: number; packageAggregateVersion: number; workNonce: number; agentId: string; contentHash: string; parentContentHash?: string; feedbackDigest?: string; changeOrderId?: string; agentResponseHash: string; changeSummaryHash: string; policyHash: string; deadline: number };
@@ -122,15 +126,25 @@ export function readPublisherFinance(request: typeof fetch = fetch) { return api
 export function readAgentFinance(request: typeof fetch = fetch) { return apiRequest<AgentFinanceView>("/api/finance/agent", {}, request); }
 export function readReconciliationFinance(request: typeof fetch = fetch) { return apiRequest<ReconciliationFinanceView>("/api/finance/reconciliation", {}, request); }
 export function readMatchingView(taskID: string, request: typeof fetch = fetch) { return apiRequest<MatchingView>(`/api/tasks/${encodeURIComponent(taskID)}/matching`, {}, request); }
+export async function readOrchestrationPlan(taskID: string, request: typeof fetch = fetch) { const value = await apiRequest<{ plan: OrchestrationPlan }>(`/api/tasks/${encodeURIComponent(taskID)}/orchestration-plan`, {}, request); return value.plan; }
+export async function createOrchestrationPlan(taskID: string, operationID: string, request: typeof fetch = fetch) { const value = await mutation<{ plan: OrchestrationPlan; replay: boolean }>(`/api/tasks/${encodeURIComponent(taskID)}/orchestration-plans`, operationID, {}, request); return value.plan; }
 export function startMatching(taskID: string, operationID: string, request: typeof fetch = fetch) { return mutation<{ snapshotId: string; matchRevision: number; qualified: number; selected: number; replay: boolean }>(`/api/tasks/${encodeURIComponent(taskID)}/matching-runs`, operationID, {}, request); }
 export function startOverview(taskID: string, operationID: string, request: typeof fetch = fetch) { return mutation<{ batch: OverviewBatch; replay: boolean }>(`/api/tasks/${encodeURIComponent(taskID)}/overview-batches`, operationID, {}, request); }
 export function finalizeOverviewSlot(taskID: string, batchID: string, slotID: string, operationID: string, request: typeof fetch = fetch) { return mutation<OverviewBatch>(`/api/tasks/${encodeURIComponent(taskID)}/overview-batches/${encodeURIComponent(batchID)}/slots/${encodeURIComponent(slotID)}/finalize`, operationID, {}, request); }
 export function readTaskExecutions(taskID: string, request: typeof fetch = fetch) { return apiRequest<{ executions: ExecutionView[] }>(`/api/tasks/${encodeURIComponent(taskID)}/executions`, {}, request); }
 export function readWorkspaceTasks(request: typeof fetch = fetch) { return apiRequest<{ tasks: WorkspaceTask[] }>("/api/workspace/tasks", {}, request); }
+export function requestTaskDeletion(taskID: string, expectedVersion: number, operationID: string, request: typeof fetch = fetch) { return mutation<TaskDeletion>(`/api/tasks/${encodeURIComponent(taskID)}/deletion-requests`, operationID, { expectedVersion }, request); }
 export function readWorkspaceAgents(request: typeof fetch = fetch) { return apiRequest<{ agents: WorkspaceAgent[] }>("/api/workspace/agents", {}, request); }
+export function readAgentProfile(agentID: string, request: typeof fetch = fetch) { return apiRequest<{ agent: AgentProfile; availableActions: AvailableActions }>(`/api/agents/${encodeURIComponent(agentID)}`, {}, request); }
+export function updateAgentProfile(agent: AgentProfile, endpointUrl: string, operationID: string, request: typeof fetch = fetch) {
+  return apiRequest<AgentProfile>(`/api/agents/${encodeURIComponent(agent.id)}/profile`, { method: "PUT", idempotencyKey: operationID, body: { name: agent.name, category: agent.category, tags: agent.tags, capabilities: agent.capabilities, languages: agent.languages, estimatedDurationSeconds: agent.estimatedDurationSeconds, authorBio: agent.authorBio, endpointUrl, controllerAddress: agent.controllerAddress, payoutAddress: agent.payoutAddress, maxConcurrency: agent.maxConcurrency, expectedVersion: agent.aggregateVersion } }, request);
+}
 export function readMarketplaceAgents(request: typeof fetch = fetch) { return apiRequest<{ marketplace: WorkspaceAgent[] }>("/api/workspace/marketplace", {}, request); }
 export function readWorkspaceNotifications(request: typeof fetch = fetch) { return apiRequest<{ notifications: WorkspaceNotification[] }>("/api/workspace/notifications", {}, request); }
 export function checkAgentHealth(agentID: string, expectedVersion: number, request: typeof fetch = fetch) { return mutation<{ aggregateVersion: number; health: string }>(`/api/agents/${encodeURIComponent(agentID)}/health`, `${agentID}:health:${crypto.randomUUID()}`, { expectedVersion }, request); }
+export function prepareTaskFunding(taskID: string, operationID: string, request: typeof fetch = fetch) { return mutation<TaskFundingIntent>(`/api/tasks/${encodeURIComponent(taskID)}/funding-intents`, operationID, {}, request); }
+export function readTaskFunding(taskID: string, request: typeof fetch = fetch) { return apiRequest<TaskFundingIntent>(`/api/tasks/${encodeURIComponent(taskID)}/funding-intent`, {}, request); }
+export function recordTaskFundingSubmission(taskID: string, intent: TaskFundingIntent, transactionHash: string, request: typeof fetch = fetch) { return mutation<TaskFundingIntent>(`/api/tasks/${encodeURIComponent(taskID)}/funding-intents/${encodeURIComponent(intent.id)}/submit`, `${intent.id}:submit:${transactionHash.toLowerCase()}`, { transactionHash, expectedVersion: intent.aggregateVersion }, request); }
 export function reserveSelection(taskID: string, batchID: string, slotID: string, operationID: string, request: typeof fetch = fetch) { return mutation<SelectionIntent>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations`, operationID, { batchId: batchID, slotId: slotID }, request); }
 export function readSelection(taskID: string, reservationID: string, request: typeof fetch = fetch) { return apiRequest<SelectionIntent>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations/${encodeURIComponent(reservationID)}`, {}, request); }
 export function reconcileSelection(taskID: string, reservationID: string, transactionHash: string, request: typeof fetch = fetch) { return mutation<{ reservation: SelectionIntent["reservation"]; assignment: { id: string; workNonce: number } | null }>(`/api/tasks/${encodeURIComponent(taskID)}/selection-reservations/${encodeURIComponent(reservationID)}/reconcile`, `${reservationID}:reconcile:${transactionHash.toLowerCase()}`, { transactionHash }, request); }
@@ -166,6 +180,31 @@ export async function submitSelectionTransaction(provider: WalletProvider, inten
   if (typeof walletChain !== "string" || !/^0x[0-9a-fA-F]+$/.test(walletChain) || BigInt(walletChain).toString(10) !== intent.reservation.chainId) throw new Error(`请将钱包切换到链 ${intent.reservation.chainId}。`);
   const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: intent.reservation.publisherWallet, to: intent.reservation.contractAddress, data: encodeSelectionCall(intent.reservation.proof, intent.platformSignature), value: "0x0" }] });
   if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效交易哈希。");
+  return transactionHash.toLowerCase();
+}
+
+export async function submitTaskFundingTransaction(provider: WalletProvider, intent: TaskFundingIntent): Promise<string> {
+  if (intent.status !== "prepared" && intent.status !== "orphaned") throw new Error("当前托管意图不可提交。");
+  if (!/^0x[0-9a-f]{64}$/.test(intent.chainTaskId) || !/^0x[0-9a-f]{40}$/.test(intent.contractAddress) || !/^0x[0-9a-f]{40}$/.test(intent.publisherWallet) || !/^[1-9][0-9]*$/.test(intent.totalAmount)) throw new Error("托管链上绑定无效。");
+  const walletChain = await provider.request({ method: "eth_chainId" });
+  if (typeof walletChain !== "string" || !/^0x[0-9a-fA-F]+$/.test(walletChain) || BigInt(walletChain).toString(10) !== intent.chainId) throw new Error(`请将钱包切换到链 ${intent.chainId}。`);
+  const accounts = await provider.request({ method: "eth_requestAccounts" });
+  const from = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0].toLowerCase() : "";
+  if (from !== intent.publisherWallet) throw new Error("当前钱包不是任务发布钱包。");
+  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from, to: intent.contractAddress, data: `0xb293e81c${intent.chainTaskId.slice(2)}`, value: `0x${BigInt(intent.totalAmount).toString(16)}` }] });
+  if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效交易哈希。");
+  return transactionHash.toLowerCase();
+}
+
+export async function submitTaskRefundTransaction(provider: WalletProvider, deletion: TaskDeletion): Promise<string> {
+  if (!deletion.refundRequired || !deletion.chainId || !deletion.contractAddress || !deletion.chainTaskId || !deletion.publisherWallet) throw new Error("退款链上绑定无效。");
+  const walletChain = await provider.request({ method: "eth_chainId" });
+  if (typeof walletChain !== "string" || BigInt(walletChain).toString(10) !== deletion.chainId) throw new Error(`请将钱包切换到链 ${deletion.chainId}。`);
+  const accounts = await provider.request({ method: "eth_requestAccounts" });
+  const from = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0].toLowerCase() : "";
+  if (from !== deletion.publisherWallet) throw new Error("当前钱包不是任务发布钱包。");
+  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from, to: deletion.contractAddress, data: `0x7249fbb6${deletion.chainTaskId.slice(2)}`, value: "0x0" }] });
+  if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效退款交易哈希。");
   return transactionHash.toLowerCase();
 }
 
@@ -238,8 +277,9 @@ export type AgentOnboardingInput = {
   capabilities: string[];
   controllerAddress: string;
   maxConcurrency: number;
-  credentialType: "api_key" | "bearer_token" | "oauth_client_secret";
-  secret: string;
+  bearerToken: string;
+  callbackKeyBase64: string;
+  callbackKeyVersion: string;
   overviewPrice: string;
   formalPrice: string;
 };
@@ -260,9 +300,9 @@ export async function onboardAgent(input: AgentOnboardingInput, request: typeof 
     maxConcurrency: input.maxConcurrency,
   }, request);
   const credential = await mutation<{ agentAggregateVersion: number }>(`/api/agents/${encodeURIComponent(agent.id)}/credentials`, `${input.operationId}:credential`, {
-    credentialType: input.credentialType,
-    label: "Primary integration credential",
-    secret: input.secret,
+    credentialType: "protocol_bundle",
+    label: "agent-execution-v1 transport bundle",
+    secret: JSON.stringify({ bearerToken: input.bearerToken, callbackKeyBase64: input.callbackKeyBase64, callbackKeyVersion: input.callbackKeyVersion }),
     expectedVersion: agent.aggregateVersion,
   }, request);
   const price = await mutation<{ agentAggregateVersion: number }>(`/api/agents/${encodeURIComponent(agent.id)}/prices`, `${input.operationId}:price`, {
@@ -300,6 +340,7 @@ export type TaskPublishInput = {
   title: string;
   description: string;
   category: string;
+  tags?: string[];
   amount: string;
   deadline: string;
   criteria: string[];
@@ -334,6 +375,7 @@ export async function createAndPublishTask(input: TaskPublishInput, request: typ
     title: input.title,
     description: input.description,
     expertType: input.category,
+    tags: input.tags ?? [],
     language: "zh-CN",
     overviewBudget: input.amount,
     formalBudget: input.amount,
@@ -361,13 +403,17 @@ export function validateAgentOnboardingInput(input: AgentOnboardingInput): void 
   if (!/^0x[0-9a-fA-F]{40}$/.test(input.controllerAddress)) throw new Error("当前会话钱包地址无效。");
   if (!Number.isInteger(input.maxConcurrency) || input.maxConcurrency < 1 || input.maxConcurrency > 10_000) throw new Error("并发上限必须为 1–10000。");
   if (input.capabilities.length === 0 || input.capabilities.length > 50 || input.capabilities.some((item) => !item.trim() || item.length > 2_000)) throw new Error("请提供有效的能力标签。");
-  if (!input.secret || input.secret.length > 16_384) throw new Error("凭证不能为空且不得超过 16384 字符。");
+  if (!input.bearerToken || input.bearerToken.length > 4_096 || /[\r\n]/.test(input.bearerToken)) throw new Error("Bearer Token 无效。");
+  let callbackKey: Uint8Array;
+  try { callbackKey = Uint8Array.from(atob(input.callbackKeyBase64), (character) => character.charCodeAt(0)); } catch { throw new Error("回调密钥必须是有效 Base64。"); }
+  if (callbackKey.length !== 32 || !input.callbackKeyVersion.trim() || input.callbackKeyVersion.length > 128) throw new Error("回调密钥必须是 Base64 编码的 32 字节值，并提供版本。");
   if (!canonicalAmount(input.overviewPrice) || !canonicalAmount(input.formalPrice) || BigInt(input.overviewPrice) > BigInt(input.formalPrice)) throw new Error("概览价格必须是非负整数且不得高于正式套餐总价。");
 }
 
 export function validateTaskPublishInput(input: TaskPublishInput): void {
   if (!input.operationId || !input.title.trim() || input.title.length > 200 || !input.description.trim() || input.description.length > 50_000) throw new Error("任务标题或描述不完整或过长。");
   if (!canonicalAmount(input.amount)) throw new Error("预算必须是不含前导零的非负整数。");
+  if ((input.tags?.length ?? 0) > 50 || input.tags?.some((tag) => !tag.trim() || tag.length > 100)) throw new Error("任务标签必须为不超过 50 个有效短标签。");
   const deadline = new Date(`${input.deadline}T23:59:59Z`);
   if (!Number.isFinite(deadline.getTime()) || deadline.getTime() <= Date.now()) throw new Error("截止日期必须晚于当前时间。");
   const criteria = input.criteria.filter((item) => item.trim());

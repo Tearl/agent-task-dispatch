@@ -37,15 +37,15 @@ func NewStore(db *sql.DB) (*Store, error) {
 
 func (store *Store) Get(ctx context.Context, publisherID, taskID string) (matchingview.View, error) {
 	var view matchingview.View
-	if err := store.db.QueryRowContext(ctx, `SELECT clock_timestamp(),task.task_id,task.title,task.status,spec.content_hash
+	if err := store.db.QueryRowContext(ctx, `SELECT clock_timestamp(),task.task_id,task.title,task.status,spec.content_hash,task.deletion_requested_at IS NOT NULL
 FROM tasks task JOIN task_spec_versions spec ON spec.task_id=task.task_id AND spec.version_no=task.current_spec_version
-WHERE task.task_id=$1 AND task.publisher_id=$2`, taskID, publisherID).Scan(&view.AsOf, &view.Task.ID, &view.Task.Title, &view.Task.Status, &view.Task.SpecHash); err != nil {
+WHERE task.task_id=$1 AND task.publisher_id=$2 AND task.deleted_at IS NULL`, taskID, publisherID).Scan(&view.AsOf, &view.Task.ID, &view.Task.Title, &view.Task.Status, &view.Task.SpecHash, &view.Task.DeletionPending); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return view, matchingview.ErrNotFound
 		}
 		return view, err
 	}
-	snapshot, err := store.snapshots.Latest(ctx, taskID, view.Task.SpecHash, matching.FairShuffleAlgorithmVersion)
+	snapshot, err := store.snapshots.Latest(ctx, taskID, view.Task.SpecHash, matching.CategoryTagsAlgorithmVersion)
 	if errors.Is(err, matching.ErrSnapshotNotFound) {
 		return view, nil
 	}

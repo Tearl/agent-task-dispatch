@@ -5,9 +5,11 @@ import { resolveEngineBaseUrl } from "../../../lib/engine";
 import { sessionCookieName, type PublicSession } from "../../../lib/session";
 import {
   generateTaskAnalysis,
+  generateLocalTaskAnalysis,
   InvalidTaskAnalysisInputError,
   InvalidTaskAnalysisResponseError,
   parseTaskAnalysisInput,
+  TaskAnalysisConfigurationError,
   TaskAnalysisProviderError,
 } from "../../../lib/task-analysis";
 
@@ -20,7 +22,14 @@ export async function POST(request: Request) {
   let input: unknown;
   try {
     input = JSON.parse(await readBoundedBody(request, 65_536));
-    const result = await generateTaskAnalysis(parseTaskAnalysisInput(input));
+    const parsed = parseTaskAnalysisInput(input);
+    let result;
+    try {
+      result = await generateTaskAnalysis(parsed);
+    } catch (error) {
+      if (!(error instanceof TaskAnalysisConfigurationError) || process.env.NODE_ENV === "production") throw error;
+      result = generateLocalTaskAnalysis(parsed);
+    }
     return NextResponse.json(result, { status: 200 });
   } catch (error) {
     if (error instanceof BodyTooLargeError) return NextResponse.json({ error: "request body too large" }, { status: 413 });

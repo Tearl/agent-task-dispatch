@@ -40,6 +40,7 @@ type DraftInput struct {
 	Title              string                `json:"title"`
 	Description        string                `json:"description"`
 	ExpertType         string                `json:"expertType"`
+	Tags               []string              `json:"tags"`
 	Language           string                `json:"language"`
 	OverviewBudget     string                `json:"overviewBudget"`
 	FormalBudget       string                `json:"formalBudget"`
@@ -61,6 +62,20 @@ type PublishInput struct {
 	ExpectedVersion int64 `json:"expectedVersion"`
 }
 
+type DeleteInput struct {
+	ExpectedVersion int64 `json:"expectedVersion"`
+}
+
+type DeleteResult struct {
+	TaskID          string `json:"taskId"`
+	Status          string `json:"status"`
+	RefundRequired  bool   `json:"refundRequired"`
+	ChainID         string `json:"chainId,omitempty"`
+	ContractAddress string `json:"contractAddress,omitempty"`
+	ChainTaskID     string `json:"chainTaskId,omitempty"`
+	PublisherWallet string `json:"publisherWallet,omitempty"`
+}
+
 type Task struct {
 	ID                       string                `json:"id"`
 	PublisherID              string                `json:"publisherId"`
@@ -68,6 +83,7 @@ type Task struct {
 	Title                    string                `json:"title"`
 	Description              string                `json:"description"`
 	ExpertType               string                `json:"expertType"`
+	Tags                     []string              `json:"tags"`
 	Language                 string                `json:"language"`
 	OverviewBudget           string                `json:"overviewBudget"`
 	FormalBudget             string                `json:"formalBudget"`
@@ -94,6 +110,7 @@ type SpecVersion struct {
 	Title                string    `json:"title"`
 	Description          string    `json:"description"`
 	ExpertType           string    `json:"expertType"`
+	Tags                 []string  `json:"tags"`
 	Language             string    `json:"language"`
 	OverviewBudget       string    `json:"overviewBudget"`
 	FormalBudget         string    `json:"formalBudget"`
@@ -139,6 +156,7 @@ type Store interface {
 	Create(context.Context, Mutation, DraftInput, string) (Task, bool, error)
 	UpdateDraft(context.Context, Mutation, string, UpdateDraftInput) (Task, bool, error)
 	Publish(context.Context, Mutation, string, PublishInput) (Publication, bool, error)
+	RequestDelete(context.Context, Mutation, string, DeleteInput) (DeleteResult, bool, error)
 	Get(context.Context, string, string) (Task, error)
 	GetForActions(context.Context, string, string) (Task, time.Time, error)
 }
@@ -204,6 +222,20 @@ func (s *Service) Publish(ctx context.Context, session auth.Session, key, id str
 	return s.store.Publish(ctx, mutation, id, input)
 }
 
+func (s *Service) RequestDelete(ctx context.Context, session auth.Session, key, id string, input DeleteInput) (DeleteResult, bool, error) {
+	if !publisherAuthorized(session) {
+		return DeleteResult{}, false, ErrForbidden
+	}
+	if id == "" || input.ExpectedVersion < 1 {
+		return DeleteResult{}, false, ErrStaleVersion
+	}
+	mutation, err := s.mutation(session, key, input)
+	if err != nil {
+		return DeleteResult{}, false, err
+	}
+	return s.store.RequestDelete(ctx, mutation, id, input)
+}
+
 func (s *Service) Get(ctx context.Context, session auth.Session, id string) (Task, error) {
 	if !publisherAuthorized(session) {
 		return Task{}, ErrForbidden
@@ -245,9 +277,19 @@ func (s *Service) View(ctx context.Context, session auth.Session, id string) (Vi
 			Actions: []action.Decision{
 				action.Decide("update_draft", editReasons...),
 				action.Decide("publish", publishReasons...),
+				action.Decide("delete", deleteReasons(value.Status)...),
 			},
 		},
 	}, nil
+}
+
+func deleteReasons(status string) []action.Reason {
+	for _, allowed := range []string{"draft", "pending_escrow", "escrowed", "matching", "overview_generating", "awaiting_selection"} {
+		if status == allowed {
+			return nil
+		}
+	}
+	return []action.Reason{action.Because("task_already_in_development", "Tasks assigned to an Agent or already in development cannot be deleted.")}
 }
 
 func (s *Service) mutation(session auth.Session, key string, input any) (Mutation, error) {
@@ -271,6 +313,7 @@ func PublicationVersions(value Task, version int, now time.Time) (SpecVersion, A
 		Title           string    `json:"title"`
 		Description     string    `json:"description"`
 		ExpertType      string    `json:"expertType"`
+		Tags            []string  `json:"tags"`
 		Language        string    `json:"language"`
 		OverviewBudget  string    `json:"overviewBudget"`
 		FormalBudget    string    `json:"formalBudget"`
@@ -280,7 +323,7 @@ func PublicationVersions(value Task, version int, now time.Time) (SpecVersion, A
 		AllowedTools    []string  `json:"allowedTools"`
 		Exclusions      []string  `json:"exclusions"`
 		DeliveryFormat  string    `json:"deliveryFormat"`
-	}{value.Title, value.Description, value.ExpertType, value.Language, value.OverviewBudget, value.FormalBudget, value.ExternalCostCap, value.Deadline, value.Inputs, value.AllowedTools, value.Exclusions, value.DeliveryFormat}
+	}{value.Title, value.Description, value.ExpertType, value.Tags, value.Language, value.OverviewBudget, value.FormalBudget, value.ExternalCostCap, value.Deadline, value.Inputs, value.AllowedTools, value.Exclusions, value.DeliveryFormat}
 	specHash, err := contentHash(specContent)
 	if err != nil {
 		return SpecVersion{}, AcceptanceVersion{}, err
@@ -290,7 +333,7 @@ func PublicationVersions(value Task, version int, now time.Time) (SpecVersion, A
 		return SpecVersion{}, AcceptanceVersion{}, err
 	}
 	aggregateVersion := value.AggregateVersion + 1
-	spec := SpecVersion{TaskID: value.ID, Version: version, TaskAggregateVersion: aggregateVersion, ContentHash: specHash, Title: value.Title, Description: value.Description, ExpertType: value.ExpertType, Language: value.Language, OverviewBudget: value.OverviewBudget, FormalBudget: value.FormalBudget, ExternalCostCap: value.ExternalCostCap, Deadline: value.Deadline, Inputs: value.Inputs, AllowedTools: value.AllowedTools, Exclusions: value.Exclusions, DeliveryFormat: value.DeliveryFormat, CreatedAt: now}
+	spec := SpecVersion{TaskID: value.ID, Version: version, TaskAggregateVersion: aggregateVersion, ContentHash: specHash, Title: value.Title, Description: value.Description, ExpertType: value.ExpertType, Tags: value.Tags, Language: value.Language, OverviewBudget: value.OverviewBudget, FormalBudget: value.FormalBudget, ExternalCostCap: value.ExternalCostCap, Deadline: value.Deadline, Inputs: value.Inputs, AllowedTools: value.AllowedTools, Exclusions: value.Exclusions, DeliveryFormat: value.DeliveryFormat, CreatedAt: now}
 	acceptance := AcceptanceVersion{TaskID: value.ID, Version: version, TaskAggregateVersion: aggregateVersion, ContentHash: acceptanceHash, Criteria: value.AcceptanceCriteria, TotalWeight: 100, CreatedAt: now}
 	return spec, acceptance, nil
 }
@@ -308,7 +351,7 @@ func validateDraft(input DraftInput) error {
 	if blank(input.Title) || blank(input.Description) || blank(input.ExpertType) || blank(input.Language) || blank(input.DeliveryFormat) || input.Deadline.IsZero() {
 		return ErrInvalidInput
 	}
-	if len(input.Title) > 200 || len(input.Description) > 50_000 || len(input.Inputs) > 100 || len(input.AllowedTools) > 100 || len(input.Exclusions) > 100 || len(input.AcceptanceCriteria) == 0 || len(input.AcceptanceCriteria) > 100 {
+	if len(input.Title) > 200 || len(input.Description) > 50_000 || len(input.Tags) > 50 || len(input.Inputs) > 100 || len(input.AllowedTools) > 100 || len(input.Exclusions) > 100 || len(input.AcceptanceCriteria) == 0 || len(input.AcceptanceCriteria) > 100 {
 		return ErrInvalidInput
 	}
 	for _, amount := range []string{input.OverviewBudget, input.FormalBudget, input.ExternalCostCap} {
@@ -327,6 +370,11 @@ func validateDraft(input DraftInput) error {
 	}
 	if total != 100 {
 		return ErrInvalidInput
+	}
+	for _, tag := range input.Tags {
+		if blank(tag) || len(tag) > 100 {
+			return ErrInvalidInput
+		}
 	}
 	for _, values := range [][]string{input.Inputs, input.AllowedTools, input.Exclusions} {
 		for _, value := range values {

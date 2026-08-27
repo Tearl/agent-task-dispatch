@@ -22,7 +22,7 @@ func (gateway *OverviewGateway) AuthorizeOverview(ctx context.Context, request o
 	if err != nil {
 		return overview.Allocation{}, false, err
 	}
-	return overview.Allocation{ID: allocation.ID, CostCap: allocation.CostCap}, replay, nil
+	return overview.Allocation{ID: allocation.ID, CostCap: allocation.CostCap, Deadline: allocation.Deadline}, replay, nil
 }
 
 func (gateway *OverviewGateway) CaptureOverview(ctx context.Context, allocationID string, claim overview.BillingClaim) (bool, error) {

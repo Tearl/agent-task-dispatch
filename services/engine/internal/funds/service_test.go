@@ -43,6 +43,33 @@ func TestIsolatedAccountsBalancedCaptureAndReplay(t *testing.T) {
 	}
 }
 
+func TestAuthorizationRetryKeepsEarlierAuthorizedDeadline(t *testing.T) {
+	service, repository, _, _ := fundedService(t, "100", "0")
+	request := authorization("retry-key", "agent-retry", "20", "10")
+	created, replay, err := service.AuthorizeOverview(context.Background(), request)
+	if err != nil || replay {
+		t.Fatalf("initial authorization: replay=%v err=%v", replay, err)
+	}
+
+	retry := request
+	retry.Deadline = request.Deadline.Add(15 * time.Minute)
+	replayed, replay, err := service.AuthorizeOverview(context.Background(), retry)
+	if err != nil || !replay || !replayed.Deadline.Equal(created.Deadline) || len(repository.allocations) != 1 {
+		t.Fatalf("later-deadline retry: allocation=%#v replay=%v count=%d err=%v", replayed, replay, len(repository.allocations), err)
+	}
+
+	earlier := request
+	earlier.Deadline = request.Deadline.Add(-15 * time.Minute)
+	if _, _, err = service.AuthorizeOverview(context.Background(), earlier); !errors.Is(err, ErrContentConflict) {
+		t.Fatalf("earlier-deadline retry accepted: %v", err)
+	}
+	changed := retry
+	changed.OverviewPrice = "21"
+	if _, _, err = service.AuthorizeOverview(context.Background(), changed); !errors.Is(err, ErrContentConflict) {
+		t.Fatalf("changed authorization retry accepted: %v", err)
+	}
+}
+
 func TestAllocationReservationIsAtomicAndCannotBeReused(t *testing.T) {
 	service, _, _, _ := fundedService(t, "50", "0")
 	requests := []OverviewAuthorization{authorization("key-a", "agent-a", "20", "10"), authorization("key-b", "agent-b", "20", "10")}

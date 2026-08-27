@@ -7,6 +7,7 @@ AI Agent 任务交易与分发平台 MVP。项目由 [Create Better-T-Stack](htt
 - C 端 UI：React 19、Vite、React Router、Tailwind CSS
 - SSR / BFF：Next.js 16，目标部署 AWS Lambda
 - 核心引擎：Go，目标部署 AWS ECS 或 EKS
+- AI 编排规划：LangGraph（托管确认后判断单 Agent 或多 Agent DAG）
 - 消息：Amazon SNS、SQS、DLQ
 - 数据：PostgreSQL、Redis；Milvus/Pinecone 延后到 V1
 - 合约：Solidity、Foundry、Ethereum 测试链
@@ -23,6 +24,8 @@ agents/
   competitor-intelligence/  独立竞品情报 Agent
   tarot-relationship/       独立关系塔罗 Agent
   image-generator/          Mastra 一句话图片生成 Agent
+  qwen-ui-prototype/        Qwen-Image 软件 UI 高保真原型 Agent
+  seedream-visual-design/   Seedream 软件品牌视觉设计 Agent
   viral-video-analyzer/     独立短视频爆款分析 Agent
 contracts/
   escrow/              任务资金托管合约
@@ -59,6 +62,42 @@ pnpm infra:up
 pnpm dev
 ```
 
+### Local escrow chain
+
+Task matching is deliberately unavailable until the published task has a
+canonical escrow deposit. Run a local Anvil chain in a separate terminal:
+
+```bash
+pnpm dev:chain
+```
+
+Export the Engine's local-only selection signing key through your shell or
+secret manager, derive its public address, and deploy the contract:
+
+```bash
+export SELECTION_PROOF_SIGNING_KEY_HEX="<local-only-key>"
+export SELECTION_PROOF_SIGNER_ADDRESS="$(cast wallet address "$SELECTION_PROOF_SIGNING_KEY_HEX")"
+pnpm chain:deploy
+```
+
+The deployment writes non-secret RPC, contract, resolver, start-block, and
+confirmation settings to ignored `.env.chain`. Load that file into the Engine
+process together with the signing key. Never write the signing key to `.env`,
+`.env.chain`, logs, or command output.
+
+After task publication the Web flow creates an immutable funding intent. The
+publisher wallet calls `TaskEscrow.createTask`; only a confirmed `TaskCreated`
+event with the exact chain task ID, publisher, contract, and amount moves the
+task from `pending_escrow` to `escrowed`. A reorg reverses the funding journals
+and returns the task to `pending_escrow`.
+
+Agent onboarding now stores an encrypted `agent-execution-v1` protocol bundle:
+the Engine-to-Agent bearer token, a distinct 32-byte callback HMAC key, and its
+version. The plaintext exists only during the protected request and in process
+memory. Engine startup restores current bundles from immutable ciphertext, so
+new Agents no longer require a manual `ENGINE_AGENT_RUNTIME_CREDENTIALS_JSON`
+restart cycle.
+
 Never reuse either development key in another environment. Production must inject two independently managed 32-byte keys and a versioned `AGENT_CREDENTIAL_KEY_REF` through the environment secret manager; the production KMS vendor remains an open decision.
 
 Local endpoints:
@@ -66,6 +105,7 @@ Local endpoints:
 - React customer app: <http://localhost:5173>
 - Next.js BFF and SSR: <http://localhost:3000>
 - Go Engine: <http://localhost:8080>
+- LangGraph Orchestrator: <http://localhost:8090>
 - BFF health: <http://localhost:3000/api/health>
 - LocalStack: <http://localhost:4566>
 

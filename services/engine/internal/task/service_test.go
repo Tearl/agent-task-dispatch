@@ -36,6 +36,10 @@ func (s *testStore) Publish(_ context.Context, mutation Mutation, id string, inp
 	s.lastMutation = mutation
 	return Publication{Task: Task{ID: id, PublisherID: mutation.ActorID, Status: StatusPendingEscrow, AggregateVersion: input.ExpectedVersion + 1}}, false, nil
 }
+func (s *testStore) RequestDelete(_ context.Context, mutation Mutation, id string, _ DeleteInput) (DeleteResult, bool, error) {
+	s.lastMutation = mutation
+	return DeleteResult{TaskID: id}, false, nil
+}
 func (*testStore) Get(context.Context, string, string) (Task, error) { return Task{}, nil }
 func (s *testStore) GetForActions(context.Context, string, string) (Task, time.Time, error) {
 	return s.actionTask, s.databaseNow, s.actionErr
@@ -145,7 +149,7 @@ func TestUpdateAndPublishRequireAggregateVersion(t *testing.T) {
 func TestPublicationContentHashesAreDeterministicAndSeparated(t *testing.T) {
 	now := time.Date(2026, 8, 21, 4, 0, 0, 0, time.UTC)
 	input := validDraft(now)
-	value := Task{ID: "task-1", AggregateVersion: 2, Title: input.Title, Description: input.Description, ExpertType: input.ExpertType, Language: input.Language, OverviewBudget: input.OverviewBudget, FormalBudget: input.FormalBudget, ExternalCostCap: input.ExternalCostCap, Deadline: input.Deadline, Inputs: input.Inputs, AllowedTools: input.AllowedTools, Exclusions: input.Exclusions, DeliveryFormat: input.DeliveryFormat, AcceptanceCriteria: input.AcceptanceCriteria}
+	value := Task{ID: "task-1", AggregateVersion: 2, Title: input.Title, Description: input.Description, ExpertType: input.ExpertType, Tags: input.Tags, Language: input.Language, OverviewBudget: input.OverviewBudget, FormalBudget: input.FormalBudget, ExternalCostCap: input.ExternalCostCap, Deadline: input.Deadline, Inputs: input.Inputs, AllowedTools: input.AllowedTools, Exclusions: input.Exclusions, DeliveryFormat: input.DeliveryFormat, AcceptanceCriteria: input.AcceptanceCriteria}
 	spec1, acceptance1, err := PublicationVersions(value, 1, now)
 	if err != nil {
 		t.Fatal(err)
@@ -165,6 +169,12 @@ func TestPublicationContentHashesAreDeterministicAndSeparated(t *testing.T) {
 	if changed.ContentHash == spec1.ContentHash {
 		t.Fatal("changed spec retained old content hash")
 	}
+	value.Description = input.Description
+	value.Tags = []string{"different"}
+	changed, _, _ = PublicationVersions(value, 1, now)
+	if changed.ContentHash == spec1.ContentHash {
+		t.Fatal("changed task tags retained old content hash")
+	}
 }
 
 func TestTaskAvailableActionsComeFromStoredStateAndDatabaseTime(t *testing.T) {
@@ -173,7 +183,7 @@ func TestTaskAvailableActionsComeFromStoredStateAndDatabaseTime(t *testing.T) {
 	service, _ := NewService(store)
 	publisher := auth.Session{UserID: "publisher", Roles: []string{"publisher"}}
 	response, err := service.AvailableActions(context.Background(), publisher, "task-1")
-	if err != nil || response.ResourceType != "task" || response.AggregateVersion != 4 || len(response.Actions) != 2 {
+	if err != nil || response.ResourceType != "task" || response.AggregateVersion != 4 || len(response.Actions) != 3 {
 		t.Fatalf("available actions: %#v err=%v", response, err)
 	}
 	for _, decision := range response.Actions {
@@ -207,9 +217,25 @@ func TestTaskAvailableActionsComeFromStoredStateAndDatabaseTime(t *testing.T) {
 	}
 }
 
+func TestDeleteActionStopsAtAssignmentBoundary(t *testing.T) {
+	databaseNow := time.Now().UTC()
+	store := &testStore{databaseNow: databaseNow, actionTask: Task{ID: "task-1", PublisherID: "publisher", Status: "awaiting_selection", AggregateVersion: 2, Deadline: databaseNow.Add(time.Hour)}}
+	service, _ := NewService(store)
+	session := auth.Session{UserID: "publisher", Roles: []string{"publisher"}}
+	view, err := service.View(context.Background(), session, "task-1")
+	if err != nil || !view.AvailableActions.Actions[2].Allowed {
+		t.Fatalf("pre-assignment task should be deletable: %#v %v", view, err)
+	}
+	store.actionTask.Status = "assigned"
+	view, err = service.View(context.Background(), session, "task-1")
+	if err != nil || view.AvailableActions.Actions[2].Allowed || view.AvailableActions.Actions[2].Reasons[0].Code != "task_already_in_development" {
+		t.Fatalf("assigned task deletion must be blocked: %#v %v", view, err)
+	}
+}
+
 func validDraft(now time.Time) DraftInput {
 	return DraftInput{
-		Title: "Research market", Description: "Analyze the supplied market data", ExpertType: "research", Language: "zh-CN",
+		Title: "Research market", Description: "Analyze the supplied market data", ExpertType: "research", Tags: []string{"market", "analysis"}, Language: "zh-CN",
 		OverviewBudget: "100", FormalBudget: "1000", ExternalCostCap: "50", Deadline: now.Add(24 * time.Hour),
 		Inputs: []string{"market.csv"}, AllowedTools: []string{"web-search"}, Exclusions: []string{"personal data"}, DeliveryFormat: "Markdown report",
 		AcceptanceCriteria: []AcceptanceCriterion{{ID: "accuracy", Title: "Accuracy", Description: "Claims cite evidence", Weight: 50}, {ID: "coverage", Title: "Coverage", Description: "All requested markets covered", Weight: 50}},

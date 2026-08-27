@@ -31,17 +31,19 @@ type ChatCompletion = {
   choices?: Array<{ finish_reason?: unknown; message?: { content?: unknown } }>;
 };
 
-const categories = ["数据分析", "翻译", "图像生成", "代码开发", "市场研究", "智能审计"];
+const categories = ["数据分析", "翻译", "图像生成", "代码开发", "市场研究", "智能审计"] as const;
+type TaskCategory = typeof categories[number];
 
 export class InvalidTaskAnalysisInputError extends Error {}
 export class InvalidTaskAnalysisResponseError extends Error {}
 export class TaskAnalysisProviderError extends Error {}
+export class TaskAnalysisConfigurationError extends Error {}
 
 export function resolveDeepSeekConfig(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): DeepSeekConfig {
   const apiKey = environment.DEEPSEEK_API_KEY?.trim() ?? "";
-  if (!apiKey) throw new Error("DEEPSEEK_API_KEY is required");
+  if (!apiKey) throw new TaskAnalysisConfigurationError("DEEPSEEK_API_KEY is required");
   const parsed = new URL(environment.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com");
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new Error("invalid DEEPSEEK_BASE_URL");
@@ -53,6 +55,71 @@ export function resolveDeepSeekConfig(
     throw new Error("invalid DEEPSEEK_TIMEOUT_MS");
   }
   return { apiKey, baseUrl: parsed.toString().replace(/\/$/, ""), model, timeoutMs };
+}
+
+export function generateLocalTaskAnalysis(input: TaskAnalysisInput): { analysis: TaskAnalysis; model: string } {
+  if (input.currentAnalysis && input.instruction) {
+    const instruction = input.instruction;
+    const analysis: TaskAnalysis = {
+      ...input.currentAnalysis,
+      tags: [...input.currentAnalysis.tags],
+      deliverables: [...input.currentAnalysis.deliverables],
+      acceptanceCriteria: [...input.currentAnalysis.acceptanceCriteria],
+    };
+    const budget = instruction.match(/(?:预算|控制在|不超过)\D{0,8}(\d{1,9})/);
+    const deliveryDays = instruction.match(/(?:周期|交付|完成|改为|调整为)\D{0,8}(\d{1,4})\s*天/);
+    if (budget) analysis.budget = boundedInteger(Number(budget[1]), 1, 1_000_000_000);
+    if (deliveryDays) analysis.deliveryDays = boundedInteger(Number(deliveryDays[1]), 1, 3_650);
+    if (!budget && !deliveryDays) analysis.acceptanceCriteria = appendUnique(analysis.acceptanceCriteria, instruction.slice(0, 1_000), 20);
+    analysis.summary = boundedString(`${input.currentAnalysis.summary.replace(/\n补充要求：.*$/s, "")}\n补充要求：${instruction}`.slice(0, 5_000), 1, 5_000);
+    return { analysis: validateAnalysis(analysis), model: "local-rules-v1" };
+  }
+
+  const prompt = input.prompt.trim();
+  const category = inferCategory(prompt, input.category);
+  const defaults = localCategoryDefaults[category];
+  const depth = input.depth?.trim() || "深度";
+  return {
+    analysis: validateAnalysis({
+      title: prompt.length > 200 ? `${prompt.slice(0, 199)}…` : prompt,
+      summary: `基于用户描述，完成“${prompt.slice(0, 4_800)}”，并以可验证、可复用的形式交付结果。`,
+      category,
+      depth,
+      budget: defaults.budget,
+      deliveryDays: depth === "专家" ? 5 : depth === "标准" ? 2 : 3,
+      tags: defaults.tags,
+      deliverables: defaults.deliverables,
+      acceptanceCriteria: defaults.acceptanceCriteria,
+      risk: defaults.risk,
+    }),
+    model: "local-rules-v1",
+  };
+}
+
+const localCategoryDefaults: Record<TaskCategory, Pick<TaskAnalysis, "budget" | "tags" | "deliverables" | "acceptanceCriteria" | "risk">> = {
+  数据分析: { budget: 1200, tags: ["数据采集", "结构化分析", "可验证交付"], deliverables: ["结构化数据文件", "分析摘要", "数据来源说明"], acceptanceCriteria: ["数据字段完整", "结果可复核", "交付格式可直接使用"], risk: "公开数据可能存在缺失、更新延迟或访问限制。" },
+  翻译: { budget: 800, tags: ["专业翻译", "术语一致", "质量校对"], deliverables: ["完整译文", "术语表", "校对说明"], acceptanceCriteria: ["无明显漏译错译", "术语前后一致", "保留原文结构"], risk: "专业术语和上下文不足可能影响翻译准确度。" },
+  图像生成: { budget: 1000, tags: ["图像生成", "视觉设计", "多版本交付"], deliverables: ["最终图像文件", "候选版本", "生成参数说明"], acceptanceCriteria: ["尺寸与格式符合要求", "主题和风格匹配", "不存在明显视觉瑕疵"], risk: "复杂文字排版和特定人物一致性可能需要多轮调整。" },
+  代码开发: { budget: 2500, tags: ["代码开发", "自动化测试", "部署文档"], deliverables: ["可运行源代码", "自动化测试", "部署与使用说明"], acceptanceCriteria: ["核心功能按需求运行", "类型检查与测试通过", "不存在高危安全问题"], risk: "需要明确现有代码仓库、运行环境和第三方依赖版本。" },
+  市场研究: { budget: 1500, tags: ["市场洞察", "多源验证", "研究报告"], deliverables: ["研究报告", "数据来源清单", "关键结论与行动建议"], acceptanceCriteria: ["关键结论有来源支撑", "覆盖约定市场与竞品", "数据口径和时间范围明确"], risk: "部分市场数据可能依赖付费数据库或存在时效限制。" },
+  智能审计: { budget: 3200, tags: ["安全审计", "风险分级", "修复建议"], deliverables: ["安全审计报告", "问题复现说明", "分级修复建议"], acceptanceCriteria: ["覆盖约定代码范围", "风险可复现且分级明确", "高危问题提供可执行修复方案"], risk: "审计结论依赖冻结的代码版本，后续代码变更需重新评估。" },
+};
+
+function inferCategory(prompt: string, requested?: string): TaskCategory {
+  if (requested && categories.includes(requested as TaskCategory)) return requested as TaskCategory;
+  const rules: Array<[TaskCategory, string[]]> = [
+    ["翻译", ["翻译", "译文", "多语言"]],
+    ["图像生成", ["图片", "图像", "海报", "视觉"]],
+    ["代码开发", ["代码", "开发", "接口", "网站", "应用"]],
+    ["市场研究", ["市场", "竞品", "调研", "行业"]],
+    ["智能审计", ["审计", "安全", "漏洞", "合约"]],
+  ];
+  return rules.find(([, keywords]) => keywords.some((keyword) => prompt.includes(keyword)))?.[0] ?? "数据分析";
+}
+
+function appendUnique(items: string[], value: string, maximum: number): string[] {
+  if (items.includes(value)) return items;
+  return [...items.slice(0, maximum - 1), value];
 }
 
 export function parseTaskAnalysisInput(value: unknown): TaskAnalysisInput {
@@ -146,7 +213,7 @@ function validateAnalysis(value: unknown): TaskAnalysis {
   const expectedKeys = ["acceptanceCriteria", "budget", "category", "deliverables", "deliveryDays", "depth", "risk", "summary", "tags", "title"];
   if (Object.keys(analysis).sort().join("|") !== expectedKeys.join("|")) throw new InvalidTaskAnalysisResponseError("analysis has unexpected fields");
   const category = boundedString(analysis.category, 1, 100);
-  if (!categories.includes(category)) throw new InvalidTaskAnalysisResponseError("invalid analysis category");
+  if (!categories.includes(category as TaskCategory)) throw new InvalidTaskAnalysisResponseError("invalid analysis category");
   return {
     title: boundedString(analysis.title, 1, 200),
     summary: boundedString(analysis.summary, 1, 5_000),

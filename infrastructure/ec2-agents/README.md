@@ -1,15 +1,25 @@
 # Agent deployment on EC2 with Cloudflare Tunnel
 
-This deployment runs the three visual Agents as long-lived containers on one
+This deployment runs the five visual Agents as long-lived containers on one
 Ubuntu EC2 instance. The Agents are not assigned public ports. A remotely
 managed Cloudflare Tunnel publishes one hostname per container over the shared
 Docker network.
+
+For the image-generation-only rollout, use `compose.three-agents.yaml`,
+`deploy-three-agents.sh`, and `agent-platform-three-agents.service.example`.
+That variant starts only Image Generator, Qwen UI Prototype, Seedream Visual
+Design, and their shared locally-managed Cloudflare Tunnel connector. Its
+credential JSON is stored base64-encoded as
+`CLOUDFLARE_TUNNEL_CREDENTIALS_BASE64` in AWS Secrets Manager; the decoded
+credential exists only in the host's memory-backed secret directory.
 
 ## URL contract
 
 The platform stores a clean protocol base URL with no path:
 
 - `https://image-agent.example.com`
+- `https://qwen-ui-agent.example.com`
+- `https://seedream-agent.example.com`
 - `https://glm-code-agent.example.com`
 - `https://qwen-code-agent.example.com`
 
@@ -36,12 +46,14 @@ their official Ubuntu installation instructions. Add the deployment user to the
 
 ## 2. Create the Cloudflare Tunnel
 
-In Cloudflare Zero Trust, create one remotely managed Tunnel and add three
+In Cloudflare Zero Trust, create one remotely managed Tunnel and add five
 published application routes:
 
 | Public hostname | Tunnel service |
 | --- | --- |
 | `image-agent.example.com` | `http://image-generator:8092` |
+| `qwen-ui-agent.example.com` | `http://qwen-ui-prototype:8095` |
+| `seedream-agent.example.com` | `http://seedream-visual-design:8096` |
 | `glm-code-agent.example.com` | `http://glm-image-to-code:8093` |
 | `qwen-code-agent.example.com` | `http://qwen-image-to-code:8094` |
 
@@ -52,7 +64,7 @@ Tunnel token for the next step; never commit or paste it into Compose YAML.
 
 ## 3. Store deployment secrets
 
-Create three unique API tokens and three independent 32-byte callback keys:
+Create five unique API tokens and five independent 32-byte callback keys:
 
 ```bash
 openssl rand -hex 32
@@ -61,7 +73,7 @@ openssl rand -base64 32
 
 Use [secrets.example.json](./secrets.example.json) as the schema for one AWS
 Secrets Manager JSON secret. Create or edit the secret through a protected
-console/session so secret values do not enter shell history. The three
+console/session so secret values do not enter shell history. The five
 `*_PUBLIC_BASE_URL` values must be the exact Cloudflare origins above, without
 `/health` or a trailing path.
 
@@ -116,6 +128,8 @@ Wait until the Tunnel reports healthy, then verify from outside the EC2 host:
 
 ```bash
 curl --fail --show-error https://image-agent.example.com/health
+curl --fail --show-error https://qwen-ui-agent.example.com/health
+curl --fail --show-error https://seedream-agent.example.com/health
 curl --fail --show-error https://glm-code-agent.example.com/health
 curl --fail --show-error https://qwen-code-agent.example.com/health
 ```
@@ -123,9 +137,14 @@ curl --fail --show-error https://qwen-code-agent.example.com/health
 Each response must include `"status":"healthy"` and
 `"protocolVersion":"1"`, without a redirect. In the platform onboarding form,
 enter the base URL without `/health`, choose Bearer Token, use the matching
-`*_API_TOKEN`, and set maximum concurrency to `1` initially.
+`*_API_TOKEN`, and set maximum concurrency to `1` initially. Use matching
+category, language and capability labels for all design Agents so they pass the
+same hard filters. The default fair-shuffle policy selects at most one Agent per
+Provider, so use at least two genuine Provider identities if one recommendation
+must contain two of these Agents; do not weaken that anti-concentration rule for
+test data.
 
-After onboarding assigns the three Agent IDs, configure Engine's server-only
+After onboarding assigns the five Agent IDs, configure Engine's server-only
 `ENGINE_AGENT_RUNTIME_CREDENTIALS_JSON` secret with the same per-Agent Bearer
 tokens, callback keys and callback key versions:
 
@@ -140,7 +159,9 @@ tokens, callback keys and callback key versions:
 ```
 
 Use `glm-image-to-code-callback-v1` and `qwen-image-to-code-callback-v1` for the
-other two Agents. Do not store this JSON in PostgreSQL or commit it.
+image-to-code Agents, `qwen-ui-prototype-callback-v1` for Qwen UI Prototype,
+and `seedream-visual-design-callback-v1` for Seedream Visual Design. Do not
+store this JSON in PostgreSQL or commit it.
 
 ## Operational limits
 

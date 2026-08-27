@@ -21,6 +21,25 @@ func NewStore(db *sql.DB) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+func (s *Store) CurrentProtocolBundles(ctx context.Context) ([]credential.ProtocolBundleRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT version.agent_id,agent.owner_id,version.credential_type,version.ciphertext,version.nonce,version.wrapped_data_key,version.key_nonce,version.encryption_algorithm,version.key_wrap_algorithm,version.key_reference,version.fingerprint
+FROM agents agent JOIN agent_credential_versions version ON version.agent_id=agent.agent_id AND version.version_no=agent.current_credential_version
+WHERE version.credential_type='protocol_bundle' ORDER BY version.agent_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []credential.ProtocolBundleRecord{}
+	for rows.Next() {
+		var value credential.ProtocolBundleRecord
+		if err = rows.Scan(&value.AgentID, &value.OwnerID, &value.CredentialType, &value.Envelope.Ciphertext, &value.Envelope.Nonce, &value.Envelope.WrappedDataKey, &value.Envelope.KeyNonce, &value.Envelope.Algorithm, &value.Envelope.KeyWrapAlgorithm, &value.Envelope.KeyReference, &value.Envelope.Fingerprint); err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) Rotate(ctx context.Context, mutation credential.Mutation, agentID string, input credential.StoreInput, envelope credential.Envelope) (result credential.Metadata, replay bool, err error) {
 	body, replay, err := s.execute(ctx, mutation, "agent-credentials.rotate:"+mutation.ActorID+":"+agentID, func(tx *sql.Tx) (any, error) {
 		var ownerID, status string

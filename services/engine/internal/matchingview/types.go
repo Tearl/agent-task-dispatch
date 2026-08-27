@@ -15,10 +15,11 @@ var (
 )
 
 type Task struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Status   string `json:"status"`
-	SpecHash string `json:"specHash"`
+	ID              string `json:"id"`
+	Title           string `json:"title"`
+	Status          string `json:"status"`
+	SpecHash        string `json:"specHash"`
+	DeletionPending bool   `json:"deletionPending"`
 }
 
 type Score struct {

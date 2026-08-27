@@ -37,7 +37,7 @@ func (s *Store) Create(ctx context.Context, mutation enginetask.Mutation, input 
 		if err != nil {
 			return nil, err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO tasks (task_id,publisher_id,status,title,description,expert_type,language,overview_budget,formal_budget,external_cost_cap,deadline,inputs,allowed_tools,exclusions,delivery_format,draft_acceptance,created_at,updated_at) VALUES ($1,$2,'draft',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)`, id, mutation.ActorID, input.Title, input.Description, input.ExpertType, input.Language, input.OverviewBudget, input.FormalBudget, input.ExternalCostCap, input.Deadline, pq.Array(nonNil(input.Inputs)), pq.Array(nonNil(input.AllowedTools)), pq.Array(nonNil(input.Exclusions)), input.DeliveryFormat, string(criteria), databaseNow)
+		_, err = tx.ExecContext(ctx, `INSERT INTO tasks (task_id,publisher_id,status,title,description,expert_type,tags,language,overview_budget,formal_budget,external_cost_cap,deadline,inputs,allowed_tools,exclusions,delivery_format,draft_acceptance,created_at,updated_at) VALUES ($1,$2,'draft',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$17)`, id, mutation.ActorID, input.Title, input.Description, input.ExpertType, pq.Array(nonNil(input.Tags)), input.Language, input.OverviewBudget, input.FormalBudget, input.ExternalCostCap, input.Deadline, pq.Array(nonNil(input.Inputs)), pq.Array(nonNil(input.AllowedTools)), pq.Array(nonNil(input.Exclusions)), input.DeliveryFormat, string(criteria), databaseNow)
 		if err != nil {
 			return nil, fmt.Errorf("create task draft: %w", err)
 		}
@@ -79,7 +79,7 @@ func (s *Store) UpdateDraft(ctx context.Context, mutation enginetask.Mutation, i
 		if err != nil {
 			return nil, err
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE tasks SET title=$1,description=$2,expert_type=$3,language=$4,overview_budget=$5,formal_budget=$6,external_cost_cap=$7,deadline=$8,inputs=$9,allowed_tools=$10,exclusions=$11,delivery_format=$12,draft_acceptance=$13,aggregate_version=aggregate_version+1,updated_at=$14 WHERE task_id=$15`, input.Title, input.Description, input.ExpertType, input.Language, input.OverviewBudget, input.FormalBudget, input.ExternalCostCap, input.Deadline, pq.Array(nonNil(input.Inputs)), pq.Array(nonNil(input.AllowedTools)), pq.Array(nonNil(input.Exclusions)), input.DeliveryFormat, string(criteria), databaseNow, id)
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET title=$1,description=$2,expert_type=$3,tags=$4,language=$5,overview_budget=$6,formal_budget=$7,external_cost_cap=$8,deadline=$9,inputs=$10,allowed_tools=$11,exclusions=$12,delivery_format=$13,draft_acceptance=$14,aggregate_version=aggregate_version+1,updated_at=$15 WHERE task_id=$16`, input.Title, input.Description, input.ExpertType, pq.Array(nonNil(input.Tags)), input.Language, input.OverviewBudget, input.FormalBudget, input.ExternalCostCap, input.Deadline, pq.Array(nonNil(input.Inputs)), pq.Array(nonNil(input.AllowedTools)), pq.Array(nonNil(input.Exclusions)), input.DeliveryFormat, string(criteria), databaseNow, id)
 		if err != nil {
 			return nil, fmt.Errorf("update task draft: %w", err)
 		}
@@ -126,7 +126,7 @@ func (s *Store) Publish(ctx context.Context, mutation enginetask.Mutation, id st
 		if err != nil {
 			return nil, err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO task_spec_versions (task_id,version_no,task_aggregate_version,content_hash,title,description,expert_type,language,overview_budget,formal_budget,external_cost_cap,deadline,inputs,allowed_tools,exclusions,delivery_format,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, id, version, spec.TaskAggregateVersion, spec.ContentHash, spec.Title, spec.Description, spec.ExpertType, spec.Language, spec.OverviewBudget, spec.FormalBudget, spec.ExternalCostCap, spec.Deadline, pq.Array(nonNil(spec.Inputs)), pq.Array(nonNil(spec.AllowedTools)), pq.Array(nonNil(spec.Exclusions)), spec.DeliveryFormat, databaseNow)
+		_, err = tx.ExecContext(ctx, `INSERT INTO task_spec_versions (task_id,version_no,task_aggregate_version,content_hash,title,description,expert_type,tags,language,overview_budget,formal_budget,external_cost_cap,deadline,inputs,allowed_tools,exclusions,delivery_format,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`, id, version, spec.TaskAggregateVersion, spec.ContentHash, spec.Title, spec.Description, spec.ExpertType, pq.Array(nonNil(spec.Tags)), spec.Language, spec.OverviewBudget, spec.FormalBudget, spec.ExternalCostCap, spec.Deadline, pq.Array(nonNil(spec.Inputs)), pq.Array(nonNil(spec.AllowedTools)), pq.Array(nonNil(spec.Exclusions)), spec.DeliveryFormat, databaseNow)
 		if err != nil {
 			return nil, fmt.Errorf("freeze task spec: %w", err)
 		}
@@ -161,8 +161,70 @@ func (s *Store) Publish(ctx context.Context, mutation enginetask.Mutation, id st
 	return result, replay, err
 }
 
+func (s *Store) RequestDelete(ctx context.Context, mutation enginetask.Mutation, id string, input enginetask.DeleteInput) (result enginetask.DeleteResult, replay bool, err error) {
+	body, replay, err := s.execute(ctx, mutation, "tasks.delete:"+mutation.ActorID+":"+id, func(tx *sql.Tx) (any, error) {
+		current, err := loadOwned(ctx, tx, mutation.ActorID, id, input.ExpectedVersion)
+		if err != nil {
+			return nil, err
+		}
+		allowed := map[string]bool{"draft": true, "pending_escrow": true, "escrowed": true, "matching": true, "overview_generating": true, "awaiting_selection": true}
+		if !allowed[current.Status] {
+			return nil, enginetask.ErrInvalidState
+		}
+		databaseNow, err := databaseTime(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		var chainID, contract, chainTaskID, wallet, fundingStatus string
+		fundingErr := tx.QueryRowContext(ctx, `SELECT chain_id,contract_address,chain_task_id,publisher_wallet,status FROM task_funding_intents WHERE task_id=$1`, id).Scan(&chainID, &contract, &chainTaskID, &wallet, &fundingStatus)
+		if fundingErr != nil && !errors.Is(fundingErr, sql.ErrNoRows) {
+			return nil, fundingErr
+		}
+		funded := current.Status != "draft" && current.Status != "pending_escrow" || fundingStatus == "confirmed"
+		if fundingStatus == "submitted" && current.Status == "pending_escrow" {
+			return nil, enginetask.ErrInvalidState
+		}
+		change := mutation
+		change.Now = databaseNow
+		if funded {
+			if chainID == "" || contract == "" || chainTaskID == "" || wallet == "" {
+				return nil, enginetask.ErrInvalidState
+			}
+			_, err = tx.ExecContext(ctx, `UPDATE tasks SET deletion_requested_at=COALESCE(deletion_requested_at,$1),aggregate_version=aggregate_version+1,updated_at=$1 WHERE task_id=$2`, databaseNow, id)
+			if err != nil {
+				return nil, err
+			}
+			updated, loadErr := scanTask(tx.QueryRowContext(ctx, taskSelect+` WHERE task_id=$1`, id))
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			if err = recordChange(ctx, tx, change, updated, "task.deletion_requested"); err != nil {
+				return nil, err
+			}
+			return enginetask.DeleteResult{TaskID: id, Status: updated.Status, RefundRequired: true, ChainID: chainID, ContractAddress: contract, ChainTaskID: chainTaskID, PublisherWallet: wallet}, nil
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET status='cancelled',deletion_requested_at=COALESCE(deletion_requested_at,$1),deleted_at=$1,aggregate_version=aggregate_version+1,updated_at=$1 WHERE task_id=$2`, databaseNow, id)
+		if err != nil {
+			return nil, err
+		}
+		updated, loadErr := scanTask(tx.QueryRowContext(ctx, taskSelect+` WHERE task_id=$1`, id))
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		if err = recordChange(ctx, tx, change, updated, "task.deleted"); err != nil {
+			return nil, err
+		}
+		return enginetask.DeleteResult{TaskID: id, Status: updated.Status}, nil
+	})
+	if err != nil {
+		return result, false, err
+	}
+	err = json.Unmarshal(body, &result)
+	return result, replay, err
+}
+
 func (s *Store) Get(ctx context.Context, publisherID, id string) (enginetask.Task, error) {
-	result, err := scanTask(s.db.QueryRowContext(ctx, taskSelect+` WHERE task_id=$1 AND publisher_id=$2`, id, publisherID))
+	result, err := scanTask(s.db.QueryRowContext(ctx, taskSelect+` WHERE task_id=$1 AND publisher_id=$2 AND deleted_at IS NULL`, id, publisherID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, enginetask.ErrNotFound
 	}
@@ -171,7 +233,7 @@ func (s *Store) Get(ctx context.Context, publisherID, id string) (enginetask.Tas
 
 func (s *Store) GetForActions(ctx context.Context, publisherID, id string) (enginetask.Task, time.Time, error) {
 	var databaseNow time.Time
-	result, err := scanTaskWithTime(s.db.QueryRowContext(ctx, taskSelectWithTime+` WHERE task_id=$1 AND publisher_id=$2`, id, publisherID), &databaseNow)
+	result, err := scanTaskWithTime(s.db.QueryRowContext(ctx, taskSelectWithTime+` WHERE task_id=$1 AND publisher_id=$2 AND deleted_at IS NULL`, id, publisherID), &databaseNow)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, databaseNow, enginetask.ErrNotFound
 	}
@@ -284,7 +346,7 @@ func databaseTime(ctx context.Context, tx *sql.Tx) (time.Time, error) {
 	return now, nil
 }
 
-const taskColumns = `task_id,publisher_id,status,title,description,expert_type,language,overview_budget::text,formal_budget::text,external_cost_cap::text,deadline,inputs,allowed_tools,exclusions,delivery_format,draft_acceptance,aggregate_version,current_spec_version,current_acceptance_version,published_at,created_at,updated_at`
+const taskColumns = `task_id,publisher_id,status,title,description,expert_type,tags,language,overview_budget::text,formal_budget::text,external_cost_cap::text,deadline,inputs,allowed_tools,exclusions,delivery_format,draft_acceptance,aggregate_version,current_spec_version,current_acceptance_version,published_at,created_at,updated_at`
 const taskSelect = `SELECT ` + taskColumns + ` FROM tasks`
 const taskSelectWithTime = `SELECT ` + taskColumns + `,clock_timestamp() FROM tasks`
 
@@ -295,11 +357,11 @@ func scanTask(row scanner) (value enginetask.Task, err error) {
 }
 
 func scanTaskWithTime(row scanner, databaseNow *time.Time) (value enginetask.Task, err error) {
-	var inputs, tools, exclusions pq.StringArray
+	var tags, inputs, tools, exclusions pq.StringArray
 	var criteria []byte
 	var specVersion, acceptanceVersion sql.NullInt64
 	var publishedAt sql.NullTime
-	destinations := []any{&value.ID, &value.PublisherID, &value.Status, &value.Title, &value.Description, &value.ExpertType, &value.Language, &value.OverviewBudget, &value.FormalBudget, &value.ExternalCostCap, &value.Deadline, &inputs, &tools, &exclusions, &value.DeliveryFormat, &criteria, &value.AggregateVersion, &specVersion, &acceptanceVersion, &publishedAt, &value.CreatedAt, &value.UpdatedAt}
+	destinations := []any{&value.ID, &value.PublisherID, &value.Status, &value.Title, &value.Description, &value.ExpertType, &tags, &value.Language, &value.OverviewBudget, &value.FormalBudget, &value.ExternalCostCap, &value.Deadline, &inputs, &tools, &exclusions, &value.DeliveryFormat, &criteria, &value.AggregateVersion, &specVersion, &acceptanceVersion, &publishedAt, &value.CreatedAt, &value.UpdatedAt}
 	if databaseNow != nil {
 		destinations = append(destinations, databaseNow)
 	}
@@ -308,6 +370,7 @@ func scanTaskWithTime(row scanner, databaseNow *time.Time) (value enginetask.Tas
 		return value, err
 	}
 	value.Inputs = []string(inputs)
+	value.Tags = []string(tags)
 	value.AllowedTools = []string(tools)
 	value.Exclusions = []string(exclusions)
 	if err = json.Unmarshal(criteria, &value.AcceptanceCriteria); err != nil {

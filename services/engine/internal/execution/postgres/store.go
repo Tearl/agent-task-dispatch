@@ -335,7 +335,7 @@ func (store *Store) RecordUsage(ctx context.Context, logicalExecutionID string, 
 	if compareNumeric(usedCost, value.UsedCost) < 0 {
 		return execution.Execution{}, false, execution.ErrInvalidInput
 	}
-	shouldStop := compareNumeric(usedCost, value.Spec.CostCap) >= 0
+	shouldStop := compareNumeric(usedCost, value.Spec.CostCap) > 0
 	storedCost := usedCost
 	if shouldStop {
 		storedCost = value.Spec.CostCap
@@ -465,6 +465,128 @@ func (store *Store) ApplyCallback(ctx context.Context, verified execution.Verifi
 		return execution.CallbackResult{}, err
 	}
 	return result, nil
+}
+
+func (store *Store) ApplyTerminalObservation(ctx context.Context, verified execution.VerifiedTerminalObservation) (execution.ReconciliationResult, error) {
+	observation := verified.Observation
+	if !validDigest(verified.PayloadHash) || observation.LogicalExecutionID == "" || observation.AttemptID == "" || observation.AgentID == "" || observation.FencingToken < 1 || invalidMoney(observation.UsedCost) ||
+		(observation.Status != execution.ExecutionSucceeded && observation.Status != execution.ExecutionFailed && observation.Status != execution.ExecutionCancelled) ||
+		(observation.Status == execution.ExecutionSucceeded && (!validDigest(observation.ContentHash) || observation.DeliverableRef == "")) ||
+		(observation.Status != execution.ExecutionSucceeded && (observation.ContentHash != "" || observation.DeliverableRef != "")) {
+		return execution.ReconciliationResult{}, execution.ErrInvalidInput
+	}
+	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return execution.ReconciliationResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "execution-poll:"+observation.AttemptID); err != nil {
+		return execution.ReconciliationResult{}, err
+	}
+	var previousHash string
+	var previousBody []byte
+	err = tx.QueryRowContext(ctx, `SELECT payload_hash,result_body FROM execution_poll_reconciliations WHERE attempt_id=$1`, observation.AttemptID).Scan(&previousHash, &previousBody)
+	if err == nil {
+		if previousHash != verified.PayloadHash {
+			return execution.ReconciliationResult{}, execution.ErrContentConflict
+		}
+		var previous execution.ReconciliationResult
+		if err = json.Unmarshal(previousBody, &previous); err != nil {
+			return execution.ReconciliationResult{}, err
+		}
+		previous.Replay = true
+		if err = tx.Commit(); err != nil {
+			return execution.ReconciliationResult{}, err
+		}
+		return previous, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return execution.ReconciliationResult{}, err
+	}
+	value, observedAt, err := loadExecution(ctx, tx, observation.LogicalExecutionID)
+	if err != nil {
+		return execution.ReconciliationResult{}, err
+	}
+	attempt, err := scanAttempt(tx.QueryRowContext(ctx, attemptSelect+` WHERE logical_execution_id=$1 AND attempt_id=$2 FOR UPDATE`, observation.LogicalExecutionID, observation.AttemptID))
+	if errors.Is(err, sql.ErrNoRows) || observation.AgentID != value.Spec.AgentID {
+		return execution.ReconciliationResult{}, execution.ErrInvalidInput
+	}
+	if err != nil {
+		return execution.ReconciliationResult{}, err
+	}
+	result := execution.ReconciliationResult{Execution: value, Outcome: execution.ReconciliationAccepted}
+	if attempt.FencingToken != observation.FencingToken || value.CurrentAttempt != attempt.Number {
+		result.Outcome = execution.ReconciliationStaleFence
+	} else if terminalStatus(value.Status) || attempt.Status != execution.AttemptActive {
+		if !pollObservationMatches(observation, value) {
+			return execution.ReconciliationResult{}, execution.ErrContentConflict
+		}
+		result.Outcome = execution.ReconciliationAlreadyTerminal
+	} else if value.Status == execution.ExecutionCancelRequested {
+		result.Outcome = execution.ReconciliationLate
+	} else if compareNumeric(observation.UsedCost, value.UsedCost) < 0 {
+		return execution.ReconciliationResult{}, execution.ErrInvalidInput
+	} else {
+		value.UsedCost = observation.UsedCost
+		value.UpdatedAt = observedAt
+		attempt.UpdatedAt = observedAt
+		attempt.TerminalAt = &observedAt
+		failureReason := any(nil)
+		if compareNumeric(observation.UsedCost, value.Spec.CostCap) > 0 {
+			value.UsedCost = value.Spec.CostCap
+			value.Status = execution.ExecutionCostStopped
+			attempt.Status = execution.AttemptFailed
+			failureReason = "cost_cap_reached"
+			result.Outcome = execution.ReconciliationCostStop
+			result.ShouldCancel = true
+		} else if observation.Status == execution.ExecutionSucceeded {
+			value.Status = execution.ExecutionSucceeded
+			value.ContentHash = observation.ContentHash
+			value.DeliverableRef = observation.DeliverableRef
+			attempt.Status = execution.AttemptCompleted
+		} else {
+			value.Status = execution.ExecutionFailed
+			attempt.Status = execution.AttemptFailed
+			failureReason = "agent_terminal_status_polled"
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE execution_attempts SET status=$1,failure_reason=$2,terminal_at=$3,updated_at=$3 WHERE logical_execution_id=$4 AND attempt_no=$5`, attempt.Status, failureReason, observedAt, observation.LogicalExecutionID, attempt.Number); err != nil {
+			return execution.ReconciliationResult{}, err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE logical_executions SET status=$1,used_cost=$2,content_hash=$3,deliverable_ref=$4,updated_at=$5 WHERE logical_execution_id=$6`, value.Status, value.UsedCost, nullString(value.ContentHash), nullString(value.DeliverableRef), observedAt, observation.LogicalExecutionID); err != nil {
+			return execution.ReconciliationResult{}, err
+		}
+		result.Execution = value
+	}
+	resultBody, err := json.Marshal(result)
+	if err != nil {
+		return execution.ReconciliationResult{}, err
+	}
+	eventID := digest("poll-reconciliation:" + observation.AttemptID)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO execution_poll_reconciliations (reconciliation_event_id,logical_execution_id,attempt_id,agent_id,fencing_token,payload_hash,observed_status,used_cost,content_hash,deliverable_ref,outcome,result_body,observed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, eventID, observation.LogicalExecutionID, observation.AttemptID, observation.AgentID, observation.FencingToken, verified.PayloadHash, observation.Status, observation.UsedCost, nullString(observation.ContentHash), nullString(observation.DeliverableRef), result.Outcome, string(resultBody), observedAt); err != nil {
+		return execution.ReconciliationResult{}, err
+	}
+	auditMetadata, err := json.Marshal(map[string]any{"attemptId": observation.AttemptID, "fencingToken": observation.FencingToken, "observedStatus": observation.Status, "usedCost": observation.UsedCost, "payloadHash": verified.PayloadHash, "outcome": result.Outcome})
+	if err != nil {
+		return execution.ReconciliationResult{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events (event_id,actor_id,action,resource_type,resource_id,metadata,occurred_at) VALUES ($1,NULL,$2,'logical_execution',$3,$4,$5)`, digest("audit:poll-reconciliation:"+observation.AttemptID), "execution.poll_reconciliation."+result.Outcome, observation.LogicalExecutionID, string(auditMetadata), observedAt); err != nil {
+		return execution.ReconciliationResult{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return execution.ReconciliationResult{}, err
+	}
+	return result, nil
+}
+
+func terminalStatus(status string) bool {
+	return status == execution.ExecutionSucceeded || status == execution.ExecutionFailed || status == execution.ExecutionCancelled || status == execution.ExecutionCostStopped
+}
+
+func pollObservationMatches(observation execution.TerminalObservation, value execution.Execution) bool {
+	if observation.Status == execution.ExecutionSucceeded {
+		return value.Status == execution.ExecutionSucceeded && value.ContentHash == observation.ContentHash && value.DeliverableRef == observation.DeliverableRef && value.UsedCost == observation.UsedCost
+	}
+	return (observation.Status == execution.ExecutionFailed || observation.Status == execution.ExecutionCancelled) && value.Status == execution.ExecutionFailed && value.UsedCost == observation.UsedCost
 }
 
 func loadExecution(ctx context.Context, tx *sql.Tx, logicalExecutionID string) (execution.Execution, time.Time, error) {

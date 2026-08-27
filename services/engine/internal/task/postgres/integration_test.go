@@ -86,7 +86,7 @@ func TestPostgresTaskPublicationOwnershipHashesConcurrencyAndRedelivery(t *testi
 		t.Fatalf("expired publish: %v", err)
 	}
 	expiredActions, err := service.AvailableActions(ctx, owner, expiredTaskID)
-	if err != nil || len(expiredActions.Actions) != 2 || !expiredActions.Actions[0].Allowed || expiredActions.Actions[1].Allowed || len(expiredActions.Actions[1].Reasons) != 1 || expiredActions.Actions[1].Reasons[0].Code != "deadline_expired" {
+	if err != nil || len(expiredActions.Actions) != 3 || !expiredActions.Actions[0].Allowed || expiredActions.Actions[1].Allowed || len(expiredActions.Actions[1].Reasons) != 1 || expiredActions.Actions[1].Reasons[0].Code != "deadline_expired" || !expiredActions.Actions[2].Allowed {
 		t.Fatalf("expired available actions: %#v err=%v", expiredActions, err)
 	}
 	assertCount(t, db, `SELECT count(*) FROM task_spec_versions WHERE task_id=$1`, expiredTaskID, 0)
@@ -95,7 +95,7 @@ func TestPostgresTaskPublicationOwnershipHashesConcurrencyAndRedelivery(t *testi
 		t.Fatalf("create: value=%#v replay=%v err=%v", created, replay, err)
 	}
 	draftActions, err := service.AvailableActions(ctx, owner, created.ID)
-	if err != nil || len(draftActions.Actions) != 2 || !draftActions.Actions[0].Allowed || !draftActions.Actions[1].Allowed {
+	if err != nil || len(draftActions.Actions) != 3 || !draftActions.Actions[0].Allowed || !draftActions.Actions[1].Allowed || !draftActions.Actions[2].Allowed {
 		t.Fatalf("draft available actions: %#v err=%v", draftActions, err)
 	}
 	if _, err = service.AvailableActions(ctx, other, created.ID); !errors.Is(err, enginetask.ErrNotFound) {
@@ -147,7 +147,7 @@ func TestPostgresTaskPublicationOwnershipHashesConcurrencyAndRedelivery(t *testi
 		t.Fatalf("invalid publication: %#v", publication)
 	}
 	publishedActions, err := service.AvailableActions(ctx, owner, created.ID)
-	if err != nil || len(publishedActions.Actions) != 2 || publishedActions.Actions[0].Allowed || len(publishedActions.Actions[0].Reasons) != 1 || publishedActions.Actions[0].Reasons[0].Code != "task_not_draft" {
+	if err != nil || len(publishedActions.Actions) != 3 || publishedActions.Actions[0].Allowed || len(publishedActions.Actions[0].Reasons) != 1 || publishedActions.Actions[0].Reasons[0].Code != "task_not_draft" || !publishedActions.Actions[2].Allowed {
 		t.Fatalf("published available actions: %#v err=%v", publishedActions, err)
 	}
 	publishedView, err := service.View(ctx, owner, created.ID)

@@ -63,7 +63,7 @@ test("matching aggregation reads one sealed view and preserves degradation evide
   let target = "";
   const result = await aggregateEngineMatching("task-1", "session", { engineBaseUrl: "http://engine", fetch: async (input) => {
     target = String(input);
-    return Response.json({ asOf: "2026-08-22T00:00:00Z", task: { id: "task-1", title: "Task", status: "awaiting_selection", specHash: "sha256:x" }, snapshot: { id: "sha256:s", revision: 2, algorithmVersion: "fair-shuffle-v1", ruleVersion: "v1", modelVersion: "fallback", seedDigest: "sha256:d", degradations: [{ dependency: "dense", code: "recall_unavailable", message: "fallback" }], candidates: [{ agentId: "agent-1", name: "Agent", category: "research", tags: ["web"], position: 1, exploration: false, overviewPrice: "10", formalPrice: "100", externalCostCap: "0", score: { taskMatch: 50, reputation: 20, priceTime: 10, availability: 5, rule: 85, modelDelta: 0, ranking: 85 } }] } });
+    return Response.json({ asOf: "2026-08-22T00:00:00Z", task: { id: "task-1", title: "Task", status: "awaiting_selection", specHash: "sha256:x", deletionPending: false }, snapshot: { id: "sha256:s", revision: 2, algorithmVersion: "category-tags-v1", ruleVersion: "v1", modelVersion: "not-used", seedDigest: "sha256:d", degradations: [{ dependency: "dense", code: "recall_unavailable", message: "fallback" }], candidates: [{ agentId: "agent-1", name: "Agent", category: "research", tags: ["web"], position: 1, exploration: false, overviewPrice: "10", formalPrice: "100", externalCostCap: "0", score: { taskMatch: 50, reputation: 20, priceTime: 10, availability: 5, rule: 85, modelDelta: 0, ranking: 85 } }] } });
   }});
   assert.equal(target, "http://engine/v1/tasks/task-1/matching-view");
   assert.equal(((result.body.snapshot as { degradations: unknown[] }).degradations).length, 1);
@@ -161,6 +161,14 @@ test("protected mutations forward session and idempotency without exposing secre
   assert.deepEqual(calls, [{ url: "http://engine.internal:8080/v1/agents/agent-1/credentials", authorization: "Bearer session-secret", idempotencyKey: "operation-1", body: '{"secret":"never-log"}' }]);
   assert.deepEqual(result, { status: 201, body: { agentId: "agent-1", version: 1, fingerprint: "safe" } });
   await assert.rejects(() => forwardEngineMutation({ path: "/v1/agents/../admin", body: "{}", idempotencyKey: "x", sessionToken: "session" }), InvalidResourceIdError);
+});
+
+test("Agent profile updates use PUT and remain restricted to the profile path", async () => {
+  let method = "";
+  const result = await forwardEngineMutation({ path: "/v1/agents/agent-1/profile", body: "{}", idempotencyKey: "profile-op", sessionToken: "session", method: "PUT" }, { engineBaseUrl: "http://engine", fetch: async (_input, init) => { method = init?.method ?? ""; return Response.json({ id: "agent-1", aggregateVersion: 2 }); } });
+  assert.equal(method, "PUT");
+  assert.equal(result.body.id, "agent-1");
+  await assert.rejects(() => forwardEngineMutation({ path: "/v1/agents/agent-1/private", body: "{}", idempotencyKey: "x", sessionToken: "session", method: "PUT" }), InvalidResourceIdError);
 });
 
 test("public environment and browser source cannot select or call the internal Engine", async () => {

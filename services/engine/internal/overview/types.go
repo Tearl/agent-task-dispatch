@@ -80,8 +80,9 @@ type AllocationRequest struct {
 }
 
 type Allocation struct {
-	ID      string
-	CostCap string
+	ID       string
+	CostCap  string
+	Deadline time.Time
 }
 
 type BillingClaim struct {
@@ -126,6 +127,7 @@ type ExecutionGateway interface {
 	Create(context.Context, execution.Spec) (execution.Execution, bool, error)
 	Dispatch(context.Context, string) (execution.Execution, execution.Attempt, bool, error)
 	Get(context.Context, string) (execution.Execution, error)
+	Poll(context.Context, string) (execution.StatusResponse, error)
 	Deliverable(context.Context, string) (execution.DeliverableResponse, error)
 	Cancel(context.Context, string) (execution.Execution, error)
 }

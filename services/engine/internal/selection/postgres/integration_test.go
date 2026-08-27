@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -118,6 +119,18 @@ func TestPostgresSelectionReservationConfirmationAndReplay(t *testing.T) {
 	}
 	if replayed, isReplay, replayErr := service.Reserve(ctx, session, "selection-key", "task-selection", selection.Request{BatchID: batchID, SlotID: slotID}); replayErr != nil || !isReplay || replayed != intent {
 		t.Fatalf("reserve replay: %#v replay=%v err=%v", replayed, isReplay, replayErr)
+	}
+	if _, err = db.ExecContext(ctx, `UPDATE tasks SET deletion_requested_at=clock_timestamp() WHERE task_id='task-selection'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, isReplay, replayErr := service.Reserve(ctx, session, "selection-key", "task-selection", selection.Request{BatchID: batchID, SlotID: slotID}); !errors.Is(replayErr, selection.ErrInvalidState) || isReplay {
+		t.Fatalf("deletion-pending task replayed selection: replay=%v err=%v", isReplay, replayErr)
+	}
+	if _, readErr := service.Get(ctx, session, "task-selection", intent.Reservation.ID); !errors.Is(readErr, selection.ErrInvalidState) {
+		t.Fatalf("deletion-pending task exposed selection signature: %v", readErr)
+	}
+	if _, err = db.ExecContext(ctx, `UPDATE tasks SET deletion_requested_at=NULL WHERE task_id='task-selection'`); err != nil {
+		t.Fatal(err)
 	}
 	txHash := "0x" + fmt.Sprintf("%064x", 205)
 	chain.result = selection.ChainResult{Status: selection.ChainConfirmed, TransactionHash: txHash, BlockNumber: 12, LogIndex: 3, Proof: intent.Reservation.Proof, FormalPayable: "90", WorkNonce: 1}

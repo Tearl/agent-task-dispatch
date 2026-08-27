@@ -76,3 +76,21 @@ func TestDecodeRuntimeCredentialsJSONIsStrictAndDecodesCallbackKey(t *testing.T)
 		}
 	}
 }
+
+func TestRuntimeCredentialProviderAcceptsProtocolBundleHotUpdates(t *testing.T) {
+	provider, err := NewRuntimeCredentialProvider(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := []byte(`{"bearerToken":"hot-token","callbackKeyBase64":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=","callbackKeyVersion":"hot-v1"}`)
+	if err = provider.ValidateProtocolBundle("agent-hot", bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err = provider.UpdateProtocolBundle("agent-hot", bundle); err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(http.MethodPost, "https://agent.example/v1/executions", nil)
+	if err = provider.Authorize(context.Background(), request, []byte(`{"agentId":"agent-hot"}`)); err != nil || request.Header.Get("authorization") != "Bearer hot-token" {
+		t.Fatalf("hot credential was not used: header=%q err=%v", request.Header.Get("authorization"), err)
+	}
+}

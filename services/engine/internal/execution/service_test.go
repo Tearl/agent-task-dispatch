@@ -221,13 +221,59 @@ func TestExpiredAttemptRejectsOldFenceAndCostCapStopsActiveAttempt(t *testing.T)
 	if err != nil || result.Outcome != CallbackStaleFence {
 		t.Fatalf("old fence callback was accepted: %#v err=%v", result, err)
 	}
-	client.statusResponse = StatusResponse{Status: ExecutionRunning, UsedCost: "100"}
+	client.statusResponse = StatusResponse{Status: ExecutionRunning, UsedCost: "101"}
 	if _, err = service.Poll(context.Background(), "execution-1"); !errors.Is(err, ErrCostCapExceeded) {
 		t.Fatalf("cost cap did not stop execution: %v", err)
 	}
 	stopped, _ := repository.Get(context.Background(), "execution-1")
 	if stopped.Status != ExecutionCostStopped || len(client.cancelCalls) != 1 || len(leaser.releases) < 1 {
 		t.Fatalf("cost stop incomplete: execution=%#v cancelCalls=%d releases=%d", stopped, len(client.cancelCalls), len(leaser.releases))
+	}
+}
+
+func TestPollReconcilesTerminalExecutionWhenCallbackWasNotDelivered(t *testing.T) {
+	service, repository, leaser, client, _, _ := executionFixture(t)
+	if _, _, err := service.Create(context.Background(), validOverviewSpec()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := service.Dispatch(context.Background(), "execution-1"); err != nil {
+		t.Fatal(err)
+	}
+	client.statusResponse = StatusResponse{Status: ExecutionSucceeded, UsedCost: "40"}
+	client.deliverable = DeliverableResponse{
+		ContentHash:    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		DeliverableRef: "agent-artifact://result",
+	}
+	if _, err := service.Poll(context.Background(), "execution-1"); err != nil {
+		t.Fatalf("terminal poll: %v", err)
+	}
+	completed, err := repository.Get(context.Background(), "execution-1")
+	if err != nil || completed.Status != ExecutionSucceeded || completed.ContentHash != client.deliverable.ContentHash || completed.DeliverableRef != client.deliverable.DeliverableRef || len(leaser.releases) != 1 {
+		t.Fatalf("poll did not reconcile execution: execution=%#v releases=%d err=%v", completed, len(leaser.releases), err)
+	}
+	if _, err = service.Poll(context.Background(), "execution-1"); err != nil || len(leaser.releases) != 1 {
+		t.Fatalf("poll replay was not idempotent: releases=%d err=%v", len(leaser.releases), err)
+	}
+}
+
+func TestPollAllowsZeroCostExecutionAtZeroCostCap(t *testing.T) {
+	service, repository, _, client, _, _ := executionFixture(t)
+	spec := validOverviewSpec()
+	spec.CostCap = "0"
+	if _, _, err := service.Create(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := service.Dispatch(context.Background(), "execution-1"); err != nil {
+		t.Fatal(err)
+	}
+	client.statusResponse = StatusResponse{Status: ExecutionSucceeded, UsedCost: "0"}
+	client.deliverable = DeliverableResponse{ContentHash: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", DeliverableRef: "agent-artifact://free-result"}
+	if _, err := service.Poll(context.Background(), "execution-1"); err != nil {
+		t.Fatalf("zero-cost poll: %v", err)
+	}
+	completed, err := repository.Get(context.Background(), "execution-1")
+	if err != nil || completed.Status != ExecutionSucceeded || completed.UsedCost != "0" {
+		t.Fatalf("zero-cost execution was not reconciled: execution=%#v err=%v", completed, err)
 	}
 }
 

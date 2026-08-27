@@ -12,6 +12,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/example/agent-platform/engine/internal/auth"
@@ -29,6 +30,7 @@ const (
 	TypeAPIKey            = "api_key"
 	TypeBearerToken       = "bearer_token"
 	TypeOAuthClientSecret = "oauth_client_secret"
+	TypeProtocolBundle    = "protocol_bundle"
 	AlgorithmAES256GCM    = "AES-256-GCM"
 )
 
@@ -71,6 +73,24 @@ type Encryptor interface {
 	Seal(context.Context, []byte, []byte) (Envelope, error)
 }
 
+type Decryptor interface {
+	Open(context.Context, Envelope, []byte) ([]byte, error)
+}
+
+type ProtocolObserver interface {
+	ValidateProtocolBundle(string, []byte) error
+	UpdateProtocolBundle(string, []byte) error
+}
+
+type ProtocolBundleRecord struct {
+	AgentID, OwnerID, CredentialType string
+	Envelope                         Envelope
+}
+
+type ProtocolBundleStore interface {
+	CurrentProtocolBundles(context.Context) ([]ProtocolBundleRecord, error)
+}
+
 type Mutation struct {
 	ActorID        string
 	IdempotencyKey string
@@ -84,9 +104,41 @@ type Store interface {
 }
 
 type Service struct {
-	store     Store
-	encryptor Encryptor
-	now       func() time.Time
+	store      Store
+	encryptor  Encryptor
+	now        func() time.Time
+	observer   ProtocolObserver
+	protocolMu sync.Mutex
+}
+
+func (s *Service) SetProtocolObserver(observer ProtocolObserver) { s.observer = observer }
+
+func (s *Service) RestoreProtocolBundles(ctx context.Context) error {
+	if s.observer == nil {
+		return nil
+	}
+	store, ok := s.store.(ProtocolBundleStore)
+	decryptor, okDecrypt := s.encryptor.(Decryptor)
+	if !ok || !okDecrypt {
+		return errors.New("protocol credential restore is unavailable")
+	}
+	records, err := store.CurrentProtocolBundles(ctx)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		aad := []byte("agent-credential:v1:" + record.OwnerID + ":" + record.AgentID + ":" + record.CredentialType)
+		plaintext, openErr := decryptor.Open(ctx, record.Envelope, aad)
+		if openErr != nil {
+			return openErr
+		}
+		updateErr := s.observer.UpdateProtocolBundle(record.AgentID, plaintext)
+		clear(plaintext)
+		if updateErr != nil {
+			return updateErr
+		}
+	}
+	return nil
 }
 
 func NewService(store Store, encryptor Encryptor) (*Service, error) {
@@ -100,8 +152,15 @@ func (s *Service) Rotate(ctx context.Context, session auth.Session, idempotencyK
 	if !CanRotate(session) {
 		return Metadata{}, false, ErrForbidden
 	}
-	if idempotencyKey == "" || len(idempotencyKey) > 200 || agentID == "" || input.ExpectedVersion < 1 || !slices.Contains([]string{TypeAPIKey, TypeBearerToken, TypeOAuthClientSecret}, input.CredentialType) || strings.TrimSpace(input.Label) == "" || len(input.Label) > 100 || input.Secret == "" || len(input.Secret) > 16_384 {
+	if idempotencyKey == "" || len(idempotencyKey) > 200 || agentID == "" || input.ExpectedVersion < 1 || !slices.Contains([]string{TypeAPIKey, TypeBearerToken, TypeOAuthClientSecret, TypeProtocolBundle}, input.CredentialType) || strings.TrimSpace(input.Label) == "" || len(input.Label) > 100 || input.Secret == "" || len(input.Secret) > 16_384 {
 		return Metadata{}, false, ErrInvalidInput
+	}
+	if input.CredentialType == TypeProtocolBundle {
+		s.protocolMu.Lock()
+		defer s.protocolMu.Unlock()
+		if s.observer == nil || s.observer.ValidateProtocolBundle(agentID, []byte(input.Secret)) != nil {
+			return Metadata{}, false, ErrInvalidInput
+		}
 	}
 	aad := []byte("agent-credential:v1:" + session.UserID + ":" + agentID + ":" + input.CredentialType)
 	envelope, err := s.encryptor.Seal(ctx, []byte(input.Secret), aad)
@@ -126,7 +185,11 @@ func (s *Service) Rotate(ctx context.Context, session auth.Session, idempotencyK
 		return Metadata{}, false, err
 	}
 	mutation := Mutation{ActorID: session.UserID, IdempotencyKey: idempotencyKey, RequestHash: hex.EncodeToString(requestHash[:]), EventID: eventID, Now: s.now().UTC()}
-	return s.store.Rotate(ctx, mutation, agentID, StoreInput{CredentialType: input.CredentialType, Label: input.Label, ExpectedVersion: input.ExpectedVersion}, envelope)
+	metadata, replay, err := s.store.Rotate(ctx, mutation, agentID, StoreInput{CredentialType: input.CredentialType, Label: input.Label, ExpectedVersion: input.ExpectedVersion}, envelope)
+	if err == nil && input.CredentialType == TypeProtocolBundle {
+		err = s.observer.UpdateProtocolBundle(agentID, []byte(input.Secret))
+	}
+	return metadata, replay, err
 }
 
 func CanRotate(session auth.Session) bool {
@@ -198,6 +261,31 @@ func (e *AESGCMEncryptor) Seal(_ context.Context, plaintext, aad []byte) (Envelo
 		Fingerprint:      hex.EncodeToString(fingerprintHash[:16]),
 		SecretDigest:     hex.EncodeToString(digest.Sum(nil)),
 	}, nil
+}
+
+func (e *AESGCMEncryptor) Open(_ context.Context, envelope Envelope, aad []byte) ([]byte, error) {
+	if e == nil || envelope.Algorithm != AlgorithmAES256GCM || envelope.KeyWrapAlgorithm != AlgorithmAES256GCM || envelope.KeyReference != e.keyReference {
+		return nil, ErrInvalidInput
+	}
+	keyAAD := append(append([]byte{}, aad...), []byte(":data-key")...)
+	dataKey, err := e.keyAEAD.Open(nil, envelope.KeyNonce, envelope.WrappedDataKey, keyAAD)
+	if err != nil {
+		return nil, ErrInvalidInput
+	}
+	defer clear(dataKey)
+	block, err := aes.NewCipher(dataKey)
+	if err != nil {
+		return nil, err
+	}
+	dataAEAD, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := dataAEAD.Open(nil, envelope.Nonce, envelope.Ciphertext, aad)
+	if err != nil {
+		return nil, ErrInvalidInput
+	}
+	return plaintext, nil
 }
 
 func deriveKey(root []byte, purpose string) []byte {

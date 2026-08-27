@@ -12,6 +12,7 @@ broadcast/
 *.tsbuildinfo
 .env
 .env.local
+.env.chain
 infrastructure/ec2-agents/.runtime.env
 .data/
 .DS_Store

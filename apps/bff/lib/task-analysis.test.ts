@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   generateTaskAnalysis,
+  generateLocalTaskAnalysis,
   InvalidTaskAnalysisInputError,
   InvalidTaskAnalysisResponseError,
   parseTaskAnalysisInput,
@@ -51,6 +52,21 @@ test("task analysis refinement sends the current version and instruction", async
 test("task analysis rejects invalid input and unexpected model fields", async () => {
   assert.throws(() => parseTaskAnalysisInput({ prompt: "x", instruction: "change" }), InvalidTaskAnalysisInputError);
   await assert.rejects(() => generateTaskAnalysis({ prompt: "x" }, { config, fetch: async () => Response.json({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ ...analysis, privateKey: "unsafe" }) } }] }) }), InvalidTaskAnalysisResponseError);
+});
+
+test("local task analysis provides a deterministic development fallback", () => {
+  const initial = generateLocalTaskAnalysis(parseTaskAnalysisInput({ prompt: "开发一个订单查询接口", depth: "标准" }));
+  assert.equal(initial.model, "local-rules-v1");
+  assert.equal(initial.analysis.category, "代码开发");
+  assert.equal(initial.analysis.deliveryDays, 2);
+
+  const refined = generateLocalTaskAnalysis(parseTaskAnalysisInput({
+    prompt: "开发一个订单查询接口",
+    currentAnalysis: initial.analysis,
+    instruction: "预算调整为 1500 USDC",
+  }));
+  assert.equal(refined.analysis.budget, 1500);
+  assert.equal(refined.analysis.title, initial.analysis.title);
 });
 
 test("DeepSeek configuration remains server-only and validates its origin", () => {

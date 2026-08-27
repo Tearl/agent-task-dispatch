@@ -50,6 +50,12 @@ const (
 	CallbackLate       = "late"
 	CallbackStaleFence = "stale_fence"
 	CallbackCostStop   = "cost_stop"
+
+	ReconciliationAccepted        = "accepted"
+	ReconciliationAlreadyTerminal = "already_terminal"
+	ReconciliationLate            = "late"
+	ReconciliationStaleFence      = "stale_fence"
+	ReconciliationCostStop        = "cost_stop"
 )
 
 type ToolPolicy struct {
@@ -203,6 +209,32 @@ type CallbackResult struct {
 	ShouldCancel bool      `json:"shouldCancel"`
 }
 
+// TerminalObservation is produced only after the Engine has queried an Agent
+// through the authenticated execution protocol. It is deliberately separate
+// from Callback so polling recovery cannot be mistaken for Agent-signed input.
+type TerminalObservation struct {
+	LogicalExecutionID string `json:"logicalExecutionId"`
+	AttemptID          string `json:"attemptId"`
+	AgentID            string `json:"agentId"`
+	FencingToken       int64  `json:"fencingToken"`
+	Status             string `json:"status"`
+	UsedCost           string `json:"usedCost"`
+	ContentHash        string `json:"contentHash,omitempty"`
+	DeliverableRef     string `json:"deliverableRef,omitempty"`
+}
+
+type VerifiedTerminalObservation struct {
+	Observation TerminalObservation
+	PayloadHash string
+}
+
+type ReconciliationResult struct {
+	Execution    Execution `json:"execution"`
+	Outcome      string    `json:"outcome"`
+	Replay       bool      `json:"replay"`
+	ShouldCancel bool      `json:"shouldCancel"`
+}
+
 type Repository interface {
 	GetOrCreate(context.Context, Spec) (Execution, bool, error)
 	Get(context.Context, string) (Execution, error)
@@ -215,4 +247,5 @@ type Repository interface {
 	CompleteCancel(context.Context, string, int, int64) (Execution, error)
 	RecordUsage(context.Context, string, int, int64, string) (Execution, bool, error)
 	ApplyCallback(context.Context, VerifiedCallback) (CallbackResult, error)
+	ApplyTerminalObservation(context.Context, VerifiedTerminalObservation) (ReconciliationResult, error)
 }

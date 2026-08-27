@@ -4,7 +4,7 @@ import { BodyTooLargeError, readBoundedBody } from "./body";
 import { forwardEngineMutation, InvalidEngineResponseError, InvalidResourceIdError } from "./engine";
 import { sessionCookieName } from "./session";
 
-export async function mutationRoute(request: Request, path: string, bodyLimit = 131_072): Promise<NextResponse> {
+export async function mutationRoute(request: Request, path: string, bodyLimit = 131_072, engineMethod: "POST" | "PUT" = "POST"): Promise<NextResponse> {
   const token = (await cookies()).get(sessionCookieName)?.value;
   if (!token) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   let body: string;
@@ -14,7 +14,7 @@ export async function mutationRoute(request: Request, path: string, bodyLimit = 
     return NextResponse.json({ error: error instanceof BodyTooLargeError ? "request body too large" : "invalid request body" }, { status: error instanceof BodyTooLargeError ? 413 : 400 });
   }
   try {
-    const result = await forwardEngineMutation({ path, body, idempotencyKey: request.headers.get("idempotency-key") ?? "", sessionToken: token });
+    const result = await forwardEngineMutation({ path, body, idempotencyKey: request.headers.get("idempotency-key") ?? "", sessionToken: token, method: engineMethod });
     return NextResponse.json(result.body, { status: result.status });
   } catch (error) {
     if (error instanceof InvalidResourceIdError) return NextResponse.json({ error: "invalid resource id" }, { status: 400 });

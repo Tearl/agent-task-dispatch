@@ -52,6 +52,68 @@ services:
       retries: 5
       start_period: 20s
 
+  qwen-ui-prototype:
+    <<: *agent-service
+    command: ["node", "agents/qwen-ui-prototype/dist/main.js"]
+    environment:
+      NODE_ENV: production
+      QWEN_UI_AGENT_PORT: "8095"
+      QWEN_UI_AGENT_DATA_DIR: /var/lib/agent
+      QWEN_UI_AGENT_PUBLIC_BASE_URL: ${QWEN_UI_AGENT_PUBLIC_BASE_URL:?required}
+      QWEN_UI_AGENT_CALLBACK_KEY_VERSION: qwen-ui-prototype-callback-v1
+      QWEN_UI_AGENT_JOB_CONCURRENCY: "1"
+      QWEN_UI_AGENT_MODEL: qwen-image-3.0-pro
+      DASHSCOPE_IMAGE_BASE_URL: ${DASHSCOPE_IMAGE_BASE_URL:?required}
+      AGENT_API_TOKEN_ENV: QWEN_UI_AGENT_API_TOKEN
+      AGENT_CALLBACK_KEY_ENV: QWEN_UI_AGENT_CALLBACK_KEY_BASE64
+      PROVIDER_API_KEY_ENV: QWEN_UI_DASHSCOPE_API_KEY
+    secrets:
+      - source: qwen_ui_agent_api_token
+        target: agent_api_token
+      - source: qwen_ui_agent_callback_key
+        target: agent_callback_key
+      - source: qwen_ui_dashscope_api_key
+        target: provider_api_key
+    volumes:
+      - qwen-ui-prototype-data:/var/lib/agent
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8095/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  seedream-visual-design:
+    <<: *agent-service
+    command: ["node", "agents/seedream-visual-design/dist/main.js"]
+    environment:
+      NODE_ENV: production
+      SEEDREAM_AGENT_PORT: "8096"
+      SEEDREAM_AGENT_DATA_DIR: /var/lib/agent
+      SEEDREAM_AGENT_PUBLIC_BASE_URL: ${SEEDREAM_AGENT_PUBLIC_BASE_URL:?required}
+      SEEDREAM_AGENT_CALLBACK_KEY_VERSION: seedream-visual-design-callback-v1
+      SEEDREAM_AGENT_JOB_CONCURRENCY: "1"
+      SEEDREAM_AGENT_MODEL: doubao-seedream-5-0-lite-260128
+      ARK_BASE_URL: https://ark.cn-beijing.volces.com/api/v3
+      AGENT_API_TOKEN_ENV: SEEDREAM_AGENT_API_TOKEN
+      AGENT_CALLBACK_KEY_ENV: SEEDREAM_AGENT_CALLBACK_KEY_BASE64
+      PROVIDER_API_KEY_ENV: ARK_API_KEY
+    secrets:
+      - source: seedream_agent_api_token
+        target: agent_api_token
+      - source: seedream_agent_callback_key
+        target: agent_callback_key
+      - source: ark_api_key
+        target: provider_api_key
+    volumes:
+      - seedream-visual-design-data:/var/lib/agent
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8096/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   glm-image-to-code:
     <<: *agent-service
     command: ["node", "agents/glm-image-to-code/dist/main.js"]
@@ -120,6 +182,10 @@ services:
     depends_on:
       image-generator:
         condition: service_healthy
+      qwen-ui-prototype:
+        condition: service_healthy
+      seedream-visual-design:
+        condition: service_healthy
       glm-image-to-code:
         condition: service_healthy
       qwen-image-to-code:
@@ -141,6 +207,8 @@ networks:
 
 volumes:
   image-generator-data:
+  qwen-ui-prototype-data:
+  seedream-visual-design-data:
   glm-image-to-code-data:
   qwen-image-to-code-data:
 
@@ -151,6 +219,18 @@ secrets:
     file: ${AGENT_SECRET_DIR:?required}/IMAGE_AGENT_API_TOKEN
   image_agent_callback_key:
     file: ${AGENT_SECRET_DIR:?required}/IMAGE_AGENT_CALLBACK_KEY_BASE64
+  qwen_ui_agent_api_token:
+    file: ${AGENT_SECRET_DIR:?required}/QWEN_UI_AGENT_API_TOKEN
+  qwen_ui_agent_callback_key:
+    file: ${AGENT_SECRET_DIR:?required}/QWEN_UI_AGENT_CALLBACK_KEY_BASE64
+  qwen_ui_dashscope_api_key:
+    file: ${AGENT_SECRET_DIR:?required}/QWEN_UI_DASHSCOPE_API_KEY
+  seedream_agent_api_token:
+    file: ${AGENT_SECRET_DIR:?required}/SEEDREAM_AGENT_API_TOKEN
+  seedream_agent_callback_key:
+    file: ${AGENT_SECRET_DIR:?required}/SEEDREAM_AGENT_CALLBACK_KEY_BASE64
+  ark_api_key:
+    file: ${AGENT_SECRET_DIR:?required}/ARK_API_KEY
   zai_api_key:
     file: ${AGENT_SECRET_DIR:?required}/ZAI_API_KEY
   glm_agent_api_token:

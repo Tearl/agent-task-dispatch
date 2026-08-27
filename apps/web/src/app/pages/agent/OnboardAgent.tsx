@@ -32,7 +32,6 @@ import { onboardAgent, validateAgentOnboardingInput, type AgentOnboardingInput }
 import { useSession } from "../../lib/session";
 
 const CATEGORIES = ["数据分析", "翻译", "图像生成", "代码开发", "市场研究", "智能审计"];
-const AUTH_TYPES = ["API Key", "Bearer Token", "OAuth 2.0"];
 
 const STEPS = [
   { id: 0, label: "基本信息", icon: Cpu },
@@ -54,8 +53,9 @@ export default function OnboardAgent() {
   const [endpointUrl, setEndpointUrl] = useState("");
   const [capabilities, setCapabilities] = useState<string[]>(["结构化输出"]);
   const [capabilityInput, setCapabilityInput] = useState("");
-  const [auth, setAuth] = useState("API Key");
   const [secret, setSecret] = useState("");
+  const [callbackKeyBase64, setCallbackKeyBase64] = useState("");
+  const [callbackKeyVersion, setCallbackKeyVersion] = useState("callback-v1");
   const [maxConcurrency, setMaxConcurrency] = useState("20");
   const [overviewPrice, setOverviewPrice] = useState("100");
   const [formalPrice, setFormalPrice] = useState("500");
@@ -79,7 +79,7 @@ export default function OnboardAgent() {
   const canNext =
     (step === 0 && Boolean(name.trim()) && Boolean(tagline.trim())) ||
     (step === 1 && isProtocolBaseUrl(endpointUrl) && Number.isInteger(Number(maxConcurrency)) && Number(maxConcurrency) > 0) ||
-    (step === 2 && secret.trim().length > 0 && /^\d+$/.test(overviewPrice) && /^\d+$/.test(formalPrice)) ||
+    (step === 2 && secret.trim().length > 0 && callbackKeyBase64.trim().length > 0 && callbackKeyVersion.trim().length > 0 && /^\d+$/.test(overviewPrice) && /^\d+$/.test(formalPrice)) ||
     step === 3;
 
   const runChecks = async () => {
@@ -93,8 +93,7 @@ export default function OnboardAgent() {
         operationId: operationId.current ?? crypto.randomUUID(),
         name: name.trim(), category, tagline: tagline.trim(), endpointUrl: endpointUrl.trim(), capabilities,
         controllerAddress: address, maxConcurrency: Number(maxConcurrency),
-        credentialType: auth === "Bearer Token" ? "bearer_token" : auth === "OAuth 2.0" ? "oauth_client_secret" : "api_key",
-        secret, overviewPrice, formalPrice,
+        bearerToken: secret, callbackKeyBase64: callbackKeyBase64.trim(), callbackKeyVersion: callbackKeyVersion.trim(), overviewPrice, formalPrice,
       };
       validateAgentOnboardingInput(input);
       operationId.current = input.operationId;
@@ -349,31 +348,10 @@ export default function OnboardAgent() {
           {step === 2 ? (
             <div className="space-y-5">
               <SectionTitle>凭证安全</SectionTitle>
-              <div>
-                <div className="text-[13px] font-medium text-[var(--ap-muted)]">鉴权方式</div>
-                <div role="group" aria-label="鉴权方式" className="mt-2 flex flex-wrap gap-2">
-                  {AUTH_TYPES.map((item) => (
-                    <button
-                      key={item}
-                      type="button"
-                      aria-pressed={auth === item}
-                      disabled={submitting || attemptLocked}
-                      onClick={() => setAuth(item)}
-                      className="rounded-lg border px-3 py-2 text-[13px] transition-colors"
-                      style={{
-                        borderColor: auth === item ? "var(--ap-border-strong)" : "var(--ap-border)",
-                        background: auth === item ? "var(--ap-violet-soft)" : "transparent",
-                        color: auth === item ? "#c4b5fd" : "var(--ap-text-2)",
-                      }}
-                    >
-                      {item}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <div role="group" aria-label="鉴权方式" className="space-y-5">
               <div>
                 <label htmlFor="agent-secret" className="text-[13px] text-[var(--ap-muted)]">
-                  {auth === "OAuth 2.0" ? "Client Secret" : auth === "Bearer Token" ? "Bearer Token" : "API Key"}
+                  Agent 协议 Bearer Token
                 </label>
                 <input
                   id="agent-secret"
@@ -385,6 +363,11 @@ export default function OnboardAgent() {
                   placeholder="粘贴凭证，提交后将加密存储"
                   className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 font-mono text-[14px] text-white outline-none focus:border-[var(--ap-border-strong)]"
                 />
+              </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div><label htmlFor="agent-callback-key" className="text-[13px] text-[var(--ap-muted)]">回调 HMAC Key（32 字节 Base64）</label><input id="agent-callback-key" type="password" autoComplete="off" disabled={submitting || attemptLocked} value={callbackKeyBase64} onChange={(event)=>setCallbackKeyBase64(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 font-mono text-[14px] text-white outline-none" /></div>
+                <div><label htmlFor="agent-callback-version" className="text-[13px] text-[var(--ap-muted)]">回调 Key 版本</label><input id="agent-callback-version" disabled={submitting || attemptLocked} value={callbackKeyVersion} onChange={(event)=>setCallbackKeyVersion(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--ap-border)] bg-[rgba(5,9,20,0.5)] px-4 py-3 font-mono text-[14px] text-white outline-none" /></div>
+              </div>
               </div>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
@@ -504,7 +487,7 @@ export default function OnboardAgent() {
             <p className="mt-3 text-[13px] text-[var(--ap-text-2)]">{tagline || "暂无简介"}</p>
             <div className="mt-4 space-y-2 text-[13px]">
               <Row label="并发上限" value={maxConcurrency || "—"} />
-              <Row label="鉴权方式" value={auth} />
+              <Row label="鉴权方式" value="agent-execution-v1 Bearer + HMAC" />
               <Row label="能力标签" value={capabilities.join("、") || "—"} />
               <Row label="履约保证金" value="0 USDC" tag="零履约金" />
             </div>

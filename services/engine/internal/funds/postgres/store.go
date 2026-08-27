@@ -124,7 +124,7 @@ func (store *Store) AuthorizeOverview(ctx context.Context, draft funds.Allocatio
 	}
 	existing, err := loadAllocationWhere(ctx, tx, `allocation_id=$1 OR idempotency_key=$2 ORDER BY allocation_id=$1 DESC LIMIT 1`, draft.ID, draft.IdempotencyKey)
 	if err == nil {
-		if existing.ID != draft.ID || existing.RequestHash != draft.RequestHash {
+		if existing.ID != draft.ID || existing.RequestHash != draft.RequestHash && !funds.CompatibleAuthorizationReplay(existing, draft) {
 			return funds.Allocation{}, false, funds.ErrContentConflict
 		}
 		if err = tx.Commit(); err != nil {

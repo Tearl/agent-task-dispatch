@@ -52,7 +52,7 @@ export default function AgentMatching() {
   const initialRequestStarted = useRef(false);
   const [conversation, setConversation] = useState<ConversationMessage[]>([
     { id: 1, role: "user", content: prompt },
-    { id: 2, role: "assistant", content: flowState.analysis ? "已恢复任务分析。你可以继续补充要求，确认后发布不可变任务规格。" : "正在请求 DeepSeek 生成第一版任务分析…" },
+    { id: 2, role: "assistant", content: flowState.analysis ? "已恢复任务分析。你可以继续补充要求，确认后发布不可变任务规格。" : "正在生成第一版任务分析…" },
   ]);
 
   const loadInitialAnalysis = async () => {
@@ -62,11 +62,12 @@ export default function AgentMatching() {
       setAnalysis(result.analysis);
       setAnalysisDraft(cloneAnalysis(result.analysis));
       setAnalysisModel(result.model);
-      setConversation((items) => [...items, { id: nextMessageId(), role: "assistant", content: "DeepSeek 已生成第一版任务分析。你可以继续补充要求，确认后发布不可变任务规格。" }]);
+      const source = result.model === "local-rules-v1" ? "本地分析规则" : "AI 模型";
+      setConversation((items) => [...items, { id: nextMessageId(), role: "assistant", content: `${source}已生成第一版任务分析。你可以继续补充要求，确认后发布不可变任务规格。` }]);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "模型服务暂时不可用";
       setConversation((items) => [...items, { id: nextMessageId(), role: "assistant", content: `AI 分析失败：${detail}。当前显示本地草稿，你可以重试。` }]);
-      toast.error("DeepSeek 任务分析失败", { description: detail });
+      toast.error("任务分析失败", { description: detail });
     } finally {
       setIsAnalyzing(false);
     }
@@ -125,7 +126,7 @@ export default function AgentMatching() {
     } catch (error) {
       const detail = error instanceof Error ? error.message : "模型服务暂时不可用";
       setConversation((items) => [...items, { id: nextMessageId(), role: "assistant", content: `没有应用这次修改：${detail}` }]);
-      toast.error("DeepSeek 更新分析失败", { description: detail });
+      toast.error("更新分析失败", { description: detail });
     } finally {
       setIsAnalyzing(false);
     }
@@ -157,7 +158,7 @@ export default function AgentMatching() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--ap-border)] bg-[linear-gradient(120deg,rgba(34,211,238,.12),rgba(139,92,246,.08))] px-6 py-4">
           <div className="flex items-center gap-3">
             <Pill tone="cyan" dot>AI 分析结果</Pill>
-            <span className="text-[11px] text-[var(--ap-muted)]">分析版本 R{analysisRevision} · {isAnalyzing ? "DeepSeek 分析中" : isEditingAnalysis ? "正在编辑" : "待你确认"}{analysisModel ? ` · ${analysisModel}` : ""}</span>
+            <span className="text-[11px] text-[var(--ap-muted)]">分析版本 R{analysisRevision} · {isAnalyzing ? "任务分析中" : isEditingAnalysis ? "正在编辑" : "待你确认"}{analysisModel ? ` · ${analysisModel}` : ""}</span>
           </div>
           {!isEditingAnalysis ? (
             <div className="flex items-center gap-2">

@@ -147,7 +147,7 @@ func (store *Store) RecordValidation(ctx context.Context, batchID, slotID string
 			validation = overview.Validation{Valid: false, Codes: []string{"duplicate_content"}}
 		}
 	}
-	codes, err := json.Marshal(validation.Codes)
+	codes, err := marshalValidationCodes(validation.Codes)
 	if err != nil {
 		return overview.Batch{}, overview.Slot{}, false, err
 	}
@@ -447,7 +447,7 @@ func scanSlot(row scanner) (value overview.Slot, err error) {
 }
 
 func insertSlot(ctx context.Context, tx *sql.Tx, slot overview.Slot) error {
-	codes, err := json.Marshal(slot.Validation.Codes)
+	codes, err := marshalValidationCodes(slot.Validation.Codes)
 	if err != nil {
 		return err
 	}
@@ -456,6 +456,13 @@ func insertSlot(ctx context.Context, tx *sql.Tx, slot overview.Slot) error {
 		return fmt.Errorf("insert overview slot: %w", err)
 	}
 	return nil
+}
+
+func marshalValidationCodes(codes []string) ([]byte, error) {
+	if codes == nil {
+		codes = []string{}
+	}
+	return json.Marshal(codes)
 }
 
 func finishBatch(ctx context.Context, tx *sql.Tx, batchID string, now time.Time) error {

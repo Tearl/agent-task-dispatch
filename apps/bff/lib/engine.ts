@@ -12,6 +12,7 @@ export type EngineMutationInput = {
   body: string;
   idempotencyKey: string;
   sessionToken: string;
+  method?: "POST" | "PUT";
 };
 
 export class InvalidResourceIdError extends Error {}
@@ -161,7 +162,7 @@ export async function aggregateEngineDisputes(
 }
 
 export async function forwardEngineRead(path: string, sessionToken: string, options: { fetch?: typeof fetch; engineBaseUrl?: string } = {}): Promise<EngineAggregateResult> {
-  if (!/^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/selection-reservations\/sha256(?::|%3A)[0-9a-f]{64}$/.test(path)) throw new InvalidResourceIdError("invalid read path");
+  if (!/^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:selection-reservations\/sha256(?::|%3A)[0-9a-f]{64}|funding-intent|orchestration-plan)$/.test(path)) throw new InvalidResourceIdError("invalid read path");
   if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
   const response = await (options.fetch ?? fetch)(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}${path}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
   if (!response.ok) return engineError(response);
@@ -180,7 +181,7 @@ export async function forwardEngineMutation(
   const request = options.fetch ?? fetch;
   const baseUrl = options.engineBaseUrl ?? resolveEngineBaseUrl();
   const response = await request(`${baseUrl}${input.path}`, {
-    method: "POST",
+    method: input.method ?? "POST",
     headers: {
       authorization: `Bearer ${input.sessionToken}`,
       "content-type": "application/json",
@@ -197,8 +198,11 @@ export async function forwardEngineMutation(
 
 function validMutationPath(path: string): boolean {
   if (path === "/v1/agents" || path === "/v1/tasks") return true;
-	return /^\/v1\/agents\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:credentials|health|prices|lifecycle)$/.test(path)
+	return /^\/v1\/agents\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:credentials|health|prices|lifecycle|profile)$/.test(path)
 		|| /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:matching-runs|overview-batches)$/.test(path)
+		|| /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/orchestration-plans$/.test(path)
+		|| /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/deletion-requests$/.test(path)
+		|| /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/funding-intents(?:\/sha256(?::|%3A)[0-9a-f]{64}\/submit)?$/.test(path)
 		|| /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/overview-batches\/sha256(?::|%3A)[0-9a-f]{64}\/slots\/sha256(?::|%3A)[0-9a-f]{64}\/finalize$/.test(path)
     || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/publish$/.test(path)
     || /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/formal-packages\/start$/.test(path)
@@ -302,7 +306,7 @@ function validFinanceView(kind: EngineFinanceKind, value: unknown): value is Rec
 
 function validMatchingView(taskID: string, value: unknown): value is Record<string, unknown> {
   const view = record(value); const task = record(view?.task);
-  if (!view || !text(view.asOf) || !task || task.id !== taskID || !text(task.title) || !text(task.status) || !text(task.specHash)) return false;
+  if (!view || !text(view.asOf) || !task || task.id !== taskID || !text(task.title) || !text(task.status) || !text(task.specHash) || typeof task.deletionPending !== "boolean") return false;
   if (view.snapshot === undefined) return true;
   const snapshot = record(view.snapshot);
   return Boolean(snapshot && text(snapshot.id) && Number.isSafeInteger(snapshot.revision) && text(snapshot.algorithmVersion) && text(snapshot.seedDigest) && Array.isArray(snapshot.degradations) && snapshot.degradations.every((item)=>{const d=record(item);return Boolean(d&&text(d.dependency)&&text(d.code)&&text(d.message));}) && Array.isArray(snapshot.candidates) && snapshot.candidates.every(validMatchingCandidate));

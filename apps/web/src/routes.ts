@@ -13,6 +13,7 @@ export default [
 		route("publisher/tasks/:taskId/delivery", "app/pages/publisher/Settlement.tsx"),
     route("publisher/marketplace", "app/pages/publisher/Marketplace.tsx"),
     route("publisher/tasks", "app/pages/publisher/Tasks.tsx"),
+		route("publisher/tasks/:taskId/funding", "app/pages/publisher/TaskFunding.tsx"),
     route("publisher/funds", "app/pages/publisher/Funds.tsx"),
     route("publisher/disputes", "app/pages/publisher/Disputes.tsx"),
   ]),

@@ -29,6 +29,15 @@ jq -er '
         "IMAGE_AGENT_PUBLIC_BASE_URL",
         "IMAGE_AGENT_API_TOKEN",
         "IMAGE_AGENT_CALLBACK_KEY_BASE64",
+        "QWEN_UI_AGENT_PUBLIC_BASE_URL",
+        "QWEN_UI_AGENT_API_TOKEN",
+        "QWEN_UI_AGENT_CALLBACK_KEY_BASE64",
+        "QWEN_UI_DASHSCOPE_API_KEY",
+        "DASHSCOPE_IMAGE_BASE_URL",
+        "SEEDREAM_AGENT_PUBLIC_BASE_URL",
+        "SEEDREAM_AGENT_API_TOKEN",
+        "SEEDREAM_AGENT_CALLBACK_KEY_BASE64",
+        "ARK_API_KEY",
         "ZAI_API_KEY",
         "GLM_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL",
         "GLM_IMAGE_TO_CODE_AGENT_API_TOKEN",
@@ -53,6 +62,12 @@ secret_names=(
   CLOUDFLARE_TUNNEL_TOKEN
   IMAGE_AGENT_API_TOKEN
   IMAGE_AGENT_CALLBACK_KEY_BASE64
+  QWEN_UI_AGENT_API_TOKEN
+  QWEN_UI_AGENT_CALLBACK_KEY_BASE64
+  QWEN_UI_DASHSCOPE_API_KEY
+  SEEDREAM_AGENT_API_TOKEN
+  SEEDREAM_AGENT_CALLBACK_KEY_BASE64
+  ARK_API_KEY
   ZAI_API_KEY
   GLM_IMAGE_TO_CODE_AGENT_API_TOKEN
   GLM_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64
@@ -67,7 +82,7 @@ for secret_name in "${secret_names[@]}"; do
   chmod 0600 "${runtime_dir}/${secret_name}"
 done
 
-for callback_name in IMAGE_AGENT_CALLBACK_KEY_BASE64 GLM_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64 QWEN_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64; do
+for callback_name in IMAGE_AGENT_CALLBACK_KEY_BASE64 QWEN_UI_AGENT_CALLBACK_KEY_BASE64 SEEDREAM_AGENT_CALLBACK_KEY_BASE64 GLM_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64 QWEN_IMAGE_TO_CODE_AGENT_CALLBACK_KEY_BASE64; do
   decoded_bytes="$(base64 --decode "${runtime_dir}/${callback_name}" | wc -c | tr -d ' ')"
   if [ "${decoded_bytes}" != "32" ]; then
     echo "callback keys must decode to exactly 32 bytes" >&2
@@ -76,18 +91,28 @@ for callback_name in IMAGE_AGENT_CALLBACK_KEY_BASE64 GLM_IMAGE_TO_CODE_AGENT_CAL
 done
 
 image_base_url="$(jq -er '.IMAGE_AGENT_PUBLIC_BASE_URL' "${deployment_json}")"
+qwen_ui_base_url="$(jq -er '.QWEN_UI_AGENT_PUBLIC_BASE_URL' "${deployment_json}")"
+dashscope_image_base_url="$(jq -er '.DASHSCOPE_IMAGE_BASE_URL' "${deployment_json}")"
+seedream_base_url="$(jq -er '.SEEDREAM_AGENT_PUBLIC_BASE_URL' "${deployment_json}")"
 glm_base_url="$(jq -er '.GLM_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL' "${deployment_json}")"
 qwen_base_url="$(jq -er '.QWEN_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL' "${deployment_json}")"
-for base_url in "${image_base_url}" "${glm_base_url}" "${qwen_base_url}"; do
+for base_url in "${image_base_url}" "${qwen_ui_base_url}" "${seedream_base_url}" "${glm_base_url}" "${qwen_base_url}"; do
   if [[ ! "${base_url}" =~ ^https://[^/]+/?$ ]]; then
     echo "Agent public base URLs must be clean HTTPS origins without paths" >&2
     exit 1
   fi
 done
+if [[ ! "${dashscope_image_base_url}" =~ ^https://[^/]+/?$ ]]; then
+  echo "DASHSCOPE_IMAGE_BASE_URL must be a clean HTTPS origin without paths" >&2
+  exit 1
+fi
 
 {
   printf 'AGENT_SECRET_DIR=%s\n' "${runtime_dir}"
   printf 'IMAGE_AGENT_PUBLIC_BASE_URL=%s\n' "${image_base_url}"
+  printf 'QWEN_UI_AGENT_PUBLIC_BASE_URL=%s\n' "${qwen_ui_base_url}"
+  printf 'DASHSCOPE_IMAGE_BASE_URL=%s\n' "${dashscope_image_base_url}"
+  printf 'SEEDREAM_AGENT_PUBLIC_BASE_URL=%s\n' "${seedream_base_url}"
   printf 'GLM_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL=%s\n' "${glm_base_url}"
   printf 'QWEN_IMAGE_TO_CODE_AGENT_PUBLIC_BASE_URL=%s\n' "${qwen_base_url}"
 } > "${runtime_env}"

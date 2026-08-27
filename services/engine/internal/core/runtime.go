@@ -79,6 +79,7 @@ type Runtime struct {
 	ExecutionInputs   http.Handler
 	CallbackHandler   http.Handler
 	OutboxWorker      *outbox.Worker
+	Credentials       *execution.RuntimeCredentialProvider
 }
 
 func NewRuntime(db *sql.DB, agents *agent.Service, deliveries *delivery.Service, config Config) (*Runtime, error) {
@@ -161,6 +162,7 @@ func NewRuntime(db *sql.DB, agents *agent.Service, deliveries *delivery.Service,
 		ExecutionInputs:   inputHandler,
 		CallbackHandler:   executionRuntime.CallbackHandler,
 		OutboxWorker:      outboxWorker,
+		Credentials:       executionRuntime.Credentials,
 	}, nil
 }
 

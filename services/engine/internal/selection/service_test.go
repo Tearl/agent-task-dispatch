@@ -89,6 +89,28 @@ func TestReserveCreatesSignedNetIntentAndReplaysWithoutNewCapacity(t *testing.T)
 	}
 }
 
+func TestDeletedTaskCannotReplayReadOrReconcileLiveSelection(t *testing.T) {
+	service, repository, _, chain := newTestService(t)
+	request := Request{BatchID: digest("deleted-batch"), SlotID: digest("deleted-slot")}
+	eligible := eligibility("task-deleted", request.BatchID, request.SlotID, "agent-1")
+	repository.SetEligibility("publisher-1", eligible)
+	intent, _, err := service.Reserve(context.Background(), publisherSession(), "select-deleted", eligible.TaskID, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository.ClearEligibility("publisher-1", eligible)
+	if _, replay, reserveErr := service.Reserve(context.Background(), publisherSession(), "select-deleted", eligible.TaskID, request); !errors.Is(reserveErr, ErrInvalidState) || replay {
+		t.Fatalf("deleted task replayed a selection: replay=%v err=%v", replay, reserveErr)
+	}
+	if _, getErr := service.Get(context.Background(), publisherSession(), eligible.TaskID, intent.Reservation.ID); !errors.Is(getErr, ErrInvalidState) {
+		t.Fatalf("deleted task exposed a live selection signature: %v", getErr)
+	}
+	chain.result = ChainResult{Status: ChainConfirmed, Proof: intent.Reservation.Proof, FormalPayable: intent.Reservation.FormalPayable, WorkNonce: 1}
+	if _, _, reconcileErr := service.Reconcile(context.Background(), publisherSession(), eligible.TaskID, intent.Reservation.ID, ReconcileRequest{TransactionHash: transaction("deleted")}); !errors.Is(reconcileErr, ErrInvalidState) {
+		t.Fatalf("deleted task reconciled a selection: %v", reconcileErr)
+	}
+}
+
 func TestConcurrentSelectionsCreateOneReservationAndReleaseLoser(t *testing.T) {
 	service, repository, capacity, _ := newTestService(t)
 	batch := digest("batch")

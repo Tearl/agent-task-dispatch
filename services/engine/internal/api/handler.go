@@ -16,27 +16,31 @@ import (
 	"github.com/example/agent-platform/engine/internal/financeview"
 	"github.com/example/agent-platform/engine/internal/matching"
 	"github.com/example/agent-platform/engine/internal/matchingview"
+	"github.com/example/agent-platform/engine/internal/orchestration"
 	"github.com/example/agent-platform/engine/internal/overview"
 	"github.com/example/agent-platform/engine/internal/persistence"
 	"github.com/example/agent-platform/engine/internal/selection"
 	enginetask "github.com/example/agent-platform/engine/internal/task"
+	"github.com/example/agent-platform/engine/internal/taskfunding"
 	"github.com/example/agent-platform/engine/internal/workflow"
 	"github.com/example/agent-platform/engine/internal/workspaceview"
 )
 
 type handler struct {
-	logger      *slog.Logger
-	auth        *auth.Service
-	agents      *agent.Service
-	credentials *credential.Service
-	tasks       *enginetask.Service
-	selections  *selection.Service
-	finance     *financeview.Service
-	matching    *matchingview.Service
-	deliveries  *delivery.Service
-	disputes    *dispute.Service
-	workflow    *workflow.Service
-	workspace   *workspaceview.Service
+	logger        *slog.Logger
+	auth          *auth.Service
+	agents        *agent.Service
+	credentials   *credential.Service
+	tasks         *enginetask.Service
+	selections    *selection.Service
+	finance       *financeview.Service
+	matching      *matchingview.Service
+	deliveries    *delivery.Service
+	disputes      *dispute.Service
+	workflow      *workflow.Service
+	workspace     *workspaceview.Service
+	funding       *taskfunding.Service
+	orchestration *orchestration.Service
 }
 
 type nonceRequest struct {
@@ -98,7 +102,15 @@ func NewHandlerWithWorkflow(logger *slog.Logger, authService *auth.Service, agen
 }
 
 func NewHandlerWithWorkspace(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service, matchingService *matchingview.Service, deliveryService *delivery.Service, disputeService *dispute.Service, workflowService *workflow.Service, workspaceService *workspaceview.Service) http.Handler {
-	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService, tasks: taskService, selections: selectionService, finance: financeService, matching: matchingService, deliveries: deliveryService, disputes: disputeService, workflow: workflowService, workspace: workspaceService}
+	return NewHandlerWithTaskFunding(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingService, deliveryService, disputeService, workflowService, workspaceService, nil)
+}
+
+func NewHandlerWithTaskFunding(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service, matchingService *matchingview.Service, deliveryService *delivery.Service, disputeService *dispute.Service, workflowService *workflow.Service, workspaceService *workspaceview.Service, fundingService *taskfunding.Service) http.Handler {
+	return NewHandlerWithOrchestration(logger, authService, agentService, credentialService, taskService, selectionService, financeService, matchingService, deliveryService, disputeService, workflowService, workspaceService, fundingService, nil)
+}
+
+func NewHandlerWithOrchestration(logger *slog.Logger, authService *auth.Service, agentService *agent.Service, credentialService *credential.Service, taskService *enginetask.Service, selectionService *selection.Service, financeService *financeview.Service, matchingService *matchingview.Service, deliveryService *delivery.Service, disputeService *dispute.Service, workflowService *workflow.Service, workspaceService *workspaceview.Service, fundingService *taskfunding.Service, orchestrationService *orchestration.Service) http.Handler {
+	h := &handler{logger: logger, auth: authService, agents: agentService, credentials: credentialService, tasks: taskService, selections: selectionService, finance: financeService, matching: matchingService, deliveries: deliveryService, disputes: disputeService, workflow: workflowService, workspace: workspaceService, funding: fundingService, orchestration: orchestrationService}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("POST /v1/auth/nonce", h.createNonce)
@@ -124,8 +136,14 @@ func NewHandlerWithWorkspace(logger *slog.Logger, authService *auth.Service, age
 		mux.HandleFunc("GET /v1/tasks/{id}", h.getTask)
 		mux.HandleFunc("PUT /v1/tasks/{id}/draft", h.updateTaskDraft)
 		mux.HandleFunc("POST /v1/tasks/{id}/publish", h.publishTask)
+		mux.HandleFunc("POST /v1/tasks/{id}/deletion-requests", h.deleteTask)
 		mux.HandleFunc("GET /v1/tasks/{id}/available-actions", h.availableTaskActions)
 		mux.HandleFunc("GET /v1/tasks/{id}/view", h.taskView)
+	}
+	if fundingService != nil {
+		mux.HandleFunc("POST /v1/tasks/{id}/funding-intents", h.prepareTaskFunding)
+		mux.HandleFunc("GET /v1/tasks/{id}/funding-intent", h.getTaskFunding)
+		mux.HandleFunc("POST /v1/tasks/{id}/funding-intents/{intentId}/submit", h.submitTaskFunding)
 	}
 	if selectionService != nil {
 		mux.HandleFunc("POST /v1/tasks/{id}/selection-reservations", h.reserveSelection)
@@ -145,6 +163,10 @@ func NewHandlerWithWorkspace(logger *slog.Logger, authService *auth.Service, age
 		mux.HandleFunc("POST /v1/tasks/{id}/overview-batches", h.startOverview)
 		mux.HandleFunc("POST /v1/tasks/{id}/overview-batches/{batchId}/slots/{slotId}/finalize", h.finalizeOverviewSlot)
 		mux.HandleFunc("GET /v1/tasks/{id}/executions", h.taskExecutions)
+	}
+	if orchestrationService != nil {
+		mux.HandleFunc("POST /v1/tasks/{id}/orchestration-plans", h.createOrchestrationPlan)
+		mux.HandleFunc("GET /v1/tasks/{id}/orchestration-plan", h.getOrchestrationPlan)
 	}
 	if workspaceService != nil {
 		mux.HandleFunc("GET /v1/workspace/tasks", h.workspaceTasks)
@@ -231,6 +253,21 @@ func (h *handler) startMatching(writer http.ResponseWriter, request *http.Reques
 	if !ok {
 		return
 	}
+	if h.orchestration != nil {
+		plan, err := h.orchestration.Latest(request.Context(), session, request.PathValue("id"))
+		if err != nil {
+			if errors.Is(err, orchestration.ErrNotFound) {
+				writeJSON(writer, http.StatusTooEarly, map[string]string{"error": "orchestration plan is required before matching"})
+				return
+			}
+			h.writeOrchestrationError(writer, err)
+			return
+		}
+		if plan.Mode == "multi" {
+			writeJSON(writer, http.StatusConflict, map[string]string{"error": "multi-agent execution requires step-level matching and escrow allocation"})
+			return
+		}
+	}
 	value, err := h.workflow.StartMatching(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"))
 	if err != nil {
 		h.writeWorkflowError(writer, err)
@@ -241,6 +278,52 @@ func (h *handler) startMatching(writer http.ResponseWriter, request *http.Reques
 		status = http.StatusOK
 	}
 	writeJSON(writer, status, value)
+}
+
+func (h *handler) createOrchestrationPlan(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, replay, err := h.orchestration.Create(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"))
+	if err != nil {
+		h.writeOrchestrationError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, map[string]any{"plan": value, "replay": replay})
+}
+
+func (h *handler) getOrchestrationPlan(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.orchestration.Latest(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeOrchestrationError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"plan": value})
+}
+
+func (h *handler) writeOrchestrationError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, orchestration.ErrForbidden):
+		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "forbidden"})
+	case errors.Is(err, orchestration.ErrNotFound):
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "orchestration plan not found"})
+	case errors.Is(err, orchestration.ErrInvalidInput):
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid orchestration request"})
+	case errors.Is(err, orchestration.ErrNotReady):
+		writeJSON(writer, http.StatusTooEarly, map[string]string{"error": "task or agents are not ready for orchestration"})
+	default:
+		h.logger.Error("orchestration planning failed", "error", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "orchestration service temporarily unavailable"})
+	}
 }
 
 func (h *handler) startOverview(writer http.ResponseWriter, request *http.Request) {
@@ -774,6 +857,92 @@ func (h *handler) publishTask(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	writeJSON(writer, http.StatusCreated, value)
+}
+
+func (h *handler) deleteTask(writer http.ResponseWriter, request *http.Request) {
+	var input enginetask.DeleteInput
+	if decodeJSON(writer, request, 4_096, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, replay, err := h.tasks.RequestDelete(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeTaskError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) prepareTaskFunding(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, replay, err := h.funding.Prepare(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"))
+	if err != nil {
+		h.writeTaskFundingError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
+}
+
+func (h *handler) getTaskFunding(writer http.ResponseWriter, request *http.Request) {
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.funding.Get(request.Context(), session, request.PathValue("id"))
+	if err != nil {
+		h.writeTaskFundingError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) submitTaskFunding(writer http.ResponseWriter, request *http.Request) {
+	var input taskfunding.SubmitInput
+	if decodeJSON(writer, request, 4_096, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, err := h.funding.Submit(request.Context(), session, request.PathValue("id"), request.PathValue("intentId"), input)
+	if err != nil {
+		h.writeTaskFundingError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (h *handler) writeTaskFundingError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, taskfunding.ErrForbidden):
+		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "forbidden"})
+	case errors.Is(err, taskfunding.ErrNotFound):
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "task funding intent not found"})
+	case errors.Is(err, taskfunding.ErrInvalidState), errors.Is(err, taskfunding.ErrConflict):
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "task funding conflict"})
+	case errors.Is(err, taskfunding.ErrInvalidInput):
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid task funding request"})
+	default:
+		h.logger.Error("task funding operation failed", "error", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "task funding service temporarily unavailable"})
+	}
 }
 
 func (h *handler) writeTaskError(writer http.ResponseWriter, err error) {

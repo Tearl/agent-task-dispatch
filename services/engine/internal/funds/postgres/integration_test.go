@@ -87,6 +87,12 @@ func TestPostgresFundsIsolationBalanceReplayAndReversal(t *testing.T) {
 	if err != nil || replay || allocation.AccountID != accounts[funds.AccountDiscoveryPool].ID {
 		t.Fatalf("authorize: %#v replay=%v err=%v", allocation, replay, err)
 	}
+	retry := request
+	retry.Deadline = request.Deadline.Add(15 * time.Minute)
+	replayed, replay, err := service.AuthorizeOverview(ctx, retry)
+	if err != nil || !replay || !replayed.Deadline.Equal(allocation.Deadline) {
+		t.Fatalf("authorize later-deadline retry: %#v replay=%v err=%v", replayed, replay, err)
+	}
 	claim := funds.OverviewCapture{TaskID: "task-funds", TaskSpecHash: pgFundsDigest("spec"), MatchRevision: 1, LogicalExecutionID: pgFundsDigest("execution-1"), AgentID: "agent-1", QuoteHash: request.QuoteHash, ContentHash: pgFundsDigest("content-1"), OverviewAmount: "20", UsedCost: "7"}
 	allocation, replay, err = service.CaptureOverview(ctx, allocation.ID, claim)
 	if err != nil || replay || allocation.Status != funds.AllocationCaptured {

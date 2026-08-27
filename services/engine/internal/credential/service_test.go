@@ -30,6 +30,31 @@ func (e *countingEncryptor) Seal(context.Context, []byte, []byte) (Envelope, err
 	return Envelope{Ciphertext: []byte("ciphertext"), Nonce: make([]byte, 12), WrappedDataKey: bytes.Repeat([]byte{1}, 48), KeyNonce: make([]byte, 12), Algorithm: AlgorithmAES256GCM, KeyWrapAlgorithm: AlgorithmAES256GCM, KeyReference: "test", Fingerprint: "0123456789abcdef0123456789abcdef", SecretDigest: "digest"}, nil
 }
 
+type protocolStore struct {
+	recordingStore
+	records []ProtocolBundleRecord
+}
+
+func (s *protocolStore) CurrentProtocolBundles(context.Context) ([]ProtocolBundleRecord, error) {
+	return s.records, nil
+}
+
+type protocolObserver struct{ values map[string][]byte }
+
+func (o *protocolObserver) ValidateProtocolBundle(_ string, value []byte) error {
+	if len(value) == 0 {
+		return ErrInvalidInput
+	}
+	return nil
+}
+func (o *protocolObserver) UpdateProtocolBundle(agentID string, value []byte) error {
+	if o.values == nil {
+		o.values = map[string][]byte{}
+	}
+	o.values[agentID] = bytes.Clone(value)
+	return nil
+}
+
 func TestAESGCMEncryptorRandomizesCiphertextAndSeparatesIdempotencyDigest(t *testing.T) {
 	root := bytes.Repeat([]byte{0x42}, 32)
 	encryptor, err := NewAESGCMEncryptor(root, bytes.Repeat([]byte{0x43}, 32), "test-key-v1")
@@ -79,6 +104,13 @@ func TestAESGCMEncryptorRandomizesCiphertextAndSeparatesIdempotencyDigest(t *tes
 	}
 	if _, err = dataAEAD.Open(nil, first.Nonce, first.Ciphertext, []byte("wrong-agent")); err == nil {
 		t.Fatal("ciphertext accepted the wrong agent encryption context")
+	}
+	opened, err := encryptor.Open(context.Background(), first, aad)
+	if err != nil || !bytes.Equal(opened, plaintext) {
+		t.Fatalf("credential decryptor failed: %q %v", opened, err)
+	}
+	if _, err = encryptor.Open(context.Background(), first, []byte("wrong-agent")); err == nil {
+		t.Fatal("credential decryptor accepted the wrong context")
 	}
 }
 
@@ -144,5 +176,36 @@ func TestCredentialRotationRejectsInvalidInputBeforeEncryption(t *testing.T) {
 	}
 	if encryptor.calls != 0 {
 		t.Fatalf("invalid credentials reached encryption: %d", encryptor.calls)
+	}
+}
+
+func TestProtocolBundleIsObservedAfterCommitAndRestoredFromCiphertext(t *testing.T) {
+	root := bytes.Repeat([]byte{0x31}, 32)
+	encryptor, err := NewAESGCMEncryptor(root, bytes.Repeat([]byte{0x32}, 32), "restore-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &protocolStore{}
+	observer := &protocolObserver{}
+	service, err := NewService(store, encryptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetProtocolObserver(observer)
+	bundle := `{"bearerToken":"transport","callbackKeyBase64":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=","callbackKeyVersion":"v1"}`
+	session := auth.Session{UserID: "owner", Roles: []string{"agent_provider"}}
+	if _, _, err = service.Rotate(context.Background(), session, "bundle", "agent-1", RotateInput{CredentialType: TypeProtocolBundle, Label: "runtime", Secret: bundle, ExpectedVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if string(observer.values["agent-1"]) != bundle {
+		t.Fatal("committed protocol bundle was not observed")
+	}
+	store.records = []ProtocolBundleRecord{{AgentID: "agent-1", OwnerID: "owner", CredentialType: TypeProtocolBundle, Envelope: store.envelopes[0]}}
+	observer.values = map[string][]byte{}
+	if err = service.RestoreProtocolBundles(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if string(observer.values["agent-1"]) != bundle {
+		t.Fatal("encrypted protocol bundle was not restored")
 	}
 }

@@ -76,12 +76,25 @@ func (service *SnapshotService) CreateRevision(ctx context.Context, draft Snapsh
 		return Snapshot{}, false, err
 	}
 	return service.repository.CreateRevision(ctx, draft.Key, func(revision int) (Snapshot, error) {
-		shuffle, err := FairShuffle(draft.Result.Qualified, SeedContext{
+		seedContext := SeedContext{
 			TaskID:           draft.Key.TaskID,
 			TaskSpecHash:     draft.Key.TaskSpecHash,
 			MatchRevision:    revision,
 			AlgorithmVersion: draft.Key.AlgorithmVersion,
-		}, service.policy)
+		}
+		var shuffle ShuffleResult
+		var err error
+		var policyHash string
+		switch draft.Key.AlgorithmVersion {
+		case FairShuffleAlgorithmVersion:
+			shuffle, err = FairShuffle(draft.Result.Qualified, seedContext, service.policy)
+			policyHash = shufflePolicyHash(draft.Key.AlgorithmVersion, service.policy)
+		case CategoryTagsAlgorithmVersion:
+			shuffle, err = categoryTagsSelections(draft.Result.Qualified, seedContext)
+			policyHash = categoryTagsPolicyHash()
+		default:
+			err = errors.New("unsupported matching algorithm version")
+		}
 		if err != nil {
 			return Snapshot{}, err
 		}
@@ -96,7 +109,7 @@ func (service *SnapshotService) CreateRevision(ctx context.Context, draft Snapsh
 			ModelVersion:         draft.ModelVersion,
 			SeedDigest:           shuffle.SeedDigest,
 			SeedKeyVersion:       shuffle.SeedKeyVersion,
-			PolicyHash:           shufflePolicyHash(draft.Key.AlgorithmVersion, service.policy),
+			PolicyHash:           policyHash,
 			ExplorationTriggered: shuffle.ExplorationTriggered,
 			Result:               cloneResult(draft.Result),
 			Selections:           slices.Clone(shuffle.Selections),
@@ -122,7 +135,7 @@ func HashEffectiveInput(value any) (string, error) {
 }
 
 func validateSnapshotDraft(draft SnapshotDraft) error {
-	if strings.TrimSpace(draft.Key.TaskID) == "" || !validSHA256(draft.Key.TaskSpecHash) || draft.Key.AlgorithmVersion != FairShuffleAlgorithmVersion || !validSHA256(draft.Key.EffectiveInputHash) {
+	if strings.TrimSpace(draft.Key.TaskID) == "" || !validSHA256(draft.Key.TaskSpecHash) || !slices.Contains([]string{FairShuffleAlgorithmVersion, CategoryTagsAlgorithmVersion}, draft.Key.AlgorithmVersion) || !validSHA256(draft.Key.EffectiveInputHash) {
 		return errors.New("invalid snapshot identity")
 	}
 	if strings.TrimSpace(draft.RuleVersion) == "" || strings.TrimSpace(draft.ModelVersion) == "" {
@@ -148,8 +161,21 @@ func validateSnapshotDraft(draft SnapshotDraft) error {
 		}
 	}
 	expectedScored := slices.Clone(draft.Result.Scored)
-	sortScored(expectedScored)
-	if !reflect.DeepEqual(expectedScored, draft.Result.Scored) || !reflect.DeepEqual(qualify(expectedScored), draft.Result.Qualified) {
+	expectedQualified := []ScoredCandidate(nil)
+	if draft.Key.AlgorithmVersion == CategoryTagsAlgorithmVersion {
+		if draft.Result.Strategy != CategoryTagsStrategy {
+			return errors.New("category-tags snapshot requires category-tags result")
+		}
+		sortCategoryTags(expectedScored)
+		expectedQualified = qualifyCategoryTags(expectedScored)
+	} else {
+		if draft.Result.Strategy != "" {
+			return errors.New("fair-shuffle snapshot requires legacy matching result")
+		}
+		sortScored(expectedScored)
+		expectedQualified = qualify(expectedScored)
+	}
+	if !reflect.DeepEqual(expectedScored, draft.Result.Scored) || !reflect.DeepEqual(expectedQualified, draft.Result.Qualified) {
 		return errors.New("snapshot scored order or qualified pool is not canonical")
 	}
 	excluded := make(map[string]struct{}, len(draft.Result.Excluded))

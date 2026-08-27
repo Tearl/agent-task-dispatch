@@ -18,11 +18,14 @@ const (
 )
 
 type Request struct {
-	TaskID                  string
-	PublisherID             string
-	Category                string
-	Language                string
-	Terms                   []string
+	TaskID      string
+	PublisherID string
+	Category    string
+	Language    string
+	Terms       []string
+	// Tags are the task labels used by the category-tags-v1 strategy. Terms
+	// remain available to the legacy recall and ranking pipeline.
+	Tags                    []string
 	RequiredCapabilities    []string
 	RequiredProtocolVersion string
 	RequiredVectorVersion   string
@@ -96,6 +99,7 @@ type RecallEvidence struct {
 }
 
 type ScoreBreakdown struct {
+	TagOverlap   int
 	TaskMatch    int
 	Reputation   int
 	PriceTime    int
@@ -122,6 +126,7 @@ type Degradation struct {
 }
 
 type Result struct {
+	Strategy     string
 	Qualified    []ScoredCandidate
 	Scored       []ScoredCandidate
 	Excluded     []Exclusion

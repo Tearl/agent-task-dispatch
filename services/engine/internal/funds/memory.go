@@ -77,7 +77,7 @@ func (repository *MemoryRepository) AuthorizeOverview(_ context.Context, draft A
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	if existing, ok := repository.allocations[draft.ID]; ok {
-		if !sameAllocationIdentity(existing, draft) {
+		if !sameAllocationIdentity(existing, draft) && !CompatibleAuthorizationReplay(existing, draft) {
 			return Allocation{}, false, ErrContentConflict
 		}
 		return existing, true, nil

@@ -16,6 +16,11 @@ type callbackRecord struct {
 	result      CallbackResult
 }
 
+type reconciliationRecord struct {
+	payloadHash string
+	result      ReconciliationResult
+}
+
 type MemoryRepository struct {
 	mu          sync.Mutex
 	now         func() time.Time
@@ -23,6 +28,7 @@ type MemoryRepository struct {
 	attempts    map[string][]Attempt
 	idempotency map[string]string
 	callbacks   map[string]callbackRecord
+	reconciled  map[string]reconciliationRecord
 }
 
 func NewMemoryRepository() *MemoryRepository {
@@ -32,6 +38,7 @@ func NewMemoryRepository() *MemoryRepository {
 		attempts:    make(map[string][]Attempt),
 		idempotency: make(map[string]string),
 		callbacks:   make(map[string]callbackRecord),
+		reconciled:  make(map[string]reconciliationRecord),
 	}
 }
 
@@ -269,7 +276,7 @@ func (repository *MemoryRepository) RecordUsage(_ context.Context, logicalExecut
 	now := repository.now()
 	execution.UsedCost = usedCost
 	execution.UpdatedAt = now
-	shouldStop := compareMoney(usedCost, execution.Spec.CostCap) >= 0
+	shouldStop := compareMoney(usedCost, execution.Spec.CostCap) > 0
 	if shouldStop {
 		execution.UsedCost = execution.Spec.CostCap
 		execution.Status = ExecutionCostStopped
@@ -358,6 +365,87 @@ func (repository *MemoryRepository) ApplyCallback(_ context.Context, verified Ve
 	return result, nil
 }
 
+func (repository *MemoryRepository) ApplyTerminalObservation(_ context.Context, verified VerifiedTerminalObservation) (ReconciliationResult, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	observation := verified.Observation
+	if previous, ok := repository.reconciled[observation.AttemptID]; ok {
+		if previous.payloadHash != verified.PayloadHash {
+			return ReconciliationResult{}, ErrContentConflict
+		}
+		result := previous.result
+		result.Replay = true
+		return cloneReconciliationResult(result), nil
+	}
+	executionValue, ok := repository.executions[observation.LogicalExecutionID]
+	if !ok {
+		return ReconciliationResult{}, ErrNotFound
+	}
+	items := repository.attempts[observation.LogicalExecutionID]
+	attemptIndex := -1
+	for index := range items {
+		if items[index].AttemptID == observation.AttemptID {
+			attemptIndex = index
+			break
+		}
+	}
+	if attemptIndex < 0 || observation.AgentID != executionValue.Spec.AgentID {
+		return ReconciliationResult{}, ErrInvalidInput
+	}
+	attempt := items[attemptIndex]
+	result := ReconciliationResult{Execution: cloneExecution(executionValue), Outcome: ReconciliationAccepted}
+	if attempt.FencingToken != observation.FencingToken || attemptIndex != len(items)-1 || executionValue.CurrentAttempt != attempt.Number {
+		result.Outcome = ReconciliationStaleFence
+	} else if terminalExecution(executionValue.Status) || attempt.Status != AttemptActive {
+		if !observationMatchesExecution(observation, executionValue) {
+			return ReconciliationResult{}, ErrContentConflict
+		}
+		result.Outcome = ReconciliationAlreadyTerminal
+	} else if executionValue.Status == ExecutionCancelRequested {
+		result.Outcome = ReconciliationLate
+	} else if compareMoney(observation.UsedCost, executionValue.UsedCost) < 0 {
+		return ReconciliationResult{}, ErrInvalidInput
+	} else {
+		now := repository.now()
+		executionValue.UsedCost = observation.UsedCost
+		executionValue.UpdatedAt = now
+		attempt.UpdatedAt = now
+		attempt.TerminalAt = &now
+		if compareMoney(observation.UsedCost, executionValue.Spec.CostCap) > 0 {
+			executionValue.UsedCost = executionValue.Spec.CostCap
+			executionValue.Status = ExecutionCostStopped
+			attempt.Status = AttemptFailed
+			result.Outcome = ReconciliationCostStop
+			result.ShouldCancel = true
+		} else if observation.Status == ExecutionSucceeded {
+			executionValue.Status = ExecutionSucceeded
+			executionValue.ContentHash = observation.ContentHash
+			executionValue.DeliverableRef = observation.DeliverableRef
+			attempt.Status = AttemptCompleted
+		} else {
+			executionValue.Status = ExecutionFailed
+			attempt.Status = AttemptFailed
+		}
+		repository.executions[observation.LogicalExecutionID] = executionValue
+		items[attemptIndex] = attempt
+		repository.attempts[observation.LogicalExecutionID] = items
+		result.Execution = cloneExecution(executionValue)
+	}
+	repository.reconciled[observation.AttemptID] = reconciliationRecord{payloadHash: verified.PayloadHash, result: cloneReconciliationResult(result)}
+	return result, nil
+}
+
+func terminalExecution(status string) bool {
+	return status == ExecutionSucceeded || status == ExecutionFailed || status == ExecutionCancelled || status == ExecutionCostStopped
+}
+
+func observationMatchesExecution(observation TerminalObservation, value Execution) bool {
+	if observation.Status == ExecutionSucceeded {
+		return value.Status == ExecutionSucceeded && value.ContentHash == observation.ContentHash && value.DeliverableRef == observation.DeliverableRef && value.UsedCost == observation.UsedCost
+	}
+	return (observation.Status == ExecutionFailed || observation.Status == ExecutionCancelled) && value.Status == ExecutionFailed && value.UsedCost == observation.UsedCost
+}
+
 func (repository *MemoryRepository) lockedAttempt(logicalExecutionID string, number int) (Execution, Attempt, int, error) {
 	execution, ok := repository.executions[logicalExecutionID]
 	if !ok {
@@ -390,6 +478,18 @@ func cloneCallbackResult(source CallbackResult) CallbackResult {
 	var result CallbackResult
 	if err = json.Unmarshal(encoded, &result); err != nil {
 		panic(fmt.Sprintf("clone callback result: %v", err))
+	}
+	return result
+}
+
+func cloneReconciliationResult(source ReconciliationResult) ReconciliationResult {
+	encoded, err := json.Marshal(source)
+	if err != nil {
+		panic(fmt.Sprintf("clone reconciliation result: %v", err))
+	}
+	var result ReconciliationResult
+	if err = json.Unmarshal(encoded, &result); err != nil {
+		panic(fmt.Sprintf("clone reconciliation result: %v", err))
 	}
 	return result
 }

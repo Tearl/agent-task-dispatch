@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/example/agent-platform/engine/internal/agent"
@@ -113,11 +115,58 @@ func (service *Service) Poll(ctx context.Context, logicalExecutionID string) (St
 	}
 	_, shouldStop, err := service.repository.RecordUsage(ctx, logicalExecutionID, attempt.Number, attempt.FencingToken, response.UsedCost)
 	if err != nil {
+		if err == ErrStaleFence {
+			current, getErr := service.repository.Get(ctx, logicalExecutionID)
+			if getErr == nil && terminalExecution(current.Status) {
+				return response, nil
+			}
+		}
 		return StatusResponse{}, err
 	}
 	if shouldStop {
 		_ = service.stopRemote(ctx, execution, attempt)
 		return response, ErrCostCapExceeded
+	}
+	if response.Status == ExecutionRunning {
+		return response, nil
+	}
+	observation := TerminalObservation{
+		LogicalExecutionID: logicalExecutionID,
+		AttemptID:          attempt.AttemptID,
+		AgentID:            execution.Spec.AgentID,
+		FencingToken:       attempt.FencingToken,
+		Status:             response.Status,
+		UsedCost:           response.UsedCost,
+	}
+	if response.Status == ExecutionSucceeded {
+		deliverableEnvelope, envelopeErr := service.envelope(execution, attempt, "deliverable", service.callbackNonce(attempt))
+		if envelopeErr != nil {
+			return StatusResponse{}, envelopeErr
+		}
+		deliverable, deliverableErr := service.client.Deliverable(ctx, execution.Spec.AgentEndpoint, deliverableEnvelope)
+		if deliverableErr != nil {
+			return StatusResponse{}, deliverableErr
+		}
+		if !validDigest(deliverable.ContentHash) || strings.TrimSpace(deliverable.DeliverableRef) == "" {
+			return StatusResponse{}, ErrInvalidInput
+		}
+		observation.ContentHash = deliverable.ContentHash
+		observation.DeliverableRef = deliverable.DeliverableRef
+	}
+	payload, err := json.Marshal(observation)
+	if err != nil {
+		return StatusResponse{}, err
+	}
+	result, err := service.repository.ApplyTerminalObservation(ctx, VerifiedTerminalObservation{Observation: observation, PayloadHash: hashValue(string(payload))})
+	if err != nil {
+		return StatusResponse{}, err
+	}
+	if !result.Replay && result.Outcome != ReconciliationStaleFence && result.Outcome != ReconciliationLate && result.Outcome != ReconciliationAlreadyTerminal {
+		if result.ShouldCancel {
+			_ = service.stopRemote(ctx, result.Execution, attempt)
+		} else {
+			_ = service.leaser.ReleaseCapacity(ctx, attempt.ReservationID, attempt.FencingToken)
+		}
 	}
 	return response, nil
 }

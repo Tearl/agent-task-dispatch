@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"math/big"
 	"time"
 
 	chainprojection "github.com/example/agent-platform/engine/internal/chain"
@@ -18,6 +20,71 @@ type settlementEntry struct {
 
 func projectSettlementEvent(ctx context.Context, tx *sql.Tx, scope chainprojection.Scope, event chainprojection.Event, now time.Time) error {
 	switch event.Type {
+	case chainprojection.EventTaskCreated:
+		publisher, _ := event.Payload["publisher"].(string)
+		amount, _ := event.Payload["amount"].(string)
+		var intentID, taskID, publisherID, publisherWallet, expectedAmount, overviewAmount, formalAmount, externalAmount, submittedHash, status string
+		var aggregateVersion int64
+		err := tx.QueryRowContext(ctx, `SELECT intent_id,task_id,publisher_id,publisher_wallet,total_amount::text,overview_amount::text,formal_amount::text,external_cost_amount::text,COALESCE(transaction_hash,''),status,aggregate_version
+FROM task_funding_intents WHERE chain_id=$1 AND contract_address=$2 AND chain_task_id=$3 FOR UPDATE`, scope.ChainID, scope.Contract, event.TaskID).Scan(&intentID, &taskID, &publisherID, &publisherWallet, &expectedAmount, &overviewAmount, &formalAmount, &externalAmount, &submittedHash, &status, &aggregateVersion)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Unknown deposits are retained as chain evidence but never attached to
+			// an off-chain task or ledger account.
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if publisher != publisherWallet || amount != expectedAmount || submittedHash != "" && submittedHash != event.TransactionHash || status != "prepared" && status != "submitted" && status != "confirmed" {
+			return nil
+		}
+		if status == "confirmed" {
+			return nil
+		}
+		asset := "evm:" + scope.ChainID + "/native"
+		discoveryID := settlementDigest("fund-account", "discovery_pool", taskID, asset, "double-entry-v1")
+		formalID := settlementDigest("fund-account", "formal_escrow", taskID, asset, "double-entry-v1")
+		if _, err = tx.ExecContext(ctx, `INSERT INTO fund_accounts(account_id,account_class,account_type,task_id,reference_id,asset_key,principal_owner_id,residual_recipient_id,refund_policy_version,state,balance,created_at,updated_at)
+VALUES($1,'business','discovery_pool',$2,$2,$3,$4,$4,'task-funding-v1','open',0,$5,$5) ON CONFLICT(account_type,reference_id,asset_key) DO NOTHING`, discoveryID, taskID, asset, publisherID, now); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO fund_accounts(account_id,account_class,account_type,task_id,reference_id,asset_key,principal_owner_id,residual_recipient_id,refund_policy_version,state,balance,created_at,updated_at)
+VALUES($1,'business','formal_escrow',$2,$2,$3,$4,$4,'task-funding-v1','open',0,$5,$5) ON CONFLICT(account_type,reference_id,asset_key) DO NOTHING`, formalID, taskID, asset, publisherID, now); err != nil {
+			return err
+		}
+		discoveryAmount, ok := addCanonicalAmounts(overviewAmount, externalAmount)
+		if !ok {
+			return errors.New("task funding amounts are invalid")
+		}
+		controlID := settlementDigest("fund-system-account", "funding_control", asset, "double-entry-v1")
+		if _, err = tx.ExecContext(ctx, `INSERT INTO fund_accounts(account_id,account_class,account_type,reference_id,asset_key,state,balance,created_at,updated_at) VALUES($1,'system','funding_control',$2,$2,'open',0,$3,$3) ON CONFLICT(account_type,reference_id,asset_key) DO NOTHING`, controlID, asset, now); err != nil {
+			return err
+		}
+		if discoveryAmount != "0" {
+			journalID := settlementDigest("task-funding", event.ID, "discovery")
+			if err = insertSettlementJournal(ctx, tx, journalID, "funding", taskID, event.ID, "escrow_funded", now, []settlementEntry{{controlID, "funding_control", "debit", discoveryAmount, asset}, {discoveryID, "discovery_pool", "credit", discoveryAmount, asset}}); err != nil {
+				return err
+			}
+		}
+		journalID := settlementDigest("task-funding", event.ID, "formal")
+		if err = insertSettlementJournal(ctx, tx, journalID, "funding", taskID, event.ID, "escrow_funded", now, []settlementEntry{{controlID, "funding_control", "debit", formalAmount, asset}, {formalID, "formal_escrow", "credit", formalAmount, asset}}); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE tasks SET status='escrowed',aggregate_version=aggregate_version+1,updated_at=$1 WHERE task_id=$2 AND publisher_id=$3 AND status='pending_escrow'`, now, taskID, publisherID)
+		if err != nil {
+			return err
+		}
+		if changed, _ := result.RowsAffected(); changed != 1 {
+			return errors.New("task funding state transition failed")
+		}
+		aggregateVersion++
+		if _, err = tx.ExecContext(ctx, `UPDATE task_funding_intents SET status='confirmed',transaction_hash=$1,chain_event_id=$2,aggregate_version=$3,updated_at=$4 WHERE intent_id=$5`, event.TransactionHash, event.ID, aggregateVersion, now, intentID); err != nil {
+			return err
+		}
+		stateID := settlementDigest("task-funding-state", intentID, "confirmed", fmt.Sprintf("%d", aggregateVersion))
+		_, err = tx.ExecContext(ctx, `INSERT INTO task_funding_intent_events(event_id,intent_id,aggregate_version,state,transaction_hash,chain_event_id,reason_code,occurred_at) VALUES($1,$2,$3,'confirmed',$4,$5,'confirmation_depth_reached',$6)`, stateID, intentID, aggregateVersion, event.TransactionHash, event.ID, now)
+		return err
+
 	case chainprojection.EventEarnings:
 		controller, _ := event.Payload["agentController"].(string)
 		payout, _ := event.Payload["payout"].(string)
@@ -88,7 +155,7 @@ ORDER BY reservation.created_at LIMIT 1 FOR UPDATE`, scope.ChainID, scope.Contra
 				return err
 			}
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE tasks SET status='refunded',aggregate_version=aggregate_version+1,updated_at=$2 WHERE task_id=$1 AND status<>'refunded'`, taskID, now)
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET status='refunded',deleted_at=CASE WHEN deletion_requested_at IS NOT NULL THEN $2 ELSE deleted_at END,aggregate_version=aggregate_version+1,updated_at=$2 WHERE task_id=$1 AND status<>'refunded'`, taskID, now)
 		return err
 
 	case chainprojection.EventDisputeDone:
@@ -178,25 +245,26 @@ func insertSettlementJournal(ctx context.Context, tx *sql.Tx, journalID, journal
 }
 
 func reverseSettlementBlock(ctx context.Context, tx *sql.Tx, scope chainprojection.Scope, blockHash string, now time.Time) error {
-	rows, err := tx.QueryContext(ctx, `SELECT journal.journal_id,journal.task_id,entry.account_id,entry.account_type,entry.direction,entry.amount::text,entry.asset_key
+	rows, err := tx.QueryContext(ctx, `SELECT journal.journal_id,journal.journal_type,journal.task_id,entry.account_id,entry.account_type,entry.direction,entry.amount::text,entry.asset_key
 FROM chain_events event JOIN fund_journals journal ON journal.source_ref=event.event_id
 JOIN fund_entries entry ON entry.journal_id=journal.journal_id
 WHERE event.chain_id=$1 AND event.contract_address=$2 AND event.block_hash=$3
-  AND journal.journal_type IN ('settlement_release','settlement_refund','earnings_withdrawal','change_order_release','change_order_residual','dispute_allocation')
+  AND journal.journal_type IN ('funding','settlement_release','settlement_refund','earnings_withdrawal','change_order_release','change_order_residual','dispute_allocation')
 ORDER BY journal.journal_id,entry.entry_index`, scope.ChainID, scope.Contract, blockHash)
 	if err != nil {
 		return err
 	}
 	type reversal struct {
 		taskID  string
+		funding bool
 		entries []settlementEntry
 	}
 	values := make(map[string]*reversal)
 	var order []string
 	for rows.Next() {
-		var journalID, accountID, accountType, direction, amount, asset string
+		var journalID, journalType, accountID, accountType, direction, amount, asset string
 		var taskID sql.NullString
-		if err = rows.Scan(&journalID, &taskID, &accountID, &accountType, &direction, &amount, &asset); err != nil {
+		if err = rows.Scan(&journalID, &journalType, &taskID, &accountID, &accountType, &direction, &amount, &asset); err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -206,6 +274,7 @@ ORDER BY journal.journal_id,entry.entry_index`, scope.ChainID, scope.Contract, b
 			if taskID.Valid {
 				value.taskID = taskID.String
 			}
+			value.funding = journalType == "funding"
 			values[journalID], order = value, append(order, journalID)
 		}
 		inverse := "credit"
@@ -224,8 +293,25 @@ ORDER BY journal.journal_id,entry.entry_index`, scope.ChainID, scope.Contract, b
 			return err
 		}
 		if value.taskID != "" {
-			if _, err = tx.ExecContext(ctx, `UPDATE tasks SET status='chain_reorg_pending',aggregate_version=aggregate_version+1,updated_at=$2 WHERE task_id=$1 AND status<>'chain_reorg_pending'`, value.taskID, now); err != nil {
+			target := "chain_reorg_pending"
+			if value.funding {
+				target = "pending_escrow"
+			}
+			if _, err = tx.ExecContext(ctx, `UPDATE tasks SET status=$2,aggregate_version=aggregate_version+1,updated_at=$3 WHERE task_id=$1 AND status<>$2`, value.taskID, target, now); err != nil {
 				return err
+			}
+			if value.funding {
+				var intentID string
+				var version int64
+				if err = tx.QueryRowContext(ctx, `UPDATE task_funding_intents SET status='orphaned',aggregate_version=aggregate_version+1,updated_at=$2 WHERE task_id=$1 AND status='confirmed' RETURNING intent_id,aggregate_version`, value.taskID, now).Scan(&intentID, &version); err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				if err == nil {
+					stateID := settlementDigest("task-funding-state", intentID, "orphaned", fmt.Sprintf("%d", version))
+					if _, err = tx.ExecContext(ctx, `INSERT INTO task_funding_intent_events(event_id,intent_id,aggregate_version,state,reason_code,occurred_at) VALUES($1,$2,$3,'orphaned','chain_reorganization',$4)`, stateID, intentID, version, now); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -264,6 +350,18 @@ func settlementDigest(parts ...string) string {
 		_, _ = hash.Write([]byte(part))
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+func addCanonicalAmounts(values ...string) (string, bool) {
+	total := new(big.Int)
+	for _, value := range values {
+		number, ok := new(big.Int).SetString(value, 10)
+		if !ok || number.Sign() < 0 || number.String() != value {
+			return "", false
+		}
+		total.Add(total, number)
+	}
+	return total.String(), true
 }
 
 func formalAccountForChainTask(ctx context.Context, tx *sql.Tx, chainTaskID string) (string, string, string, error) {

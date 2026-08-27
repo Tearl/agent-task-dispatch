@@ -26,6 +26,7 @@ type TaskInput struct {
 	Title           string
 	Description     string
 	ExpertType      string
+	Tags            []string
 	Language        string
 	OverviewBudget  string
 	FormalBudget    string
@@ -51,14 +52,14 @@ func (store *Store) Task(ctx context.Context, publisherID, taskID string) (TaskI
 
 func (store *Store) taskAtSpec(ctx context.Context, publisherID, taskID, specHash string) (TaskInput, error) {
 	var value TaskInput
-	var inputs, allowed pq.StringArray
-	err := store.db.QueryRowContext(ctx, `SELECT task.task_id,task.publisher_id,task.status,spec.content_hash,spec.title,spec.description,spec.expert_type,spec.language,spec.overview_budget::text,spec.formal_budget::text,spec.external_cost_cap::text,spec.deadline,spec.inputs,spec.allowed_tools,spec.delivery_format
+	var tags, inputs, allowed pq.StringArray
+	err := store.db.QueryRowContext(ctx, `SELECT task.task_id,task.publisher_id,task.status,spec.content_hash,spec.title,spec.description,spec.expert_type,spec.tags,spec.language,spec.overview_budget::text,spec.formal_budget::text,spec.external_cost_cap::text,spec.deadline,spec.inputs,spec.allowed_tools,spec.delivery_format
 FROM tasks task JOIN task_spec_versions spec ON spec.task_id=task.task_id AND (($3='' AND spec.version_no=task.current_spec_version) OR ($3<>'' AND spec.content_hash=$3))
-WHERE task.task_id=$1 AND task.publisher_id=$2`, taskID, publisherID, specHash).Scan(&value.ID, &value.PublisherID, &value.Status, &value.SpecHash, &value.Title, &value.Description, &value.ExpertType, &value.Language, &value.OverviewBudget, &value.FormalBudget, &value.ExternalCostCap, &value.Deadline, &inputs, &allowed, &value.DeliveryFormat)
+WHERE task.task_id=$1 AND task.publisher_id=$2`, taskID, publisherID, specHash).Scan(&value.ID, &value.PublisherID, &value.Status, &value.SpecHash, &value.Title, &value.Description, &value.ExpertType, &tags, &value.Language, &value.OverviewBudget, &value.FormalBudget, &value.ExternalCostCap, &value.Deadline, &inputs, &allowed, &value.DeliveryFormat)
 	if errors.Is(err, sql.ErrNoRows) {
 		return value, ErrNotFound
 	}
-	value.Inputs, value.AllowedTools = []string(inputs), []string(allowed)
+	value.Tags, value.Inputs, value.AllowedTools = []string(tags), []string(inputs), []string(allowed)
 	return value, err
 }
 

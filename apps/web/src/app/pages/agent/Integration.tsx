@@ -1,18 +1,24 @@
-import { Activity, Boxes, Cpu, PlusCircle, RefreshCw, ShieldCheck } from "lucide-react";
+import { Activity, Boxes, Cpu, PlusCircle, RefreshCw, Save, ShieldCheck, X } from "lucide-react";
+import { useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
 import { Page } from "../../components/AppShell";
 import { Bar, CtaButton, GhostButton, PageHeader, Panel, Pill, SectionTitle } from "../../components/kit/primitives";
-import { checkAgentHealth, readWorkspaceAgents } from "../../lib/platform-api";
+import { checkAgentHealth, readAgentProfile, readWorkspaceAgents, updateAgentProfile } from "../../lib/platform-api";
 import { useFinanceView } from "../../lib/use-finance-view";
 
 export default function AgentIntegration() {
   const navigate = useNavigate();
   const {value,error,loading,reload}=useFinanceView(readWorkspaceAgents);
   const agents=value?.agents??[];
+  const [editingAgentID,setEditingAgentID]=useState<string|null>(null);
+  const [endpointUrl,setEndpointUrl]=useState("");
+  const [saving,setSaving]=useState(false);
 
   const checkHealth=async(agent:typeof agents[number])=>{try{await checkAgentHealth(agent.id,agent.aggregateVersion);toast.success(`${agent.name} 健康检查已完成`);reload();}catch(cause){toast.error(cause instanceof Error?cause.message:"健康检查失败");}};
+  const editEndpoint=(agent:typeof agents[number])=>{setEditingAgentID(agent.id);setEndpointUrl(agent.endpointUrl??"");};
+  const saveEndpoint=async(agent:typeof agents[number])=>{if(saving)return;setSaving(true);try{const {agent:profile}=await readAgentProfile(agent.id);const updated=await updateAgentProfile(profile,endpointUrl.trim(),`${agent.id}:profile:${crypto.randomUUID()}`);await checkAgentHealth(agent.id,updated.aggregateVersion);toast.success(`${agent.name} 端点已更新并通过健康检查`);setEditingAgentID(null);reload();}catch(cause){toast.error(cause instanceof Error?cause.message:"更新 Agent 端点失败");}finally{setSaving(false);}};
 
   return (
     <Page>
@@ -76,8 +82,9 @@ export default function AgentIntegration() {
               >
                 健康检查
               </GhostButton>
-              <GhostButton className="flex-1">调用配置</GhostButton>
+              <GhostButton className="flex-1" onClick={()=>editEndpoint(agent)}>调用配置</GhostButton>
             </div>
+            {editingAgentID===agent.id?<form className="mt-4 space-y-3 border-t border-[var(--ap-border)] pt-4" onSubmit={(event)=>{event.preventDefault();void saveEndpoint(agent);}}><label htmlFor={`agent-endpoint-${agent.id}`} className="text-[11px] text-[var(--ap-muted)]">协议基础地址</label><input id={`agent-endpoint-${agent.id}`} type="url" required value={endpointUrl} onChange={(event)=>setEndpointUrl(event.target.value)} className="form-input" placeholder="https://agent.example.com" /><div className="flex gap-2"><button type="submit" disabled={saving} className="ap-cta inline-flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-2 text-[12px] disabled:opacity-50"><Save size={14}/>{saving?"保存中…":"保存并检查"}</button><GhostButton icon={X} disabled={saving} onClick={()=>setEditingAgentID(null)}>取消</GhostButton></div></form>:null}
           </Panel>
         ))}
       </div>

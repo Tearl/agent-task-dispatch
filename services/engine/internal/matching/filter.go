@@ -32,10 +32,20 @@ var reasonMessages = map[string]string{
 }
 
 func HardFilter(request Request, candidates []Candidate) ([]Candidate, []Exclusion) {
+	return filterCandidates(request, candidates, true)
+}
+
+// CategoryTagsFilter keeps operational, security, category, price and deadline
+// gates while omitting the legacy language, capability and vector match gates.
+func CategoryTagsFilter(request Request, candidates []Candidate) ([]Candidate, []Exclusion) {
+	return filterCandidates(request, candidates, false)
+}
+
+func filterCandidates(request Request, candidates []Candidate, legacyMatchGates bool) ([]Candidate, []Exclusion) {
 	eligible := make([]Candidate, 0, len(candidates))
 	excluded := make([]Exclusion, 0)
 	for _, candidate := range candidates {
-		reasons := filterReasons(request, candidate)
+		reasons := filterReasons(request, candidate, legacyMatchGates)
 		if len(reasons) == 0 {
 			eligible = append(eligible, candidate)
 		} else {
@@ -47,7 +57,7 @@ func HardFilter(request Request, candidates []Candidate) ([]Candidate, []Exclusi
 	return eligible, excluded
 }
 
-func filterReasons(request Request, candidate Candidate) []Reason {
+func filterReasons(request Request, candidate Candidate, legacyMatchGates bool) []Reason {
 	codes := make([]string, 0, 8)
 	if strings.TrimSpace(candidate.AgentID) == "" || strings.TrimSpace(candidate.ProviderID) == "" {
 		codes = append(codes, "agent_identity_invalid")
@@ -76,11 +86,13 @@ func filterReasons(request Request, candidate Candidate) []Reason {
 	if candidate.ProtocolVersion != request.RequiredProtocolVersion {
 		codes = append(codes, "protocol_mismatch")
 	}
-	if !containsFold(candidate.Languages, request.Language) {
-		codes = append(codes, "language_mismatch")
-	}
-	if !containsAllFold(candidate.Capabilities, request.RequiredCapabilities) {
-		codes = append(codes, "capability_missing")
+	if legacyMatchGates {
+		if !containsFold(candidate.Languages, request.Language) {
+			codes = append(codes, "language_mismatch")
+		}
+		if !containsAllFold(candidate.Capabilities, request.RequiredCapabilities) {
+			codes = append(codes, "capability_missing")
+		}
 	}
 	if candidate.RiskStatus != "eligible" {
 		codes = append(codes, "risk_not_eligible")
@@ -88,8 +100,10 @@ func filterReasons(request Request, candidate Candidate) []Reason {
 	if !walletAddress(candidate.PayoutAddress) {
 		codes = append(codes, "payout_address_invalid")
 	}
-	if candidate.VectorVersion != request.RequiredVectorVersion {
-		codes = append(codes, "vector_version_mismatch")
+	if legacyMatchGates {
+		if candidate.VectorVersion != request.RequiredVectorVersion {
+			codes = append(codes, "vector_version_mismatch")
+		}
 	}
 	finishAt := request.Now.Add(candidate.EstimatedDuration)
 	if candidate.EstimatedDuration <= 0 || finishAt.After(request.Deadline) {

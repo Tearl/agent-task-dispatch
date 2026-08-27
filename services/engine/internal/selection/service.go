@@ -53,16 +53,16 @@ func (service *Service) Reserve(ctx context.Context, session auth.Session, key, 
 	if err != nil {
 		return Intent{}, false, err
 	}
+	eligible, err := service.repository.Eligibility(ctx, session.UserID, taskID, request.BatchID, request.SlotID)
+	if err != nil {
+		return Intent{}, false, err
+	}
 	if existing, replay, replayErr := service.repository.Replay(ctx, session.UserID, key, requestHash); replayErr != nil {
 		return Intent{}, false, replayErr
 	} else if replay {
 		return service.intent(existing, true)
 	}
 
-	eligible, err := service.repository.Eligibility(ctx, session.UserID, taskID, request.BatchID, request.SlotID)
-	if err != nil {
-		return Intent{}, false, err
-	}
 	now := service.now().UTC()
 	deadline := now.Add(service.config.ReservationTTL)
 	if eligible.TaskDeadline.Before(deadline) {
@@ -130,6 +130,11 @@ func (service *Service) Get(ctx context.Context, session auth.Session, taskID, r
 	if reservation.TaskID != taskID {
 		return Intent{}, ErrNotFound
 	}
+	if reservation.Status == StatusReserved || reservation.Status == StatusSubmitted {
+		if _, err = service.repository.Eligibility(ctx, session.UserID, taskID, reservation.BatchID, reservation.SlotID); err != nil {
+			return Intent{}, ErrInvalidState
+		}
+	}
 	intent, _, err := service.intent(reservation, false)
 	return intent, err
 }
@@ -147,6 +152,11 @@ func (service *Service) Reconcile(ctx context.Context, session auth.Session, tas
 	}
 	if reservation.TaskID != taskID {
 		return Reservation{}, nil, ErrNotFound
+	}
+	if reservation.Status == StatusReserved || reservation.Status == StatusSubmitted {
+		if _, err = service.repository.Eligibility(ctx, session.UserID, taskID, reservation.BatchID, reservation.SlotID); err != nil {
+			return Reservation{}, nil, ErrInvalidState
+		}
 	}
 	result, err := service.chain.VerifySelection(ctx, strings.ToLower(request.TransactionHash))
 	if err != nil {

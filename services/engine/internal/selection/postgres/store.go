@@ -24,7 +24,8 @@ func NewStore(db *sql.DB) (*Store, error) {
 }
 
 func (store *Store) Replay(ctx context.Context, publisherID, key, requestHash string) (selection.Reservation, bool, error) {
-	value, storedHash, err := loadReservation(store.db.QueryRowContext(ctx, reservationSelect+` WHERE publisher_id=$1 AND idempotency_key=$2`, publisherID, key))
+	value, storedHash, err := loadReservation(store.db.QueryRowContext(ctx, reservationSelect+` WHERE publisher_id=$1 AND idempotency_key=$2
+AND EXISTS (SELECT 1 FROM tasks task WHERE task.task_id=selection_reservations.task_id AND task.status='awaiting_selection' AND task.deletion_requested_at IS NULL AND task.deleted_at IS NULL)`, publisherID, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return selection.Reservation{}, false, nil
 	}
@@ -57,6 +58,9 @@ func (store *Store) Prepare(ctx context.Context, mutation selection.Mutation, dr
 	if existing, storedHash, replayErr := loadReservation(tx.QueryRowContext(ctx, reservationSelect+` WHERE publisher_id=$1 AND idempotency_key=$2 FOR UPDATE`, mutation.PublisherID, mutation.IdempotencyKey)); replayErr == nil {
 		if storedHash != mutation.RequestHash {
 			return selection.Reservation{}, false, persistence.ErrIdempotencyConflict
+		}
+		if err = requireSelectableTask(ctx, tx, existing.TaskID); err != nil {
+			return selection.Reservation{}, false, err
 		}
 		if err = tx.Commit(); err != nil {
 			return selection.Reservation{}, false, err
@@ -131,6 +135,9 @@ func (store *Store) RecordSubmitted(ctx context.Context, reservationID, transact
 	if err != nil {
 		return selection.Reservation{}, err
 	}
+	if err = requireSelectableTask(ctx, tx, value.TaskID); err != nil {
+		return selection.Reservation{}, err
+	}
 	if value.Status == selection.StatusSubmitted && value.TransactionHash == transactionHash {
 		_ = tx.Commit()
 		return value, nil
@@ -199,7 +206,7 @@ func (store *Store) Confirm(ctx context.Context, reservationID string, result se
 	if _, err = tx.ExecContext(ctx, `INSERT INTO active_assignments (task_id,assignment_id,activated_at) VALUES ($1,$2,$3)`, assignment.TaskID, assignment.ID, now); err != nil {
 		return selection.Reservation{}, selection.Assignment{}, false, mapConflict(err)
 	}
-	resultUpdate, err := tx.ExecContext(ctx, `UPDATE tasks SET status='assigned',aggregate_version=aggregate_version+1,updated_at=$1 WHERE task_id=$2 AND status='awaiting_selection'`, now, value.TaskID)
+	resultUpdate, err := tx.ExecContext(ctx, `UPDATE tasks SET status='assigned',aggregate_version=aggregate_version+1,updated_at=$1 WHERE task_id=$2 AND status='awaiting_selection' AND deletion_requested_at IS NULL AND deleted_at IS NULL`, now, value.TaskID)
 	if err != nil {
 		return selection.Reservation{}, selection.Assignment{}, false, err
 	}
@@ -285,8 +292,19 @@ JOIN agents agent ON agent.agent_id=slot.agent_id AND agent.owner_id=slot.provid
 JOIN agent_price_versions price ON price.agent_id=agent.agent_id AND price.version_no=slot.price_version
 JOIN fund_allocations allocation ON allocation.allocation_id=slot.allocation_id AND allocation.status='captured' AND allocation.captured_overview=slot.overview_price
 WHERE task.publisher_id=$1 AND task.task_id=$2 AND task.status='awaiting_selection' AND task.formal_budget>=price.formal_package_gross_price
+AND task.deletion_requested_at IS NULL AND task.deleted_at IS NULL
 AND candidate.price_version=slot.price_version AND candidate.formal_price=price.formal_package_gross_price::text
 AND NOT EXISTS (SELECT 1 FROM match_snapshots newer WHERE newer.task_id=task.task_id AND newer.sealed_at IS NOT NULL AND newer.match_revision>batch.match_revision)`
+
+func requireSelectableTask(ctx context.Context, tx *sql.Tx, taskID string) error {
+	var selectedTaskID string
+	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM tasks WHERE task_id=$1 AND status='awaiting_selection' AND deletion_requested_at IS NULL AND deleted_at IS NULL FOR UPDATE`, taskID).Scan(&selectedTaskID); errors.Is(err, sql.ErrNoRows) {
+		return selection.ErrInvalidState
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
 
 func loadEligibility(row *sql.Row) (value selection.Eligibility, err error) {
 	err = row.Scan(&value.TaskID, &value.TaskDeadline, &value.SnapshotID, &value.TaskSpecHash, &value.MatchRevision, &value.PolicyHash, &value.BatchID, &value.SlotID, &value.AgentID, &value.ProviderID, &value.AgentController, &value.Payout, &value.PriceVersion, &value.QuoteHash, &value.AllocationID, &value.OverviewPrice, &value.FormalGrossPrice)

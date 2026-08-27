@@ -17,16 +17,18 @@ var (
 )
 
 type Task struct {
-	ID              string    `json:"id"`
-	Title           string    `json:"title"`
-	Category        string    `json:"category"`
-	Status          string    `json:"status"`
-	OverviewBudget  string    `json:"overviewBudget"`
-	FormalBudget    string    `json:"formalBudget"`
-	ExternalCostCap string    `json:"externalCostCap"`
-	Deadline        time.Time `json:"deadline"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID               string    `json:"id"`
+	Title            string    `json:"title"`
+	Category         string    `json:"category"`
+	Status           string    `json:"status"`
+	OverviewBudget   string    `json:"overviewBudget"`
+	FormalBudget     string    `json:"formalBudget"`
+	ExternalCostCap  string    `json:"externalCostCap"`
+	AggregateVersion int64     `json:"aggregateVersion"`
+	DeletionPending  bool      `json:"deletionPending"`
+	Deadline         time.Time `json:"deadline"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 type Agent struct {
@@ -73,7 +75,7 @@ func (service *Service) Tasks(ctx context.Context, session auth.Session) ([]Task
 	if !authorized(session, "publisher") {
 		return nil, ErrForbidden
 	}
-	rows, err := service.db.QueryContext(ctx, `SELECT task_id,title,expert_type,status,overview_budget::text,formal_budget::text,external_cost_cap::text,deadline,created_at,updated_at FROM tasks WHERE publisher_id=$1 ORDER BY created_at DESC LIMIT 200`, session.UserID)
+	rows, err := service.db.QueryContext(ctx, `SELECT task_id,title,expert_type,status,overview_budget::text,formal_budget::text,external_cost_cap::text,aggregate_version,deletion_requested_at IS NOT NULL,deadline,created_at,updated_at FROM tasks WHERE publisher_id=$1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 200`, session.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +83,7 @@ func (service *Service) Tasks(ctx context.Context, session auth.Session) ([]Task
 	values := []Task{}
 	for rows.Next() {
 		var value Task
-		if err = rows.Scan(&value.ID, &value.Title, &value.Category, &value.Status, &value.OverviewBudget, &value.FormalBudget, &value.ExternalCostCap, &value.Deadline, &value.CreatedAt, &value.UpdatedAt); err != nil {
+		if err = rows.Scan(&value.ID, &value.Title, &value.Category, &value.Status, &value.OverviewBudget, &value.FormalBudget, &value.ExternalCostCap, &value.AggregateVersion, &value.DeletionPending, &value.Deadline, &value.CreatedAt, &value.UpdatedAt); err != nil {
 			return nil, err
 		}
 		values = append(values, value)
