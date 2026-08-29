@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: agent
       POSTGRES_PASSWORD: agent
     ports:
-      - "5432:5432"
+      - "${AGENT_PLATFORM_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -21,7 +21,7 @@ services:
     image: redis:8-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6379:6379"
+      - "${AGENT_PLATFORM_REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -38,7 +38,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       DEBUG: "0"
     ports:
-      - "4566:4566"
+      - "${AGENT_PLATFORM_LOCALSTACK_PORT:-4566}:4566"
     volumes:
       - ./infrastructure/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
       - localstack-data:/var/lib/localstack
@@ -47,6 +47,19 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  anvil:
+    profiles: ["acceptance"]
+    image: ghcr.io/foundry-rs/foundry:v1.7.1@sha256:8347b728d5d393dac1c018691b36f506d23b9dcd78341d40ea0fcb11c3a19cdd
+    entrypoint: ["anvil"]
+    command: ["--silent", "--host", "0.0.0.0", "--port", "8545", "--chain-id", "31337", "--block-time", "1"]
+    ports:
+      - "${AGENT_PLATFORM_ANVIL_PORT:-8545}:8545"
+    healthcheck:
+      test: ["CMD", "cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
 volumes:
   postgres-data:

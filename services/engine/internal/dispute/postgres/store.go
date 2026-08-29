@@ -16,8 +16,7 @@ import (
 )
 
 type Store struct {
-	db              *sql.DB
-	disputeResolver string
+	db *sql.DB
 }
 
 var addressPattern = regexp.MustCompile(`^0x[0-9a-f]{40}$`)
@@ -33,21 +32,20 @@ func NewStore(db *sql.DB, disputeResolver ...string) (*Store, error) {
 			return nil, errors.New("invalid dispute resolver address")
 		}
 	}
-	return &Store{db: db, disputeResolver: resolver}, nil
+	return &Store{db: db}, nil
 }
 
 func (s *Store) Context(ctx context.Context, taskID string) (dispute.Context, error) {
 	var c dispute.Context
 	var status string
-	err := s.db.QueryRowContext(ctx, `SELECT task.task_id,assignment.assignment_id,package.package_id,task.publisher_id,assignment.provider_id,reservation.chain_id::text,reservation.contract_address,reservation.proof_task_id,reservation.publisher_wallet,reservation.agent_controller,reservation.payout_address,assignment.formal_payable::text,'evm:'||reservation.chain_id::text||'/native',task.status,COALESCE((SELECT max(intent.created_at) FROM formal_acceptance_intents intent WHERE intent.task_id=task.task_id),task.updated_at)+interval '7 days'
-FROM tasks task JOIN assignments assignment ON assignment.task_id=task.task_id JOIN active_assignments active ON active.assignment_id=assignment.assignment_id JOIN selection_reservations reservation ON reservation.reservation_id=assignment.reservation_id JOIN formal_packages package ON package.task_id=task.task_id WHERE task.task_id=$1`, taskID).Scan(&c.TaskID, &c.AssignmentID, &c.DeliveryUnitID, &c.PublisherID, &c.AgentProviderID, &c.ChainID, &c.ContractAddress, &c.ChainTaskID, &c.PublisherWallet, &c.AgentController, &c.AgentPayout, &c.FrozenAmount, &c.Asset, &status, &c.DisputeDeadline)
+	err := s.db.QueryRowContext(ctx, `SELECT task.task_id,assignment.assignment_id,package.package_id,task.publisher_id,assignment.provider_id,reservation.chain_id::text,reservation.contract_address,reservation.proof_task_id,reservation.publisher_wallet,reservation.agent_controller,reservation.payout_address,assignment.formal_payable::text,deployment.asset_key,deployment.dispute_resolver_address,task.status,COALESCE((SELECT max(intent.created_at) FROM formal_acceptance_intents intent WHERE intent.task_id=task.task_id),task.updated_at)+interval '7 days'
+	FROM tasks task JOIN assignments assignment ON assignment.task_id=task.task_id JOIN active_assignments active ON active.assignment_id=assignment.assignment_id JOIN selection_reservations reservation ON reservation.reservation_id=assignment.reservation_id JOIN escrow_deployments deployment ON deployment.chain_id=reservation.chain_id AND deployment.contract_address=reservation.contract_address JOIN formal_packages package ON package.task_id=task.task_id WHERE task.task_id=$1`, taskID).Scan(&c.TaskID, &c.AssignmentID, &c.DeliveryUnitID, &c.PublisherID, &c.AgentProviderID, &c.ChainID, &c.ContractAddress, &c.ChainTaskID, &c.PublisherWallet, &c.AgentController, &c.AgentPayout, &c.FrozenAmount, &c.Asset, &c.DisputeResolver, &status, &c.DisputeDeadline)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, dispute.ErrNotFound
 	}
 	if err != nil {
 		return c, err
 	}
-	c.DisputeResolver = s.disputeResolver
 	c.FeeCap = "0"
 	c.Eligible = contains([]string{"formal_review", "accepted", "settlement_pending", "settled", "dispute_requested", "disputed"}, status)
 	if !c.Eligible {

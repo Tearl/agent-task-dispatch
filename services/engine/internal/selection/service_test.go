@@ -89,6 +89,21 @@ func TestReserveCreatesSignedNetIntentAndReplaysWithoutNewCapacity(t *testing.T)
 	}
 }
 
+func TestReserveRejectsFundingFromAnotherDeployment(t *testing.T) {
+	service, repository, capacity, _ := newTestService(t)
+	request := Request{BatchID: digest("deployment-batch"), SlotID: digest("deployment-slot")}
+	eligible := eligibility("task-deployment", request.BatchID, request.SlotID, "agent-1")
+	eligible.ContractAddress = "0x0000000000000000000000000000000000009999"
+	repository.SetEligibility("publisher-1", eligible)
+
+	if _, _, err := service.Reserve(context.Background(), publisherSession(), "select-deployment", eligible.TaskID, request); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("cross-deployment funding must fail closed, got %v", err)
+	}
+	if len(capacity.leases) != 0 {
+		t.Fatalf("cross-deployment selection reserved capacity: %d", len(capacity.leases))
+	}
+}
+
 func TestDeletedTaskCannotReplayReadOrReconcileLiveSelection(t *testing.T) {
 	service, repository, _, chain := newTestService(t)
 	request := Request{BatchID: digest("deleted-batch"), SlotID: digest("deleted-slot")}
@@ -265,7 +280,7 @@ func newTestService(t *testing.T) (*Service, *MemoryRepository, *capacityStub, *
 }
 
 func eligibility(taskID, batchID, slotID, agentID string) Eligibility {
-	return Eligibility{TaskID: taskID, TaskDeadline: testNow.Add(time.Hour), SnapshotID: digest("snapshot-" + taskID), TaskSpecHash: digest("spec-" + taskID), MatchRevision: 1, PolicyHash: digest("policy"), BatchID: batchID, SlotID: slotID, AgentID: agentID, ProviderID: "provider-" + agentID, AgentController: "0x000000000000000000000000000000000000beef", Payout: "0x000000000000000000000000000000000000f00d", PriceVersion: 1, QuoteHash: digest("quote-" + agentID), AllocationID: digest("allocation-" + slotID), OverviewPrice: "10", FormalGrossPrice: "100"}
+	return Eligibility{TaskID: taskID, ChainTaskID: TaskChainID(taskID), ChainID: "31337", ContractAddress: "0x0000000000000000000000000000000000001234", TaskDeadline: testNow.Add(time.Hour), SnapshotID: digest("snapshot-" + taskID), TaskSpecHash: digest("spec-" + taskID), MatchRevision: 1, PolicyHash: digest("policy"), BatchID: batchID, SlotID: slotID, AgentID: agentID, ProviderID: "provider-" + agentID, AgentController: "0x000000000000000000000000000000000000beef", Payout: "0x000000000000000000000000000000000000f00d", PriceVersion: 1, QuoteHash: digest("quote-" + agentID), AllocationID: digest("allocation-" + slotID), OverviewPrice: "10", FormalGrossPrice: "100"}
 }
 
 func publisherSession() auth.Session {

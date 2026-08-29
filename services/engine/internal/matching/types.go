@@ -45,31 +45,32 @@ type Reputation struct {
 }
 
 type Candidate struct {
-	AgentID           string
-	ProviderID        string
-	Status            string
-	ApprovalStatus    string
-	Health            string
-	HealthCheckedAt   *time.Time
-	HealthValidUntil  *time.Time
-	MaxConcurrency    int
-	ActiveCapacity    int
-	Category          string
-	Languages         []string
-	Tags              []string
-	Capabilities      []string
-	ProtocolVersion   string
-	RiskStatus        string
-	PayoutAddress     string
-	VectorVersion     string
-	EstimatedDuration time.Duration
-	OverviewPrice     string
-	FormalPrice       string
-	ExternalCostCap   string
-	PriceVersion      int
-	ExposureCount     int
-	EffectiveSamples  int
-	Reputation        Reputation
+	AgentID             string
+	ProviderID          string
+	Status              string
+	ApprovalStatus      string
+	Health              string
+	HealthCheckedAt     *time.Time
+	HealthValidUntil    *time.Time
+	MaxConcurrency      int
+	ActiveCapacity      int
+	Category            string
+	Languages           []string
+	Tags                []string
+	Capabilities        []string
+	ProtocolVersion     string
+	RiskStatus          string
+	PayoutAddress       string
+	VectorVersion       string
+	EstimatedDuration   time.Duration
+	OverviewPrice       string
+	FormalPrice         string
+	ExternalCostCap     string
+	PriceVersion        int
+	ExposureCount       int
+	EffectiveSamples    int
+	ReputationAvailable bool
+	Reputation          Reputation
 }
 
 type Reason struct {

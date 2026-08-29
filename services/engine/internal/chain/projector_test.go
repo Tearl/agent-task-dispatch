@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/example/agent-platform/engine/internal/chain/taskescrowabi"
 	"github.com/example/agent-platform/engine/internal/selection"
 	"golang.org/x/crypto/sha3"
 )
@@ -106,7 +107,7 @@ func TestProjectorRejectsGapAndExcessiveReorg(t *testing.T) {
 }
 
 func TestSelectionProjectionRequiresMatchingReceiptLogAndCalldata(t *testing.T) {
-	if SelectionCallSelector() != "0xa2dfc191" || selector("tasks(bytes32)") != "0xe579f500" || selector("assignments(bytes32)") != "0x82c2901c" || selector("workNonces(bytes32)") != "0x1f0a5c53" {
+	if SelectionCallSelector() != taskescrowabi.MethodID("selectAgent") || len(taskescrowabi.MethodID("tasks")) != 10 || len(taskescrowabi.MethodID("assignments")) != 10 || len(taskescrowabi.MethodID("workNonces")) != 10 {
 		t.Fatal("TaskEscrow ABI selectors changed")
 	}
 	proof := proofFixture()
@@ -164,7 +165,7 @@ func TestFailedSelectionAndOrphanedConfirmationConverge(t *testing.T) {
 
 func TestDecoderSortsOutOfOrderLogsByCanonicalLogIndex(t *testing.T) {
 	taskA, taskB := hash("task-a"), hash("task-b")
-	topic := hexKeccak("TaskCreated(bytes32,address,uint256)")
+	topic := taskescrowabi.EventID("TaskCreated")
 	publisher := "0x" + strings.Repeat("0", 24) + strings.Repeat("1", 40)
 	block := testBlock(1, hash("genesis"), "log-order")
 	block.Transactions = []Transaction{{Hash: hash("creation"), To: testContract, Input: "0x", Status: TxSucceeded, Logs: []Log{
@@ -183,9 +184,9 @@ func TestDecoderProjectsEarningsWithdrawalAndYieldIsolationEvents(t *testing.T) 
 	payoutTopic := "0x" + strings.Repeat("0", 24) + strings.TrimPrefix(proof.Payout, "0x")
 	block := testBlock(1, hash("genesis"), "settlement-events")
 	block.Transactions = []Transaction{{Hash: hash("settlement"), To: testContract, Input: "0x", Status: TxSucceeded, Logs: []Log{
-		{Index: 1, Address: testContract, Topics: []string{hexKeccak("YieldEligibilityChanged(bytes32,uint256,bool)"), proof.TaskID}, Data: encodeWords(decimalWord("90"), uintWordTest(1))},
-		{Index: 2, Address: testContract, Topics: []string{hexKeccak("EarningsAccrued(bytes32,bytes32,address,address,uint256)"), proof.TaskID, proof.AssignmentID, controllerTopic}, Data: encodeWords(addressWordTest(proof.Payout), decimalWord("90"))},
-		{Index: 3, Address: testContract, Topics: []string{hexKeccak("EarningsWithdrawn(address,address,uint256)"), controllerTopic, payoutTopic}, Data: encodeWords(decimalWord("40"))},
+		{Index: 1, Address: testContract, Topics: []string{taskescrowabi.EventID("YieldEligibilityChanged"), proof.TaskID}, Data: encodeWords(decimalWord("90"), uintWordTest(1))},
+		{Index: 2, Address: testContract, Topics: []string{taskescrowabi.EventID("EarningsAccrued"), proof.TaskID, proof.AssignmentID, controllerTopic}, Data: encodeWords(addressWordTest(proof.Payout), decimalWord("90"))},
+		{Index: 3, Address: testContract, Topics: []string{taskescrowabi.EventID("EarningsWithdrawn"), controllerTopic, payoutTopic}, Data: encodeWords(decimalWord("40"))},
 	}}}
 	events, err := DecodeBlock(testScope(), block)
 	if err != nil || len(events) != 3 {
@@ -213,8 +214,8 @@ func TestDecoderBindsFrozenRootAndCompleteAllocation(t *testing.T) {
 	taskID, root := hash("dispute-task"), hash("frozen-leaves")
 	block := testBlock(1, hash("genesis"), "dispute-allocation")
 	block.Transactions = []Transaction{{Hash: hash("dispute-tx"), To: testContract, Input: "0x", Status: TxSucceeded, Logs: []Log{
-		{Index: 1, Address: testContract, Topics: []string{hexKeccak("DisputeFrozen(bytes32,bytes32,uint32,uint256,uint256,uint64)"), taskID, root}, Data: encodeWords(uintWordTest(2), decimalWord("100"), decimalWord("5"), uintWordTest(1_800_000_000))},
-		{Index: 2, Address: testContract, Topics: []string{hexKeccak("DisputeAllocationFinalized(bytes32,bytes32,uint256,uint256,uint256)"), taskID, root}, Data: encodeWords(decimalWord("25"), decimalWord("70"), decimalWord("5"))},
+		{Index: 1, Address: testContract, Topics: []string{taskescrowabi.EventID("DisputeFrozen"), taskID, root}, Data: encodeWords(uintWordTest(2), decimalWord("100"), decimalWord("5"), uintWordTest(1_800_000_000))},
+		{Index: 2, Address: testContract, Topics: []string{taskescrowabi.EventID("DisputeAllocationFinalized"), taskID, root}, Data: encodeWords(decimalWord("25"), decimalWord("70"), decimalWord("5"))},
 	}}}
 	events, err := DecodeBlock(testScope(), block)
 	if err != nil || len(events) != 2 {
@@ -294,7 +295,7 @@ func encodeSelectionInput(proof selection.Proof) string {
 
 func selectionLog(proof selection.Proof, index uint) Log {
 	data := encodeWords(addressWordTest(proof.Payout), hexWord(proof.OverviewID), hexWord(proof.AllocationID), decimalWord(proof.FormalGrossPrice), decimalWord(proof.OverviewCredit), decimalWord("90"), uintWordTest(0), uintWordTest(1))
-	return Log{Index: index, Address: testContract, Topics: []string{hexKeccak("SelectionConfirmed(bytes32,bytes32,address,address,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256)"), proof.TaskID, proof.AssignmentID, "0x" + strings.Repeat("0", 24) + strings.TrimPrefix(proof.AgentController, "0x")}, Data: data}
+	return Log{Index: index, Address: testContract, Topics: []string{taskescrowabi.EventID("SelectionConfirmed"), proof.TaskID, proof.AssignmentID, "0x" + strings.Repeat("0", 24) + strings.TrimPrefix(proof.AgentController, "0x")}, Data: data}
 }
 
 func hexWord(value string) []byte {

@@ -21,9 +21,16 @@
     "dev:consumer": "pnpm --filter @agent-platform/engine dev:consumer",
     "dev:chain": "anvil --silent --host 127.0.0.1 --port 8545 --chain-id 31337 --block-time 1",
     "chain:deploy": "sh ./scripts/deploy-local-escrow.sh",
+    "chain:verify-nonce": "sh ./scripts/verify-work-nonce-anvil.sh",
+    "abi:generate": "node ./scripts/generate-escrow-bindings.mjs",
+    "abi:check": "node ./scripts/generate-escrow-bindings.mjs --check",
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
-    "infra:logs": "docker compose logs -f"
+    "infra:logs": "docker compose logs -f",
+    "acceptance:up": "sh ./scripts/local-acceptance.sh up",
+    "acceptance:smoke": "sh ./scripts/local-acceptance.sh smoke",
+    "acceptance:verify": "sh ./scripts/local-acceptance.sh verify",
+    "acceptance:down": "sh ./scripts/local-acceptance.sh down"
   },
   "dependencies": {
     "@agent-platform/env": "workspace:*",

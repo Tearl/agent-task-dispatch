@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/example/agent-platform/engine/internal/chain/taskescrowabi"
 )
 
 func TestRPCSourceValidatesNetworkAndDecodesAuthoritativeResponses(t *testing.T) {
@@ -80,15 +82,15 @@ func TestRPCInventoryUsesHistoricalBlockTagAndContractGetters(t *testing.T) {
 		seen[selectorValue] = true
 		var result string
 		switch selectorValue {
-		case selector("tasks(bytes32)"):
+		case taskescrowabi.MethodID("tasks"):
 			result = encodeWords(addressWordTest("0x000000000000000000000000000000000000cafe"), addressWordTest(proof.Payout), decimalWord("90"), uintWordTest(2))
-		case selector("assignments(bytes32)"):
+		case taskescrowabi.MethodID("assignments"):
 			result = encodeWords(hexWord(proof.AssignmentID), addressWordTest(proof.AgentController), addressWordTest(proof.Payout), hexWord(proof.OverviewID), hexWord(proof.AllocationID), hexWord(proof.QuoteHash), hexWord(proof.TaskSpecHash), uintWordTest(1), uintWordTest(2), decimalWord("100"), decimalWord("10"), decimalWord("90"), hexWord(proof.PolicyHash))
-		case selector("workNonces(bytes32)"):
+		case taskescrowabi.MethodID("workNonces"):
 			result = encodeWords(uintWordTest(1))
-		case selector("yieldEligiblePrincipal(bytes32)"):
+		case taskescrowabi.MethodID("yieldEligiblePrincipal"):
 			result = encodeWords(decimalWord("90"))
-		case selector("claimableEarnings(address,address)"):
+		case taskescrowabi.MethodID("claimableEarnings"):
 			if len(input["data"]) != 10+64+64 {
 				t.Errorf("claimable getter arguments were not ABI words: %s", input["data"])
 			}

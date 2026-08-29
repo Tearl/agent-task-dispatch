@@ -165,6 +165,72 @@ func TestAgentMigrationEnforcesLifecyclePriceAndCapacityInvariants(t *testing.T)
 	}
 }
 
+func TestMatchingAuthorityMigrationFailsClosedAndBoundsReputation(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000029_matching_authority.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"approval_status text NOT NULL DEFAULT 'pending'",
+		"risk_status text NOT NULL DEFAULT 'pending'",
+		"matching_vector_version text",
+		"reputation_quality BETWEEN 0 AND 100",
+		"reputation_speed BETWEEN 0 AND 100",
+		"reputation_reliability BETWEEN 0 AND 100",
+		"reputation_communication BETWEEN 0 AND 100",
+		"reputation_compliance BETWEEN 0 AND 100",
+		"matching_exposure_count >= 0",
+		"matching_effective_samples >= 0",
+		"agent_matching_authority_events",
+		"Agent matching authority history is immutable",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("matching authority migration missing %q", required)
+		}
+	}
+	down, err := os.ReadFile("migrations/000029_matching_authority.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(down))
+	for _, forbidden := range []string{"drop column", "drop table", "delete from", "truncate"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("matching authority rollback destroys evidence with %q", forbidden)
+		}
+	}
+}
+
+func TestEscrowV3MigrationPreservesConfirmedHistoryAndAddsAttemptEpochs(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000028_escrow_v3.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"AND status <> 'confirmed'",
+		"asset_address IS NULL OR total_amount = formal_amount",
+		"task_funding_attempts",
+		"task_funding_attempt_states",
+		"task_funding_canonicalizations",
+		"canonicalization_epoch",
+		"task_funding_one_canonical_effect_uidx",
+		"funding_refund_pending",
+		"funding_configuration_invalid",
+		"escrow_deployments",
+		"escrow_v3_legacy_backfill",
+		"task.funding_configuration_invalid",
+		"escrow_v3_migration_required",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("Escrow V3 migration missing %q", required)
+		}
+	}
+	if strings.Contains(sql, "total_amount = formal_amount,\n    aggregate_version") {
+		t.Fatal("Escrow V3 migration rewrites immutable legacy funding amounts")
+	}
+}
+
 func TestFormalDeliveryMigrationFreezesScopeAndSerializesVersions(t *testing.T) {
 	contents, err := migrationFiles.ReadFile("migrations/000014_formal_delivery.up.sql")
 	if err != nil {

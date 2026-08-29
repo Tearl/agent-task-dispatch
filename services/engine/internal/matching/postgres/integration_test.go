@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,6 +77,47 @@ func TestPostgresSnapshotRevisionReplayAndImmutability(t *testing.T) {
 	if _, err = db.ExecContext(ctx, `INSERT INTO match_snapshot_candidates (snapshot_id,candidate_index,agent_id,provider_id,price_version,overview_price,formal_price,external_cost_cap,evaluation_status,exclusion_reasons,recall_evidence,qualified,qualification_reasons,exploration) VALUES ($1,99,'late','provider',0,'0','0','0','excluded','[]','{}',false,'[]',false)`, first.ID); err == nil {
 		t.Fatal("sealed snapshot candidate insert unexpectedly succeeded")
 	}
+
+	concurrent := postgresSnapshotDraft("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+	const callers = 12
+	var wait sync.WaitGroup
+	ids := make(chan string, callers)
+	created := make(chan bool, callers)
+	errorsFound := make(chan error, callers)
+	for range callers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			value, wasReplay, createErr := service.CreateRevision(ctx, concurrent)
+			if createErr != nil {
+				errorsFound <- createErr
+				return
+			}
+			ids <- value.ID
+			created <- !wasReplay
+		}()
+	}
+	wait.Wait()
+	close(ids)
+	close(created)
+	close(errorsFound)
+	for createErr := range errorsFound {
+		t.Fatal(createErr)
+	}
+	unique := map[string]struct{}{}
+	for id := range ids {
+		unique[id] = struct{}{}
+	}
+	createdCount := 0
+	for value := range created {
+		if value {
+			createdCount++
+		}
+	}
+	if len(unique) != 1 || createdCount != 1 {
+		t.Fatalf("concurrent snapshot identity diverged: ids=%v creators=%d", unique, createdCount)
+	}
+	assertCount(t, db, `SELECT count(*) FROM match_snapshots`, 3)
 }
 
 func seedPublishedTask(t *testing.T, ctx context.Context, db *sql.DB) {
@@ -105,13 +147,14 @@ func postgresSnapshotDraft(effectiveInputHash string) matching.SnapshotDraft {
 		score := 90 - index
 		scored = append(scored, matching.ScoredCandidate{
 			Candidate: matching.Candidate{AgentID: fmt.Sprintf("agent-%d", index), ProviderID: fmt.Sprintf("provider-%d", index), PriceVersion: 1, OverviewPrice: "10", FormalPrice: "100", ExternalCostCap: "0", ExposureCount: 200, EffectiveSamples: 100},
+			Recall:    map[string]matching.RecallEvidence{},
 			Score:     matching.ScoreBreakdown{TaskMatch: 50, Reputation: 25, PriceTime: 10, Availability: 5, RuleScore: score, RankingScore: score},
 		})
 	}
 	return matching.SnapshotDraft{
 		Key:         matching.SnapshotKey{TaskID: "task-snapshot", TaskSpecHash: "sha256:1111111111111111111111111111111111111111111111111111111111111111", AlgorithmVersion: matching.FairShuffleAlgorithmVersion, EffectiveInputHash: effectiveInputHash},
 		RuleVersion: "matching-rules-v1", ModelVersion: "disabled",
-		Result: matching.Result{Scored: scored, Qualified: append([]matching.ScoredCandidate{}, scored...)},
+		Result: matching.Result{Scored: scored, Qualified: append([]matching.ScoredCandidate{}, scored...), Degradations: []matching.Degradation{}},
 	}
 }
 

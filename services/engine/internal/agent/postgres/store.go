@@ -330,6 +330,52 @@ func (s *Store) PublishPrice(ctx context.Context, m agent.Mutation, id string, i
 	return result, replay, err
 }
 
+func (s *Store) UpdateMatchingAuthority(ctx context.Context, m agent.Mutation, id string, input agent.MatchingAuthorityInput) (result agent.MatchingAuthority, replay bool, err error) {
+	body, replay, err := s.execute(ctx, m, "agents.matching-authority:"+m.ActorID+":"+id, func(tx *sql.Tx) (any, error) {
+		var currentVersion int64
+		if err := tx.QueryRowContext(ctx, `SELECT aggregate_version FROM agents WHERE agent_id=$1 FOR UPDATE`, id).Scan(&currentVersion); errors.Is(err, sql.ErrNoRows) {
+			return nil, agent.ErrNotFound
+		} else if err != nil {
+			return nil, err
+		}
+		if currentVersion != input.ExpectedVersion {
+			return nil, agent.ErrStaleVersion
+		}
+		var databaseNow time.Time
+		if err := tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&databaseNow); err != nil {
+			return nil, err
+		}
+		vector := nullableAuthorityVector(input.MatchingVectorVersion)
+		if _, err := tx.ExecContext(ctx, `UPDATE agents SET approval_status=$1,risk_status=$2,matching_vector_version=$3,reputation_quality=$4,reputation_speed=$5,reputation_reliability=$6,reputation_communication=$7,reputation_compliance=$8,aggregate_version=aggregate_version+1,updated_at=$9 WHERE agent_id=$10`, input.ApprovalStatus, input.RiskStatus, vector, input.ReputationQuality, input.ReputationSpeed, input.ReputationReliability, input.ReputationCommunication, input.ReputationCompliance, databaseNow, id); err != nil {
+			return nil, fmt.Errorf("update Agent matching authority: %w", err)
+		}
+		result := agent.MatchingAuthority{AgentID: id, ApprovalStatus: input.ApprovalStatus, RiskStatus: input.RiskStatus, MatchingVectorVersion: input.MatchingVectorVersion, ReputationQuality: input.ReputationQuality, ReputationSpeed: input.ReputationSpeed, ReputationReliability: input.ReputationReliability, ReputationCommunication: input.ReputationCommunication, ReputationCompliance: input.ReputationCompliance, AgentAggregateVersion: currentVersion + 1, UpdatedAt: databaseNow}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_matching_authority_events(event_id,agent_id,actor_id,agent_aggregate_version,approval_status,risk_status,matching_vector_version,reputation_quality,reputation_speed,reputation_reliability,reputation_communication,reputation_compliance,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, m.EventID+"_authority", id, m.ActorID, result.AgentAggregateVersion, result.ApprovalStatus, result.RiskStatus, vector, result.ReputationQuality, result.ReputationSpeed, result.ReputationReliability, result.ReputationCommunication, result.ReputationCompliance, databaseNow); err != nil {
+			return nil, fmt.Errorf("record Agent matching authority: %w", err)
+		}
+		payload, _ := json.Marshal(result)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO domain_events(event_id,aggregate_type,aggregate_id,aggregate_version,event_type,payload,occurred_at) VALUES($1,'agent',$2,$3,'agent.matching_authority_updated',$4,$5)`, m.EventID, id, result.AgentAggregateVersion, string(payload), databaseNow); err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(event_id,actor_id,action,resource_type,resource_id,metadata,occurred_at) VALUES($1,$2,'agent.matching_authority_updated','agent',$3,$4,$5)`, m.EventID+"_audit", m.ActorID, id, string(payload), databaseNow); err != nil {
+			return nil, err
+		}
+		return result, nil
+	})
+	if err != nil {
+		return result, false, err
+	}
+	err = json.Unmarshal(body, &result)
+	return result, replay, err
+}
+
+func nullableAuthorityVector(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
 func (s *Store) Get(ctx context.Context, ownerID, id string) (agent.Agent, error) {
 	result, err := scanAgent(s.db.QueryRowContext(ctx, agentSelectWithLiveCapacity+` WHERE a.agent_id=$1 AND a.owner_id=$2`, id, ownerID))
 	if errors.Is(err, sql.ErrNoRows) {

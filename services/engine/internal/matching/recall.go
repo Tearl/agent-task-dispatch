@@ -2,10 +2,21 @@ package matching
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"unicode"
 )
+
+// UnavailableDenseRecall keeps the production three-channel contract explicit
+// until a configured vector-search dependency is supplied. It fails in the
+// normal degradation path; PostgreSQL candidates remain authoritative.
+type UnavailableDenseRecall struct{}
+
+func (UnavailableDenseRecall) Channel() string { return ChannelDense }
+func (UnavailableDenseRecall) Recall(context.Context, Request, []Candidate, int) ([]RecallHit, error) {
+	return nil, errors.New("dense recall is not configured")
+}
 
 type ExactRecall struct{}
 

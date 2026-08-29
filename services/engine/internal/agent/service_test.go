@@ -102,6 +102,10 @@ func (s *testStore) PublishPrice(_ context.Context, mutation Mutation, _ string,
 	s.lastMutation = mutation
 	return PriceVersion{}, false, nil
 }
+
+func (s *testStore) UpdateMatchingAuthority(_ context.Context, _ Mutation, id string, input MatchingAuthorityInput) (MatchingAuthority, bool, error) {
+	return MatchingAuthority{AgentID: id, ApprovalStatus: input.ApprovalStatus, RiskStatus: input.RiskStatus, MatchingVectorVersion: input.MatchingVectorVersion, ReputationQuality: input.ReputationQuality, ReputationSpeed: input.ReputationSpeed, ReputationReliability: input.ReputationReliability, ReputationCommunication: input.ReputationCommunication, ReputationCompliance: input.ReputationCompliance, AgentAggregateVersion: input.ExpectedVersion + 1}, false, nil
+}
 func (s *testStore) Get(context.Context, string, string) (Agent, error) { return s.getAgent, s.getErr }
 func (s *testStore) GetForActions(context.Context, string, string) (Agent, time.Time, error) {
 	return s.getAgent, s.databaseNow, s.getErr
@@ -136,6 +140,28 @@ func TestAgentMutationsRequireProviderRoleAndIdempotencyKey(t *testing.T) {
 	}
 	if store.lastMutation.ActorID != provider.UserID || store.lastMutation.IdempotencyKey != "create-1" || store.lastMutation.RequestHash == "" || store.lastMutation.EventID == "" {
 		t.Fatalf("mutation context incomplete: %#v", store.lastMutation)
+	}
+}
+
+func TestMatchingAuthorityRequiresAdminAndCompleteEligibleVector(t *testing.T) {
+	service, err := NewService(&testStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := MatchingAuthorityInput{ApprovalStatus: "approved", RiskStatus: "eligible", MatchingVectorVersion: "matching-vector-v1", ReputationQuality: 80, ReputationSpeed: 81, ReputationReliability: 82, ReputationCommunication: 83, ReputationCompliance: 84, ExpectedVersion: 3}
+	provider := auth.Session{UserID: "provider", Roles: []string{"agent_provider"}}
+	if _, _, err = service.UpdateMatchingAuthority(context.Background(), provider, "authority", "agent-1", input); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("provider updated authority: %v", err)
+	}
+	admin := auth.Session{UserID: "admin", Roles: []string{"admin"}}
+	missingVector := input
+	missingVector.MatchingVectorVersion = ""
+	if _, _, err = service.UpdateMatchingAuthority(context.Background(), admin, "authority-invalid", "agent-1", missingVector); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("eligible authority accepted no vector: %v", err)
+	}
+	value, replay, err := service.UpdateMatchingAuthority(context.Background(), admin, "authority", "agent-1", input)
+	if err != nil || replay || value.AgentID != "agent-1" || value.AgentAggregateVersion != 4 || value.ReputationCompliance != 84 {
+		t.Fatalf("admin authority transition: value=%#v replay=%v err=%v", value, replay, err)
 	}
 }
 

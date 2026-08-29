@@ -133,7 +133,8 @@ func NewRuntime(db *sql.DB, agents *agent.Service, deliveries *delivery.Service,
 	if err != nil {
 		return nil, err
 	}
-	workflowService, err := workflow.NewService(workflowStore, matching.NewService(nil, nil), matchingSnapshots, overviewService)
+	matcher := matching.NewService(matching.UnavailableDenseRecall{}, nil)
+	workflowService, err := workflow.NewService(workflowStore, matcher, matchingSnapshots, overviewService)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +154,7 @@ func NewRuntime(db *sql.DB, agents *agent.Service, deliveries *delivery.Service,
 	}
 
 	return &Runtime{
-		Matching:          matching.NewService(nil, nil),
+		Matching:          matcher,
 		MatchingSnapshots: matchingSnapshots,
 		Funds:             fundsService,
 		OverviewFunds:     overviewFunds,

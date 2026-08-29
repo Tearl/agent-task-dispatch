@@ -78,8 +78,11 @@ func (service *Service) Reserve(ctx context.Context, session auth.Session, key, 
 	if !ok {
 		return Intent{}, false, ErrContentConflict
 	}
+	if eligible.ChainTaskID == "" || eligible.ChainID != service.config.ChainID || strings.ToLower(eligible.ContractAddress) != service.config.ContractAddress {
+		return Intent{}, false, ErrInvalidState
+	}
 	proof := Proof{
-		TaskID: TaskChainID(taskID), AssignmentID: assignmentID,
+		TaskID: eligible.ChainTaskID, AssignmentID: assignmentID,
 		AgentController: strings.ToLower(eligible.AgentController), Payout: strings.ToLower(eligible.Payout),
 		OverviewID: digestToBytes32(eligible.SlotID), AllocationID: digestToBytes32(eligible.AllocationID),
 		QuoteHash: digestToBytes32(eligible.QuoteHash), TaskSpecHash: digestToBytes32(eligible.TaskSpecHash),
@@ -249,8 +252,8 @@ func stableDigest(parts ...string) string {
 
 func bytes32ID(parts ...string) string { return digestToBytes32(stableDigest(parts...)) }
 
-// TaskChainID is the sole canonical mapping between an Engine task identity
-// and the bytes32 identity used by TaskEscrow events and calls.
+// TaskChainID supplies deterministic identities to isolated in-memory fixtures.
+// Production selection always loads the persisted deployment-bound V3 ID.
 func TaskChainID(taskID string) string {
 	if strings.TrimSpace(taskID) == "" {
 		return ""

@@ -3,6 +3,7 @@ import { index, layout, route, type RouteConfig } from "@react-router/dev/routes
 export default [
   index("routes/_index.tsx"),
   route("admin/login", "app/pages/AdminLogin.tsx"),
+  route("arbitrator/login", "app/pages/ArbitratorLogin.tsx"),
 
   layout("app/layouts/PublisherLayout.tsx", [
     route("publisher", "app/pages/publisher/Dashboard.tsx"),
@@ -32,7 +33,7 @@ export default [
   layout("app/layouts/ArbitratorLayout.tsx", [
     route("arbitrator", "app/pages/arbitrator/Dashboard.tsx"),
     route("arbitrator/cases", "app/pages/arbitrator/PendingCases.tsx"),
-    route("arbitrator/review", "app/pages/arbitrator/CaseReview.tsx"),
+    route("arbitrator/review/:caseId", "app/pages/arbitrator/CaseReview.tsx"),
     route("arbitrator/appeal", "app/pages/arbitrator/Appeal.tsx"),
     route("arbitrator/staking", "app/pages/arbitrator/Staking.tsx"),
     route("arbitrator/governance", "app/pages/arbitrator/Governance.tsx"),

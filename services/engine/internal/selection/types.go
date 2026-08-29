@@ -53,6 +53,9 @@ type Mutation struct {
 
 type Eligibility struct {
 	TaskID           string
+	ChainTaskID      string
+	ChainID          string
+	ContractAddress  string
 	TaskDeadline     time.Time
 	SnapshotID       string
 	TaskSpecHash     string

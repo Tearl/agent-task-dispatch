@@ -14,8 +14,15 @@ type EngineSession = PublicSession & { token: string };
 export function splitSession(value: unknown): { token: string; publicSession: PublicSession } {
   if (!value || typeof value !== "object") throw new Error("invalid engine session");
   const session = value as EngineSession;
-  if (typeof session.token !== "string" || session.token.length < 32 || typeof session.sessionId !== "string" || typeof session.userId !== "string" || typeof session.walletAddress !== "string" || !Array.isArray(session.roles) || !session.roles.every((role) => typeof role === "string") || typeof session.expiresAt !== "string") throw new Error("invalid engine session");
-  return { token: session.token, publicSession: { sessionId: session.sessionId, userId: session.userId, walletAddress: session.walletAddress, roles: session.roles, expiresAt: session.expiresAt } };
+  if (typeof session.token !== "string" || session.token.length < 32) throw new Error("invalid engine session");
+  return { token: session.token, publicSession: parsePublicSession(session) };
+}
+
+export function parsePublicSession(value: unknown): PublicSession {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid engine session");
+  const session = value as Record<string, unknown>;
+  if (typeof session.sessionId !== "string" || typeof session.userId !== "string" || typeof session.walletAddress !== "string" || !Array.isArray(session.roles) || !session.roles.every((role) => typeof role === "string") || typeof session.expiresAt !== "string") throw new Error("invalid engine session");
+  return { sessionId: session.sessionId, userId: session.userId, walletAddress: session.walletAddress, roles: session.roles as string[], expiresAt: session.expiresAt };
 }
 
 export function sessionCookie(token: string, expiresAt: string, production = process.env.NODE_ENV === "production") {

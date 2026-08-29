@@ -3,8 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "forge build",
-    "check-types": "forge build",
+    "build": "pnpm --silent -w abi:check && forge build",
+    "check-types": "pnpm --silent -w abi:check && forge build",
     "test": "forge test -v"
+  },
+  "devDependencies": {
+    "@openzeppelin/contracts": "5.4.0"
   }
 }

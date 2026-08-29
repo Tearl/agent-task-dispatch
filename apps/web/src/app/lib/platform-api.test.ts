@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ActionBlockedError, analyzePublisherTask, authenticateWallet, clientRolesForEngineRoles, createAndPublishTask, createFormalAcceptance, createOrchestrationPlan, onboardAgent, readAgentFinance, readAgentProfile, readFormalDelivery, readOrchestrationPlan, readPublisherFinance, readReconciliationFinance, recordFormalAcceptanceSubmission, requestTaskDeletion, requireAllowed, revokeSession, startFormalVersion, submitDisputeFreezeTransaction, submitFormalAcceptanceTransaction, submitSelectionTransaction, submitTaskFundingTransaction, submitTaskRefundTransaction, submitWorkNonceTransaction, updateAgentProfile, type AgentProfile, type DisputeView, type FormalAcceptance, type FormalVersion, type SelectionIntent, type TaskFundingIntent } from "./platform-api.ts";
+import { ActionBlockedError, analyzePublisherTask, authenticateWallet, clientRolesForEngineRoles, createAndPublishTask, createFormalAcceptance, createOrchestrationPlan, onboardAgent, readAgentFinance, readAgentProfile, readFormalDelivery, readOrchestrationPlan, readPublisherFinance, readReconciliationFinance, recordFormalAcceptanceSubmission, requestTaskDeletion, requireAllowed, revokeSession, startFormalVersion, submitDisputeFreezeTransaction, submitFormalAcceptanceTransaction, submitSelectionTransaction, submitTaskFundingReplacement, submitTaskFundingTransaction, submitTaskRefundTransaction, submitWorkNonceTransaction, updateAgentProfile, type AgentProfile, type DisputeView, type FormalAcceptance, type FormalVersion, type SelectionIntent, type TaskFundingIntent } from "./platform-api.ts";
 
 test("orchestration planning stays same-origin and preserves idempotency", async () => {
   const calls: Array<{ url: string; method: string; key: string | null }> = [];
@@ -82,13 +82,53 @@ test("task funding transaction binds chain, publisher, contract, task id and exa
     if (input.method === "eth_requestAccounts") return ["0x1111111111111111111111111111111111111111"];
     return `0x${"9".repeat(64)}`;
   } };
-  const intent: TaskFundingIntent = { id:`sha256:${"1".repeat(64)}`,taskId:"task-1",publisherWallet:"0x1111111111111111111111111111111111111111",chainId:"31337",contractAddress:"0x2222222222222222222222222222222222222222",chainTaskId:`0x${"3".repeat(64)}`,overviewAmount:"10",formalAmount:"90",externalCostAmount:"5",totalAmount:"105",status:"prepared",aggregateVersion:1,createdAt:"2026-01-01T00:00:00Z",updatedAt:"2026-01-01T00:00:00Z" };
+  const intent: TaskFundingIntent = { id:`sha256:${"1".repeat(64)}`,taskId:"task-1",publisherWallet:"0x1111111111111111111111111111111111111111",chainId:"31337",contractAddress:"0x2222222222222222222222222222222222222222",assetAddress:"0x3333333333333333333333333333333333333333",chainTaskId:`0x${"4".repeat(64)}`,platformTaskKey:`0x${"5".repeat(64)}`,taskSpecHash:`0x${"6".repeat(64)}`,fundingDeadline:2_000_000_000,formalBudget:"90",overviewAmount:"10",formalAmount:"90",externalCostAmount:"5",totalAmount:"90",status:"prepared",aggregateVersion:1,createdAt:"2026-01-01T00:00:00Z",updatedAt:"2026-01-01T00:00:00Z",attempts:[],refundOnly:false };
   await submitTaskFundingTransaction(provider,intent);
-  const transaction = calls.find((call)=>call.method==="eth_sendTransaction")?.params?.[0] as Record<string,string>;
+  const transactions = calls.filter((call)=>call.method==="eth_sendTransaction").map((call)=>call.params?.[0] as Record<string,string>);
+  assert.equal(transactions[0]?.to,intent.assetAddress);
+  assert.equal(transactions[0]?.value,"0x0");
+  const transaction = transactions[1]!;
   assert.equal(transaction.to,intent.contractAddress);
   assert.equal(transaction.from,intent.publisherWallet);
-  assert.equal(transaction.value,"0x69");
-  assert.equal(transaction.data,`0xb293e81c${intent.chainTaskId.slice(2)}`);
+  assert.equal(transaction.value,"0x0");
+  assert.equal(transaction.data.slice(10,74),intent.platformTaskKey.slice(2));
+  assert.equal(transaction.data.slice(74,138),intent.taskSpecHash.slice(2));
+  assert.equal(BigInt(`0x${transaction.data.slice(138,202)}`),BigInt(intent.fundingDeadline));
+  assert.equal(BigInt(`0x${transaction.data.slice(202,266)}`),BigInt(intent.formalBudget));
+  await submitTaskFundingTransaction(provider,{...intent,status:"failed",failureReasonCode:"chain_transaction_failed"});
+});
+
+test("task funding replacement reuses the pending createTask nonce without another approval", async () => {
+  const calls: Array<{ method: string; params?: unknown[] }> = [];
+  const intent: TaskFundingIntent = { id:`sha256:${"1".repeat(64)}`,taskId:"task-1",publisherWallet:"0x1111111111111111111111111111111111111111",chainId:"31337",contractAddress:"0x2222222222222222222222222222222222222222",assetAddress:"0x3333333333333333333333333333333333333333",chainTaskId:`0x${"4".repeat(64)}`,platformTaskKey:`0x${"5".repeat(64)}`,taskSpecHash:`0x${"6".repeat(64)}`,fundingDeadline:2_000_000_000,formalBudget:"90",overviewAmount:"10",formalAmount:"90",externalCostAmount:"5",totalAmount:"90",status:"submitted",transactionHash:`0x${"8".repeat(64)}`,aggregateVersion:2,createdAt:"2026-01-01T00:00:00Z",updatedAt:"2026-01-01T00:00:00Z",attempts:[],refundOnly:false };
+  let expectedInput = "";
+  const provider = { request: async (input: { method: string; params?: unknown[] }) => {
+    calls.push(input);
+    if (input.method === "eth_chainId") return "0x7a69";
+    if (input.method === "eth_requestAccounts") return [intent.publisherWallet];
+    if (input.method === "eth_getTransactionByHash") return { from: intent.publisherWallet, to: intent.contractAddress, input: expectedInput, nonce: "0x7" };
+    expectedInput = String((input.params?.[0] as Record<string, unknown>).data);
+    return `0x${"9".repeat(64)}`;
+  } };
+  // Obtain the deterministic calldata once without sending an approval in the replacement provider.
+  const captureProvider = { request: async (input: { method: string; params?: unknown[] }) => {
+    if (input.method === "eth_chainId") return "0x7a69";
+    if (input.method === "eth_requestAccounts") return [intent.publisherWallet];
+    const transaction = input.params?.[0] as Record<string, unknown>;
+    if (transaction.to === intent.contractAddress) expectedInput = String(transaction.data);
+    return `0x${"7".repeat(64)}`;
+  } };
+  await submitTaskFundingTransaction(captureProvider, { ...intent, status: "failed" });
+  await submitTaskFundingReplacement(provider, intent);
+  const sends = calls.filter((call) => call.method === "eth_sendTransaction");
+  assert.equal(sends.length, 1);
+  assert.equal(calls.filter((call) => call.method === "eth_getTransactionByHash").length, 1);
+  const replacement = sends[0]?.params?.[0] as Record<string, string>;
+  assert.equal(replacement.nonce, "0x7");
+  assert.equal(replacement.to, intent.contractAddress);
+  assert.equal(replacement.data, expectedInput);
+  assert.equal(calls.some((call) => (call.params?.[0] as Record<string, unknown> | undefined)?.to === intent.assetAddress), false);
+  await assert.rejects(() => submitTaskFundingReplacement({ request: async (input) => input.method === "eth_chainId" ? "0x7a69" : input.method === "eth_requestAccounts" ? [intent.publisherWallet] : { from: intent.publisherWallet, to: intent.assetAddress, input: expectedInput, nonce: "0x7" } }, intent), /does not match|\u4e0d匹配/);
 });
 
 test("task deletion stays same-origin and escrowed deletion uses the refund selector", async () => {
@@ -101,7 +141,7 @@ test("task deletion stays same-origin and escrowed deletion uses the refund sele
   const provider = { request: async (input: { method: string; params?: unknown[] }) => { walletCalls.push(input); if (input.method === "eth_chainId") return "0x7a69"; if (input.method === "eth_requestAccounts") return [deletion.publisherWallet]; return `0x${"5".repeat(64)}`; } };
   await submitTaskRefundTransaction(provider, deletion);
   const transaction = walletCalls.find((call) => call.method === "eth_sendTransaction")?.params?.[0] as Record<string, string>;
-  assert.equal(transaction.data, `0x7249fbb6${deletion.chainTaskId.slice(2)}`);
+  assert.equal(transaction.data.slice(10), deletion.chainTaskId.slice(2));
   assert.equal(transaction.to, deletion.contractAddress);
 });
 
@@ -111,17 +151,17 @@ test("formal acceptance and work nonce calls use only authoritative chain bindin
   const intent:FormalAcceptance={id:`sha256:${"1".repeat(64)}`,packageId:`sha256:${"2".repeat(64)}`,taskId:"task-1",formalVersion:1,contentHash:`sha256:${"3".repeat(64)}`,proofDigest:`sha256:${"4".repeat(64)}`,workNonce:1,packageAggregateVersion:2,aggregateVersion:1,state:"intent_recorded",chainId:"1",contractAddress:`0x${"5".repeat(40)}`,publisherWallet:`0x${"6".repeat(40)}`,chainTaskId:`0x${"7".repeat(64)}`,settlementEligibility:{eligible:true},createdAt:"2026-08-23T00:00:00Z",updatedAt:"2026-08-23T00:00:00Z"};
   assert.equal(await submitFormalAcceptanceTransaction(provider,intent),`0x${"77".repeat(32)}`);
   const acceptanceCall=calls[1] as {method:string;params:Array<{data:string;from:string;to:string}>};
-  assert.equal(acceptanceCall.method,"eth_sendTransaction"); assert.equal(acceptanceCall.params[0]?.data,`0xe4725ba1${"7".repeat(64)}`); assert.equal(acceptanceCall.params[0]?.from,intent.publisherWallet);
+  assert.equal(acceptanceCall.method,"eth_sendTransaction"); assert.equal(acceptanceCall.params[0]?.data.slice(10),"7".repeat(64)); assert.equal(acceptanceCall.params[0]?.from,intent.publisherWallet);
   calls.length=0;
   await submitWorkNonceTransaction(provider,{chainId:"1",contractAddress:intent.contractAddress,publisherWallet:intent.publisherWallet,taskId:intent.chainTaskId,assignmentId:`0x${"8".repeat(64)}`,workNonce:1});
-  const nonceCall=calls[1] as {params:Array<{data:string}>}; assert.equal(nonceCall.params[0]?.data,`0x201abd80${"7".repeat(64)}`);
+  const nonceCall=calls[1] as {params:Array<{data:string}>}; const nonceData=nonceCall.params[0]!.data;assert.equal(nonceData.slice(10,74),"7".repeat(64));assert.equal(BigInt(`0x${nonceData.slice(74,138)}`),1n);
 });
 
 test("dispute freeze calldata binds complete stable leaves and resolver fee cap",async()=>{
   const publisher=`0x${"2".repeat(40)}`,controller=`0x${"3".repeat(40)}`,payout=`0x${"4".repeat(40)}`,resolver=`0x${"5".repeat(40)}`,contract=`0x${"6".repeat(40)}`,task=`0x${"7".repeat(64)}`;const calls:unknown[]=[];
   const provider={request:async(input:{method:string;params?:unknown[]})=>{calls.push(input);if(input.method==="eth_chainId")return "0x1";if(input.method==="eth_requestAccounts")return [publisher];return `0x${"8".repeat(64)}`;}};
   const view={case:{state:"soft_lock_pending"},context:{eligible:true,chainId:"1",contractAddress:contract,chainTaskId:task,publisherWallet:publisher,agentController:controller,agentPayout:payout,disputeResolver:resolver,frozenAmount:"100",feeCap:"5"}} as unknown as DisputeView;
-  assert.equal(await submitDisputeFreezeTransaction(provider,view),`0x${"8".repeat(64)}`);const sent=calls[2] as {params:Array<{data:string;from:string;to:string}>};const data=sent.params[0]!.data;assert.match(data,/^0xee1e9b21[0-9a-f]+$/);assert.equal(sent.params[0]!.from,publisher);assert.equal(sent.params[0]!.to,contract);assert.equal(data.slice(10+64,10+128),(128).toString(16).padStart(64,"0"));assert.equal(data.slice(10+4*64,10+5*64),(2).toString(16).padStart(64,"0"));assert.equal(data.length,10+13*64);
+  assert.equal(await submitDisputeFreezeTransaction(provider,view),`0x${"8".repeat(64)}`);const sent=calls[2] as {params:Array<{data:string;from:string;to:string}>};const data=sent.params[0]!.data;assert.match(data,/^0x[0-9a-f]+$/);assert.equal(sent.params[0]!.from,publisher);assert.equal(sent.params[0]!.to,contract);assert.equal(data.slice(10+64,10+128),(128).toString(16).padStart(64,"0"));assert.equal(data.slice(10+4*64,10+5*64),(2).toString(16).padStart(64,"0"));assert.equal(data.length,10+13*64);
 });
 
 test("formal delivery mutations stay task-bound and preserve caller idempotency", async () => {

@@ -84,6 +84,19 @@ func TestPostgresAgentOwnershipLifecyclePricesIdempotencyAndCapacity(t *testing.
 	if _, err = service.AvailableActions(ctx, ownerB, created.ID); !errors.Is(err, agent.ErrNotFound) {
 		t.Fatalf("other owner available actions: %v", err)
 	}
+	authorityAgent, _, err := service.Create(ctx, ownerA, "create-authority-agent", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityInput := agent.MatchingAuthorityInput{ApprovalStatus: "approved", RiskStatus: "eligible", MatchingVectorVersion: "matching-vector-v1", ReputationQuality: 91, ReputationSpeed: 82, ReputationReliability: 73, ReputationCommunication: 64, ReputationCompliance: 55, ExpectedVersion: authorityAgent.AggregateVersion}
+	if _, _, err = service.UpdateMatchingAuthority(ctx, ownerA, "provider-authority", authorityAgent.ID, authorityInput); !errors.Is(err, agent.ErrForbidden) {
+		t.Fatalf("provider changed matching authority: %v", err)
+	}
+	authority, replay, err := service.UpdateMatchingAuthority(ctx, auth.Session{UserID: "admin", Roles: []string{"admin"}}, "approve-authority", authorityAgent.ID, authorityInput)
+	if err != nil || replay || authority.AgentAggregateVersion != 2 || authority.MatchingVectorVersion != "matching-vector-v1" {
+		t.Fatalf("admin matching authority: authority=%#v replay=%v err=%v", authority, replay, err)
+	}
+	assertCount(t, db, `SELECT count(*) FROM agent_matching_authority_events WHERE agent_id=$1 AND actor_id='admin'`, authorityAgent.ID, 1)
 	probeInput := input
 	probeInput.Name = "Health Probe Agent"
 	probeAgent, _, err := service.Create(ctx, ownerA, "create-health-probe-agent", probeInput)

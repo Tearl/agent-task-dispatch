@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "go run ./cmd/api",
+    "db:migrate": "go run ./cmd/migrate",
     "dev:publisher": "go run ./cmd/outbox-publisher",
     "dev:consumer": "go run ./cmd/formal-execution-consumer",
     "build": "go build -o dist/engine ./cmd/api && go build -o dist/outbox-publisher ./cmd/outbox-publisher && go build -o dist/formal-execution-consumer ./cmd/formal-execution-consumer",

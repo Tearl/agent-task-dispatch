@@ -8,7 +8,7 @@
 
 ## 任务
 
-- [ ] [T-201] [pending] 实现硬过滤、召回适配器、评分与降级策略
+- [ ] [T-201] [implemented] 实现硬过滤、召回适配器、评分与降级策略
   - Repository: .
   - Covers: F-201, F-202, AC-201
   - Depends on: T-103, T-105

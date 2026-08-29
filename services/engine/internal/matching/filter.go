@@ -29,6 +29,7 @@ var reasonMessages = map[string]string{
 	"payout_address_invalid":   "Agent payout address is invalid.",
 	"vector_version_mismatch":  "Agent vector version is incompatible.",
 	"price_invalid":            "Agent price metadata is invalid.",
+	"reputation_unavailable":   "Agent reputation is unavailable or invalid.",
 }
 
 func HardFilter(request Request, candidates []Candidate) ([]Candidate, []Exclusion) {
@@ -97,6 +98,9 @@ func filterReasons(request Request, candidate Candidate, legacyMatchGates bool) 
 	if candidate.RiskStatus != "eligible" {
 		codes = append(codes, "risk_not_eligible")
 	}
+	if !candidate.ReputationAvailable || !validReputation(candidate.Reputation) {
+		codes = append(codes, "reputation_unavailable")
+	}
 	if !walletAddress(candidate.PayoutAddress) {
 		codes = append(codes, "payout_address_invalid")
 	}
@@ -127,6 +131,15 @@ func filterReasons(request Request, candidate Candidate, legacyMatchGates bool) 
 		reasons = append(reasons, Reason{Code: code, Message: reasonMessages[code]})
 	}
 	return reasons
+}
+
+func validReputation(value Reputation) bool {
+	for _, score := range []int{value.Quality, value.Speed, value.Reliability, value.Communication, value.Compliance} {
+		if score < 0 || score > 100 {
+			return false
+		}
+	}
+	return true
 }
 
 func equalFold(left, right string) bool {

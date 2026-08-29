@@ -18,8 +18,6 @@ import (
 
 type Store struct {
 	db                 *sql.DB
-	chainID            string
-	contract           string
 	asset              string
 	platformIncidentID string
 }
@@ -49,14 +47,11 @@ func NewStoreWithConfig(db *sql.DB, chainID, contract, asset, platformIncidentID
 	if (chainID == "") != (contract == "") {
 		return nil, errors.New("chain id and contract must be configured together")
 	}
-	return &Store{db: db, chainID: chainID, contract: contract, asset: asset, platformIncidentID: platformIncidentID}, nil
+	return &Store{db: db, asset: asset, platformIncidentID: platformIncidentID}, nil
 }
 
 func (store *Store) AuthorizeRevision(ctx context.Context, publisherID, taskID string, input delivery.StartInput) error {
-	if store.chainID == "" || store.contract == "" {
-		return delivery.ErrDependencyPending
-	}
-	return authorizeRevision(ctx, store.db, store.chainID, store.contract, publisherID, taskID, input)
+	return authorizeRevision(ctx, store.db, publisherID, taskID, input)
 }
 
 func (store *Store) Start(ctx context.Context, mutation delivery.Mutation, taskID string, input delivery.StartInput) (delivery.StartResult, bool, error) {
@@ -143,7 +138,7 @@ func (store *Store) Start(ctx context.Context, mutation delivery.Mutation, taskI
 		}
 	}
 	if input.Revision != nil {
-		if err = authorizeRevision(ctx, tx, store.chainID, store.contract, mutation.PublisherID, taskID, input); err != nil {
+		if err = authorizeRevision(ctx, tx, mutation.PublisherID, taskID, input); err != nil {
 			return delivery.StartResult{}, false, err
 		}
 	}
@@ -728,12 +723,9 @@ type queryRower interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func authorizeRevision(ctx context.Context, query queryRower, chainID, contract, publisherID, taskID string, input delivery.StartInput) error {
+func authorizeRevision(ctx context.Context, query queryRower, publisherID, taskID string, input delivery.StartInput) error {
 	if input.Revision == nil {
 		return nil
-	}
-	if chainID == "" || contract == "" {
-		return delivery.ErrDependencyPending
 	}
 	var feedbackCreated time.Time
 	var valid bool
@@ -759,13 +751,13 @@ WHERE package.task_id=$1 AND package.publisher_id=$2 AND feedback.feedback_set_i
 SELECT 1 FROM chain_events event
 JOIN chain_canonical_blocks canonical ON canonical.chain_id=event.chain_id AND canonical.contract_address=event.contract_address AND canonical.block_hash=event.block_hash
 JOIN chain_blocks block ON block.chain_id=event.chain_id AND block.contract_address=event.contract_address AND block.block_hash=event.block_hash
-JOIN formal_packages package ON package.task_id=$3 AND package.publisher_id=$4
+	JOIN formal_packages package ON package.task_id=$1 AND package.publisher_id=$2
 JOIN assignments assignment ON assignment.assignment_id=package.assignment_id
 JOIN selection_reservations reservation ON reservation.reservation_id=assignment.reservation_id
-WHERE event.chain_id=$1 AND event.contract_address=$2 AND event.event_type='work_nonce_advanced'
-AND event.task_chain_id=reservation.proof_task_id AND event.assignment_chain_id=assignment.assignment_id
-AND COALESCE(event.work_nonce,(event.payload->>'workNonce')::bigint)=$5 AND block.block_timestamp >= $6
-AND NOT EXISTS (SELECT 1 FROM chain_events newer JOIN chain_canonical_blocks c ON c.chain_id=newer.chain_id AND c.contract_address=newer.contract_address AND c.block_hash=newer.block_hash WHERE newer.chain_id=event.chain_id AND newer.contract_address=event.contract_address AND newer.event_type='work_nonce_advanced' AND newer.task_chain_id=event.task_chain_id AND COALESCE(newer.work_nonce,(newer.payload->>'workNonce')::bigint)>COALESCE(event.work_nonce,(event.payload->>'workNonce')::bigint)))`, chainID, contract, taskID, publisherID, input.WorkNonce, feedbackCreated).Scan(&confirmed)
+	WHERE event.chain_id=reservation.chain_id::text AND event.contract_address=reservation.contract_address AND event.event_type='work_nonce_advanced'
+	AND event.task_chain_id=reservation.proof_task_id AND event.assignment_chain_id=assignment.assignment_id
+	AND COALESCE(event.work_nonce,(event.payload->>'workNonce')::bigint)=$3 AND block.block_timestamp >= $4
+	AND NOT EXISTS (SELECT 1 FROM chain_events newer JOIN chain_canonical_blocks c ON c.chain_id=newer.chain_id AND c.contract_address=newer.contract_address AND c.block_hash=newer.block_hash WHERE newer.chain_id=event.chain_id AND newer.contract_address=event.contract_address AND newer.event_type='work_nonce_advanced' AND newer.task_chain_id=event.task_chain_id AND COALESCE(newer.work_nonce,(newer.payload->>'workNonce')::bigint)>COALESCE(event.work_nonce,(event.payload->>'workNonce')::bigint)))`, taskID, publisherID, input.WorkNonce, feedbackCreated).Scan(&confirmed)
 	if err != nil {
 		return err
 	}

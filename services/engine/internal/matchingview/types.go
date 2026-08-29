@@ -93,11 +93,12 @@ type Reservation struct {
 }
 
 type View struct {
-	AsOf        time.Time    `json:"asOf"`
-	Task        Task         `json:"task"`
-	Snapshot    *Snapshot    `json:"snapshot,omitempty"`
-	Batch       *Batch       `json:"batch,omitempty"`
-	Reservation *Reservation `json:"reservation,omitempty"`
+	AsOf                 time.Time    `json:"asOf"`
+	Task                 Task         `json:"task"`
+	Snapshot             *Snapshot    `json:"snapshot,omitempty"`
+	OverviewFundingReady bool         `json:"overviewFundingReady"`
+	Batch                *Batch       `json:"batch,omitempty"`
+	Reservation          *Reservation `json:"reservation,omitempty"`
 }
 
 type Repository interface {

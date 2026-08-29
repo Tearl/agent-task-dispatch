@@ -136,12 +136,12 @@ func (store *Store) transitionAcceptance(ctx context.Context, mutation delivery.
 		var eventID string
 		err = tx.QueryRowContext(ctx, `SELECT event.event_id FROM chain_events event
 JOIN chain_canonical_blocks canonical ON canonical.chain_id=event.chain_id AND canonical.contract_address=event.contract_address AND canonical.block_hash=event.block_hash
-JOIN formal_packages package ON package.package_id=$4
+	JOIN formal_packages package ON package.package_id=$2
 JOIN assignments assignment ON assignment.assignment_id=package.assignment_id
 JOIN selection_reservations reservation ON reservation.reservation_id=assignment.reservation_id
-WHERE event.chain_id=$1 AND event.contract_address=$2 AND event.transaction_hash=$3 AND event.event_type='funds_released'
-  AND event.task_chain_id=reservation.proof_task_id AND event.payload->>'recipient'=reservation.payout_address
-  AND event.payload->>'amount'=reservation.formal_payable::text`, store.chainID, store.contract, value.TransactionHash, value.PackageID).Scan(&eventID)
+	WHERE event.chain_id=reservation.chain_id::text AND event.contract_address=reservation.contract_address AND event.transaction_hash=$1 AND event.event_type='funds_released'
+	  AND event.task_chain_id=reservation.proof_task_id AND event.payload->>'recipient'=reservation.payout_address
+	  AND event.payload->>'amount'=reservation.formal_payable::text`, value.TransactionHash, value.PackageID).Scan(&eventID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return delivery.AcceptanceIntent{}, false, delivery.ErrDependencyPending
 		}
@@ -168,9 +168,6 @@ WHERE event.chain_id=$1 AND event.contract_address=$2 AND event.transaction_hash
 }
 
 func (store *Store) acceptanceEligibility(ctx context.Context, tx queryRower, value delivery.AcceptanceIntent) (string, error) {
-	if store.chainID == "" || store.contract == "" {
-		return "", delivery.ErrDependencyPending
-	}
 	var packageVersion int64
 	var allocated int
 	var status, contentHash, proofDigest string
@@ -188,10 +185,10 @@ WHERE package.package_id=$1`, value.PackageID, value.FormalVersion).Scan(&packag
 	var latest sql.NullInt64
 	err = tx.QueryRowContext(ctx, `SELECT max(COALESCE(event.work_nonce,(event.payload->>'workNonce')::bigint))
 FROM chain_events event JOIN chain_canonical_blocks canonical ON canonical.chain_id=event.chain_id AND canonical.contract_address=event.contract_address AND canonical.block_hash=event.block_hash
-JOIN formal_packages package ON package.package_id=$3 JOIN assignments assignment ON assignment.assignment_id=package.assignment_id
-JOIN selection_reservations reservation ON reservation.reservation_id=assignment.reservation_id
-WHERE event.chain_id=$1 AND event.contract_address=$2 AND event.event_type IN ('selection_confirmed','work_nonce_advanced')
-  AND event.task_chain_id=reservation.proof_task_id AND event.assignment_chain_id=assignment.assignment_id`, store.chainID, store.contract, value.PackageID).Scan(&latest)
+	JOIN formal_packages package ON package.package_id=$1 JOIN assignments assignment ON assignment.assignment_id=package.assignment_id
+	JOIN selection_reservations reservation ON reservation.reservation_id=assignment.reservation_id
+	WHERE event.chain_id=reservation.chain_id::text AND event.contract_address=reservation.contract_address AND event.event_type IN ('selection_confirmed','work_nonce_advanced')
+	  AND event.task_chain_id=reservation.proof_task_id AND event.assignment_chain_id=assignment.assignment_id`, value.PackageID).Scan(&latest)
 	if err != nil {
 		return "", err
 	}

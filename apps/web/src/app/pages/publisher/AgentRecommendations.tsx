@@ -115,14 +115,16 @@ export default function AgentRecommendations() {
   const txHash = intent?.reservation.transactionHash ?? localTx;
   const reservationStatus = intent?.reservation.status ?? view.reservation?.status;
   const deletionBlocked = view.task.deletionPending;
+  const overviewFundingBlocked = Boolean(view.snapshot && !view.batch && !view.overviewFundingReady);
   const selectionBlocked = deletionBlocked || view.task.status !== "awaiting_selection";
   return <Page>
-    <PageHeader title="Agent 推荐与执行编排" subtitle={`${view.task.title} · ${plan ? `${plan.mode === "multi" ? "多 Agent DAG" : "单 Agent"}方案` : "等待 AI 编排分析"}`} actions={<div className="flex gap-2"><GhostButton icon={RefreshCw} onClick={() => void load()}>刷新状态</GhostButton><button type="button" disabled={busy || deletionBlocked || Boolean(view.reservation) || plan?.mode === "multi"} onClick={() => void advance()} className="ap-cta inline-flex items-center gap-2 rounded-xl px-4 py-2 text-[13px] disabled:opacity-40"><Play size={15} />{busy ? "处理中…" : workflowAction(view, plan)}</button></div>} />
+    <PageHeader title="Agent 推荐与执行编排" subtitle={`${view.task.title} · ${plan ? `${plan.mode === "multi" ? "多 Agent DAG" : "单 Agent"}方案` : "等待 AI 编排分析"}`} actions={<div className="flex gap-2"><GhostButton icon={RefreshCw} onClick={() => void load()}>刷新状态</GhostButton><button type="button" disabled={busy || deletionBlocked || overviewFundingBlocked || Boolean(view.reservation) || plan?.mode === "multi"} onClick={() => void advance()} className="ap-cta inline-flex items-center gap-2 rounded-xl px-4 py-2 text-[13px] disabled:opacity-40"><Play size={15} />{busy ? "处理中…" : workflowAction(view, plan)}</button></div>} />
 
     {deletionBlocked ? <InfoNote tone="amber"><span role="alert">该任务已进入删除/退款流程，Agent 匹配、预留和链上选择均已关闭。</span></InfoNote> : null}
     {!plan ? <InfoNote tone="cyan"><span role="status">托管已经确认。下一步由 LangGraph 先判断任务需要单 Agent 还是多 Agent DAG，生成方案后才允许进入权威匹配。</span></InfoNote> : null}
     {plan ? <OrchestrationPlanCard plan={plan} /> : null}
     {plan && !view.snapshot ? <InfoNote tone="cyan"><span role="status">编排方案已冻结，但权威匹配快照尚未生成。刷新只读取 Latest，不会触发重新规划或增加修订。</span></InfoNote> : null}
+    {overviewFundingBlocked ? <InfoNote tone="amber"><span role="alert">当前 testnet-only V3 部署只托管正式预算，尚无独立 DiscoveryPool 充值通道；候选匹配快照可测试，但付费概览入口已关闭，不会推进任务状态。</span></InfoNote> : null}
     {batchNeedsRematch(view.batch, view.snapshot?.candidates) ? <InfoNote tone="amber"><span role="alert">{view.batch?.status === "completed" ? "概览批次全部失败，请重新匹配。旧批次和未结算授权将由 Engine 作废并释放。" : "概览批次已到期，请先校验并恢复 Agent 终态；Engine 会释放失败执行的未结算授权。"}</span></InfoNote> : null}
     {view.snapshot?.degradations.map((item) => <div key={`${item.dependency}:${item.code}`} role="status" className="flex gap-2 rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-[13px] text-amber-100"><AlertTriangle size={16} className="shrink-0" /><span><b>{item.dependency}</b> · {item.code}：{item.message}</span></div>)}
 

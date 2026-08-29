@@ -113,6 +113,15 @@ func TestPostgresSelectionReservationConfirmationAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := auth.Session{UserID: "publisher", Wallet: "0x000000000000000000000000000000000000cafe", Roles: []string{"publisher"}}
+	if _, err = db.ExecContext(ctx, `UPDATE task_funding_intents SET asset_address=NULL,platform_task_key=NULL,task_spec_hash=NULL,funding_deadline=NULL WHERE task_id='task-selection'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, legacyErr := service.Reserve(ctx, session, "legacy-selection-key", "task-selection", selection.Request{BatchID: batchID, SlotID: slotID}); !errors.Is(legacyErr, selection.ErrInvalidState) {
+		t.Fatalf("legacy confirmed funding must fail closed, got %v", legacyErr)
+	}
+	if _, err = db.ExecContext(ctx, `UPDATE task_funding_intents SET asset_address='0x0000000000000000000000000000000000009999',platform_task_key=$1,task_spec_hash=$2,funding_deadline=$3 WHERE task_id='task-selection'`, "0x"+fmt.Sprintf("%064x", 1), "0x"+fmt.Sprintf("%064x", 2), deadline.Unix()); err != nil {
+		t.Fatal(err)
+	}
 	intent, replay, err := service.Reserve(ctx, session, "selection-key", "task-selection", selection.Request{BatchID: batchID, SlotID: slotID})
 	if err != nil || replay || intent.Reservation.FormalPayable != "90" {
 		t.Fatalf("reserve: %#v replay=%v err=%v", intent, replay, err)
@@ -208,6 +217,10 @@ func seedSelectionDependencies(t *testing.T, ctx context.Context, db *sql.DB) {
 		t.Fatal(err)
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO acceptance_versions (task_id,version_no,task_aggregate_version,content_hash,criteria,total_weight,created_at) VALUES ('task-selection',1,2,$1,$2,100,$3)`, integrationDigest("acceptance"), criteria, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO task_funding_intents(intent_id,task_id,publisher_id,publisher_wallet,idempotency_key,request_hash,chain_id,contract_address,chain_task_id,overview_amount,formal_amount,external_cost_amount,total_amount,status,aggregate_version,created_at,updated_at,asset_address,platform_task_key,task_spec_hash,funding_deadline)
+VALUES($1,'task-selection','publisher','0x000000000000000000000000000000000000cafe','selection-funding',$2,31337,'0x0000000000000000000000000000000000001234',$3,0,100,0,100,'confirmed',1,$4,$4,'0x0000000000000000000000000000000000009999',$5,$6,$7)`, integrationDigest("funding-intent"), integrationDigest("funding-request"), selection.TaskChainID("task-selection"), now, "0x"+fmt.Sprintf("%064x", 1), "0x"+fmt.Sprintf("%064x", 2), now.Add(time.Hour).Unix()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO match_snapshots (snapshot_id,task_id,task_spec_hash,match_revision,effective_input_hash,algorithm_version,rule_version,model_version,seed_digest,seed_key_version,policy_hash,exploration_triggered,degradations,snapshot_body,created_at,sealed_at) VALUES ($1,'task-selection',$2,1,$3,'fair-shuffle-v1','rules-v1','disabled',$4,'seed-v1',$5,false,'[]','{}',$6,NULL)`, integrationDigest("snapshot"), integrationDigest("spec"), integrationDigest("input"), integrationDigest("seed"), integrationDigest("policy"), now); err != nil {

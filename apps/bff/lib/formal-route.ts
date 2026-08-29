@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { aggregateEngineFormalDelivery, InvalidEngineResponseError, InvalidResourceIdError } from "./engine";
+import { aggregateEngineFormalDelivery, InvalidResourceIdError, mapEngineFailure } from "./engine";
 import { sessionCookieName } from "./session";
 
 export async function formalDeliveryRoute(taskID: string) {
@@ -11,7 +11,7 @@ export async function formalDeliveryRoute(taskID: string) {
     return NextResponse.json(result.body, { status: result.status });
   } catch (error) {
     if (error instanceof InvalidResourceIdError) return NextResponse.json({ error: "invalid resource id" }, { status: 400 });
-    if (error instanceof InvalidEngineResponseError) return NextResponse.json({ error: "invalid engine response" }, { status: 502 });
-    return NextResponse.json({ error: "engine service temporarily unavailable" }, { status: 503 });
+    const failure = mapEngineFailure(error);
+    return NextResponse.json(failure.body, { status: failure.status });
   }
 }

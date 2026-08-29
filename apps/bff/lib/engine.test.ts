@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { aggregateEngineDisputes, aggregateEngineExecutions, aggregateEngineFinance, aggregateEngineFormalDelivery, aggregateEngineMatching, aggregateEngineResource, aggregateEngineWorkspace, forwardEngineMutation, forwardEngineRead, InvalidEngineResponseError, InvalidResourceIdError, resolveEngineBaseUrl } from "./engine.ts";
+import { EngineResponseTooLargeError } from "./engine-http.ts";
 
 test("BFF aggregation calls only internal Engine endpoints and strips sensitive fields", async () => {
   const calls: Array<{ url: string; authorization: string | null }> = [];
@@ -33,7 +34,7 @@ test("BFF preserves safe Engine errors and rejects invalid resources or response
   assert.deepEqual(denied, { status: 404, body: { error: "agent not found" } });
   await assert.rejects(() => aggregateEngineResource("tasks", "../escape", "session", { fetch: async () => Response.json({}) }), InvalidResourceIdError);
   await assert.rejects(() => aggregateEngineResource("tasks", "task-1", "session", { engineBaseUrl: "http://engine", fetch: async () => new Response("not-json") }), InvalidEngineResponseError);
-  await assert.rejects(() => aggregateEngineResource("tasks", "task-1", "session", { engineBaseUrl: "http://engine", fetch: async () => new Response("{}", { headers: { "content-length": "1048577" } }) }), InvalidEngineResponseError);
+  await assert.rejects(() => aggregateEngineResource("tasks", "task-1", "session", { engineBaseUrl: "http://engine", fetch: async () => new Response("{}", { headers: { "content-length": "1048577" } }) }), EngineResponseTooLargeError);
 });
 
 test("BFF rejects an internally inconsistent Engine view snapshot", async () => {
@@ -63,7 +64,7 @@ test("matching aggregation reads one sealed view and preserves degradation evide
   let target = "";
   const result = await aggregateEngineMatching("task-1", "session", { engineBaseUrl: "http://engine", fetch: async (input) => {
     target = String(input);
-    return Response.json({ asOf: "2026-08-22T00:00:00Z", task: { id: "task-1", title: "Task", status: "awaiting_selection", specHash: "sha256:x", deletionPending: false }, snapshot: { id: "sha256:s", revision: 2, algorithmVersion: "category-tags-v1", ruleVersion: "v1", modelVersion: "not-used", seedDigest: "sha256:d", degradations: [{ dependency: "dense", code: "recall_unavailable", message: "fallback" }], candidates: [{ agentId: "agent-1", name: "Agent", category: "research", tags: ["web"], position: 1, exploration: false, overviewPrice: "10", formalPrice: "100", externalCostCap: "0", score: { taskMatch: 50, reputation: 20, priceTime: 10, availability: 5, rule: 85, modelDelta: 0, ranking: 85 } }] } });
+    return Response.json({ asOf: "2026-08-22T00:00:00Z", overviewFundingReady: true, task: { id: "task-1", title: "Task", status: "awaiting_selection", specHash: "sha256:x", deletionPending: false }, snapshot: { id: "sha256:s", revision: 2, algorithmVersion: "category-tags-v1", ruleVersion: "v1", modelVersion: "not-used", seedDigest: "sha256:d", degradations: [{ dependency: "dense", code: "recall_unavailable", message: "fallback" }], candidates: [{ agentId: "agent-1", name: "Agent", category: "research", tags: ["web"], position: 1, exploration: false, overviewPrice: "10", formalPrice: "100", externalCostCap: "0", score: { taskMatch: 50, reputation: 20, priceTime: 10, availability: 5, rule: 85, modelDelta: 0, ranking: 85 } }] } });
   }});
   assert.equal(target, "http://engine/v1/tasks/task-1/matching-view");
   assert.equal(((result.body.snapshot as { degradations: unknown[] }).degradations).length, 1);
@@ -83,6 +84,14 @@ test("workflow APIs stay task-bound and workspace reads strip secrets", async ()
   assert.deepEqual(workspace.body,{agents:[{id:"agent-1"}]});
 });
 
+test("admin matching authority mutation is exposed only through its exact BFF path", async () => {
+  let target = "";
+  const result = await forwardEngineMutation({ path: "/v1/admin/agents/agent-1/matching-authority", body: "{}", idempotencyKey: "authority-op", sessionToken: "session" }, { engineBaseUrl: "http://engine", fetch: async (input) => { target = String(input); return Response.json({ id: "agent-1", approvalStatus: "approved" }); } });
+  assert.equal(result.status, 200);
+  assert.equal(target, "http://engine/v1/admin/agents/agent-1/matching-authority");
+  await assert.rejects(() => forwardEngineMutation({ path: "/v1/admin/agents/agent-1/credentials", body: "{}", idempotencyKey: "x", sessionToken: "session" }), InvalidResourceIdError);
+});
+
 test("selection routes accept only task-bound reservation identities", async () => {
   const reservation = `sha256:${"a".repeat(64)}`;
   const encoded = encodeURIComponent(reservation);
@@ -97,20 +106,31 @@ test("formal delivery read validates frozen scope and version identity", async (
   let target = "";
   const packageID = `sha256:${"1".repeat(64)}`;
   const digest = `sha256:${"2".repeat(64)}`;
-  const result = await aggregateEngineFormalDelivery("task-1", "session", { engineBaseUrl: "http://engine", fetch: async (input) => {
-    target = String(input);
-    return Response.json({
+  const signature = `0x${"a".repeat(130)}`;
+  const fixture = {
       package: { id: packageID, taskId: "task-1", assignmentId: `0x${"3".repeat(64)}`, aggregateVersion: 2, allocatedVersion: 1, includedVersions: 3, maximumVersions: 5 },
       scope: { id: digest, contentHash: digest, taskSpecHash: digest },
       chain: { chainId: "1", contractAddress: `0x${"4".repeat(40)}`, publisherWallet: `0x${"5".repeat(40)}`, taskId: `0x${"6".repeat(64)}`, assignmentId: `0x${"7".repeat(64)}`, workNonce: 1 },
-      versions: [{ packageId: packageID, number: 1, aggregateVersion: 2, scopeHash: digest, workNonce: 1, logicalExecutionId: digest, status: "allocated", usedCost: "0" }],
+      versions: [{ packageId: packageID, number: 1, aggregateVersion: 2, scopeHash: digest, workNonce: 1, logicalExecutionId: digest, status: "allocated", usedCost: "0", proof: { payloadHash: digest, digest, signature, proof: { version: "formal-proof-v1", contentHash: digest, formalVersion: 1, workNonce: 1, packageAggregateVersion: 2 } }, metadata: { signature: "must-strip" } }],
       feedback: [],
       changeOrders: [],
       acceptances: [],
-    });
+      signature: "must-strip",
+      nested: { signature: "must-strip" },
+    };
+  const result = await aggregateEngineFormalDelivery("task-1", "session", { engineBaseUrl: "http://engine", fetch: async (input) => {
+    target = String(input);
+    return Response.json(fixture);
   }});
   assert.equal(target, "http://engine/v1/tasks/task-1/formal-package");
   assert.equal((result.body.versions as unknown[]).length, 1);
+  assert.equal((((result.body.versions as Array<Record<string, unknown>>)[0]!.proof as Record<string, unknown>).signature), signature);
+  assert.equal(JSON.stringify(result.body).includes("must-strip"), false);
+  assert.equal("signature" in result.body, false);
+  await assert.rejects(
+    () => aggregateEngineFormalDelivery("task-1", "session", { engineBaseUrl: "http://engine", fetch: async () => Response.json({ ...fixture, versions: [{ ...fixture.versions[0]!, proof: { ...fixture.versions[0]!.proof, signature: "0xinvalid" } }] }) }),
+    InvalidEngineResponseError,
+  );
   await assert.rejects(() => aggregateEngineFormalDelivery("../admin", "session"), InvalidResourceIdError);
   const started = await forwardEngineMutation({ path: "/v1/tasks/task-1/formal-packages/start", body: `{}`, idempotencyKey: "formal-start", sessionToken: "session" }, { engineBaseUrl: "http://engine", fetch: async () => Response.json({ version: { number: 1 } }, { status: 201 }) });
   assert.equal((started.body.version as { number: number }).number, 1);

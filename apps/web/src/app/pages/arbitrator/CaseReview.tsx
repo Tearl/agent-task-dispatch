@@ -1,5 +1,6 @@
 import { FileLock2, RefreshCw, Scale, ShieldAlert } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useParams } from "react-router";
 import { Page } from "../../components/AppShell";
 import {
   CtaButton,
@@ -12,43 +13,48 @@ import {
 } from "../../components/kit/primitives";
 import {
   decideDispute,
-  readDisputes,
+  readDispute,
   reviewDispute,
   sha256Digest,
   type DisputeView,
 } from "../../lib/platform-api";
 
 export default function CaseReview() {
-  const [cases, setCases] = useState<DisputeView[]>([]),
-    [selected, setSelected] = useState(""),
+  const { caseId = "" } = useParams();
+  const [view, setView] = useState<DisputeView | null>(null),
     [award, setAward] = useState(50),
     [reason, setReason] = useState("evidence_weight"),
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false);
   const operation = useRef("");
-  const load = async () => {
+  const activeCaseId = useRef(caseId);
+  activeCaseId.current = caseId;
+  const load = async (requestedCaseId = caseId) => {
+    if (!requestedCaseId) {
+      setView(null);
+      setError("缺少 caseId，请从待处理案件列表选择需要审理的案件。");
+      return;
+    }
+    setError("");
     try {
-      const result = await readDisputes();
-      setCases(result.cases);
-      setSelected((current) =>
-        result.cases.some((item) => item.case.id === current)
-          ? current
-          : (result.cases[0]?.case.id ?? ""),
-      );
+      const value = await readDispute(requestedCaseId);
+      if (activeCaseId.current === requestedCaseId) setView(value);
     } catch (cause) {
+      if (activeCaseId.current !== requestedCaseId) return;
+      setView(null);
       setError(message(cause));
     }
   };
   useEffect(() => {
-    void load();
-  }, []);
-  const view = useMemo(
-    () => cases.find((item) => item.case.id === selected) ?? cases[0],
-    [cases, selected],
-  );
+    setView(null);
+    setError("");
+    setNotice("");
+    operation.current = "";
+    void load(caseId);
+  }, [caseId]);
   const submit = async () => {
-    if (!view || busy) return;
+	if (!view || view.case.id !== caseId || busy) return;
     setBusy(true);
     setError("");
     setNotice("");
@@ -82,7 +88,7 @@ export default function CaseReview() {
           ? "唯一复核已提交，最终责任可以生效。"
           : "初裁已密封提交；复核窗口结束前信誉不会更新。",
       );
-      await load();
+      if (activeCaseId.current === view.case.id) await load(view.case.id);
     } catch (cause) {
       setError(message(cause));
     } finally {
@@ -98,7 +104,7 @@ export default function CaseReview() {
             <span role="alert">{error}</span>
           </InfoNote>
         ) : (
-          <InfoNote>当前没有分配给你的案件。</InfoNote>
+          <InfoNote>正在读取所选案件…</InfoNote>
         )}
       </Page>
     );

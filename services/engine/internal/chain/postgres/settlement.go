@@ -11,7 +11,6 @@ import (
 	"time"
 
 	chainprojection "github.com/example/agent-platform/engine/internal/chain"
-	"github.com/example/agent-platform/engine/internal/selection"
 )
 
 type settlementEntry struct {
@@ -23,66 +22,104 @@ func projectSettlementEvent(ctx context.Context, tx *sql.Tx, scope chainprojecti
 	case chainprojection.EventTaskCreated:
 		publisher, _ := event.Payload["publisher"].(string)
 		amount, _ := event.Payload["amount"].(string)
-		var intentID, taskID, publisherID, publisherWallet, expectedAmount, overviewAmount, formalAmount, externalAmount, submittedHash, status string
+		var intentID, taskID, publisherID, publisherWallet, expectedAmount, formalAmount, assetAddress, deploymentAsset, attemptID, taskStatus string
 		var aggregateVersion int64
-		err := tx.QueryRowContext(ctx, `SELECT intent_id,task_id,publisher_id,publisher_wallet,total_amount::text,overview_amount::text,formal_amount::text,external_cost_amount::text,COALESCE(transaction_hash,''),status,aggregate_version
-FROM task_funding_intents WHERE chain_id=$1 AND contract_address=$2 AND chain_task_id=$3 FOR UPDATE`, scope.ChainID, scope.Contract, event.TaskID).Scan(&intentID, &taskID, &publisherID, &publisherWallet, &expectedAmount, &overviewAmount, &formalAmount, &externalAmount, &submittedHash, &status, &aggregateVersion)
+		var deadline time.Time
+		err := tx.QueryRowContext(ctx, `SELECT intent.intent_id,intent.task_id,intent.publisher_id,intent.publisher_wallet,intent.total_amount::text,intent.formal_amount::text,COALESCE(intent.asset_address,''),COALESCE(deployment.asset_key,''),intent.aggregate_version,attempt.attempt_id,task.status,task.deadline
+	FROM task_funding_intents intent
+	JOIN task_funding_attempts attempt ON attempt.intent_id=intent.intent_id AND attempt.chain_id=intent.chain_id AND attempt.contract_address=intent.contract_address AND attempt.transaction_hash=$4
+	JOIN tasks task ON task.task_id=intent.task_id
+	LEFT JOIN escrow_deployments deployment ON deployment.chain_id=intent.chain_id AND deployment.contract_address=intent.contract_address
+	WHERE intent.chain_id=$1 AND intent.contract_address=$2 AND intent.chain_task_id=$3
+	FOR UPDATE OF intent,attempt,task`, scope.ChainID, scope.Contract, event.TaskID, event.TransactionHash).Scan(&intentID, &taskID, &publisherID, &publisherWallet, &expectedAmount, &formalAmount, &assetAddress, &deploymentAsset, &aggregateVersion, &attemptID, &taskStatus, &deadline)
 		if errors.Is(err, sql.ErrNoRows) {
-			// Unknown deposits are retained as chain evidence but never attached to
-			// an off-chain task or ledger account.
+			// Unknown or not-yet-registered attempts remain retained chain evidence.
+			// Submit invokes the same reconciliation after persisting the attempt.
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if publisher != publisherWallet || amount != expectedAmount || submittedHash != "" && submittedHash != event.TransactionHash || status != "prepared" && status != "submitted" && status != "confirmed" {
+		if publisher != publisherWallet || amount != expectedAmount {
 			return nil
 		}
-		if status == "confirmed" {
-			return nil
+		asset := deploymentAsset
+		if assetAddress != "" {
+			asset = "evm:" + scope.ChainID + "/erc20:" + assetAddress
+			if deploymentAsset != "" && deploymentAsset != asset {
+				return errors.New("escrow deployment asset does not match funding intent")
+			}
+		} else if asset == "" {
+			return errors.New("legacy escrow deployment metadata is missing")
 		}
-		asset := "evm:" + scope.ChainID + "/native"
-		discoveryID := settlementDigest("fund-account", "discovery_pool", taskID, asset, "double-entry-v1")
+		var currentEvent string
+		if currentErr := tx.QueryRowContext(ctx, `SELECT chain_event_id FROM task_funding_canonicalizations WHERE intent_id=$1 AND orphaned_at IS NULL FOR UPDATE`, intentID).Scan(&currentEvent); currentErr == nil {
+			if currentEvent == event.ID {
+				return nil
+			}
+			return errors.New("funding intent already has another canonical occurrence")
+		} else if !errors.Is(currentErr, sql.ErrNoRows) {
+			return currentErr
+		}
+		var epoch int
+		if err = tx.QueryRowContext(ctx, `SELECT COALESCE(max(canonicalization_epoch),0)+1 FROM task_funding_canonicalizations WHERE chain_event_id=$1`, event.ID).Scan(&epoch); err != nil {
+			return err
+		}
 		formalID := settlementDigest("fund-account", "formal_escrow", taskID, asset, "double-entry-v1")
 		if _, err = tx.ExecContext(ctx, `INSERT INTO fund_accounts(account_id,account_class,account_type,task_id,reference_id,asset_key,principal_owner_id,residual_recipient_id,refund_policy_version,state,balance,created_at,updated_at)
-VALUES($1,'business','discovery_pool',$2,$2,$3,$4,$4,'task-funding-v1','open',0,$5,$5) ON CONFLICT(account_type,reference_id,asset_key) DO NOTHING`, discoveryID, taskID, asset, publisherID, now); err != nil {
+VALUES($1,'business','formal_escrow',$2,$2,$3,$4,$4,'task-funding-v3','open',0,$5,$5) ON CONFLICT(account_type,reference_id,asset_key) DO NOTHING`, formalID, taskID, asset, publisherID, now); err != nil {
 			return err
-		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO fund_accounts(account_id,account_class,account_type,task_id,reference_id,asset_key,principal_owner_id,residual_recipient_id,refund_policy_version,state,balance,created_at,updated_at)
-VALUES($1,'business','formal_escrow',$2,$2,$3,$4,$4,'task-funding-v1','open',0,$5,$5) ON CONFLICT(account_type,reference_id,asset_key) DO NOTHING`, formalID, taskID, asset, publisherID, now); err != nil {
-			return err
-		}
-		discoveryAmount, ok := addCanonicalAmounts(overviewAmount, externalAmount)
-		if !ok {
-			return errors.New("task funding amounts are invalid")
 		}
 		controlID := settlementDigest("fund-system-account", "funding_control", asset, "double-entry-v1")
 		if _, err = tx.ExecContext(ctx, `INSERT INTO fund_accounts(account_id,account_class,account_type,reference_id,asset_key,state,balance,created_at,updated_at) VALUES($1,'system','funding_control',$2,$2,'open',0,$3,$3) ON CONFLICT(account_type,reference_id,asset_key) DO NOTHING`, controlID, asset, now); err != nil {
 			return err
 		}
-		if discoveryAmount != "0" {
-			journalID := settlementDigest("task-funding", event.ID, "discovery")
-			if err = insertSettlementJournal(ctx, tx, journalID, "funding", taskID, event.ID, "escrow_funded", now, []settlementEntry{{controlID, "funding_control", "debit", discoveryAmount, asset}, {discoveryID, "discovery_pool", "credit", discoveryAmount, asset}}); err != nil {
-				return err
-			}
-		}
-		journalID := settlementDigest("task-funding", event.ID, "formal")
+		journalID := settlementDigest("task-funding", event.ID, fmt.Sprintf("epoch-%d", epoch), "formal")
 		if err = insertSettlementJournal(ctx, tx, journalID, "funding", taskID, event.ID, "escrow_funded", now, []settlementEntry{{controlID, "funding_control", "debit", formalAmount, asset}, {formalID, "formal_escrow", "credit", formalAmount, asset}}); err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE tasks SET status='escrowed',aggregate_version=aggregate_version+1,updated_at=$1 WHERE task_id=$2 AND publisher_id=$3 AND status='pending_escrow'`, now, taskID, publisherID)
-		if err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO task_funding_canonicalizations(chain_event_id,canonicalization_epoch,intent_id,attempt_id,journal_id,canonical_at) VALUES($1,$2,$3,$4,$5,$6)`, event.ID, epoch, intentID, attemptID, journalID, now); err != nil {
 			return err
 		}
-		if changed, _ := result.RowsAffected(); changed != 1 {
-			return errors.New("task funding state transition failed")
+		targetStatus := "escrowed"
+		if !now.Before(deadline) {
+			targetStatus = "funding_refund_pending"
+		}
+		if taskStatus != "pending_escrow" && taskStatus != "escrowed" && taskStatus != "funding_refund_pending" && taskStatus != "chain_reorg_pending" {
+			return errors.New("task funding requires explicit reorg recovery")
+		}
+		if taskStatus == "chain_reorg_pending" {
+			targetStatus = taskStatus
+		}
+		if taskStatus != targetStatus {
+			if _, err = tx.ExecContext(ctx, `UPDATE tasks SET status=$1,aggregate_version=aggregate_version+1,updated_at=$2 WHERE task_id=$3 AND publisher_id=$4`, targetStatus, now, taskID, publisherID); err != nil {
+				return err
+			}
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO task_funding_attempt_states(attempt_id,state,reason_code,occurred_at)
+SELECT attempt_id,'superseded','canonical_attempt_selected',$1 FROM task_funding_attempts
+WHERE intent_id=$2 AND attempt_id<>$3 AND state IN ('submitted','observed_failed','canonical_orphaned')`, now, intentID, attemptID); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE task_funding_attempts SET state='superseded',updated_at=$1 WHERE intent_id=$2 AND attempt_id<>$3 AND state IN ('submitted','observed_failed','canonical_orphaned')`, now, intentID, attemptID); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE task_funding_attempts SET state='canonical_confirmed',updated_at=$1 WHERE attempt_id=$2`, now, attemptID); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO task_funding_attempt_states(attempt_id,state,chain_event_id,reason_code,occurred_at) VALUES($1,'canonical_confirmed',$2,'confirmation_depth_reached',$3)`, attemptID, event.ID, now); err != nil {
+			return err
 		}
 		aggregateVersion++
-		if _, err = tx.ExecContext(ctx, `UPDATE task_funding_intents SET status='confirmed',transaction_hash=$1,chain_event_id=$2,aggregate_version=$3,updated_at=$4 WHERE intent_id=$5`, event.TransactionHash, event.ID, aggregateVersion, now, intentID); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE task_funding_intents SET status='confirmed',transaction_hash=$1,chain_event_id=$2,failure_reason_code=NULL,aggregate_version=$3,updated_at=$4 WHERE intent_id=$5`, event.TransactionHash, event.ID, aggregateVersion, now, intentID); err != nil {
 			return err
 		}
 		stateID := settlementDigest("task-funding-state", intentID, "confirmed", fmt.Sprintf("%d", aggregateVersion))
-		_, err = tx.ExecContext(ctx, `INSERT INTO task_funding_intent_events(event_id,intent_id,aggregate_version,state,transaction_hash,chain_event_id,reason_code,occurred_at) VALUES($1,$2,$3,'confirmed',$4,$5,'confirmation_depth_reached',$6)`, stateID, intentID, aggregateVersion, event.TransactionHash, event.ID, now)
+		reason := "confirmation_depth_reached"
+		if targetStatus == "funding_refund_pending" {
+			reason = "confirmation_after_business_deadline"
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO task_funding_intent_events(event_id,intent_id,aggregate_version,state,transaction_hash,chain_event_id,reason_code,occurred_at) VALUES($1,$2,$3,'confirmed',$4,$5,$6,$7)`, stateID, intentID, aggregateVersion, event.TransactionHash, event.ID, reason, now)
 		return err
 
 	case chainprojection.EventEarnings:
@@ -121,9 +158,11 @@ WHERE reservation.chain_id=$1 AND reservation.contract_address=$2 AND reservatio
 		amount, _ := event.Payload["amount"].(string)
 		var receivableID, asset string
 		err := tx.QueryRowContext(ctx, `SELECT account.account_id,account.asset_key
-FROM selection_reservations reservation
-JOIN fund_accounts account ON account.account_type='formal_agent_receivable'
- AND account.reference_id=reservation.agent_controller || ':' || reservation.payout_address
+	FROM selection_reservations reservation
+	JOIN fund_accounts formal ON formal.task_id=reservation.task_id AND formal.account_type='formal_escrow'
+	JOIN fund_accounts account ON account.account_type='formal_agent_receivable'
+	 AND account.reference_id=reservation.agent_controller || ':' || reservation.payout_address
+	 AND account.asset_key=formal.asset_key
 WHERE reservation.chain_id=$1 AND reservation.contract_address=$2
   AND reservation.agent_controller=$3 AND reservation.payout_address=$4
   AND account.balance >= $5
@@ -142,7 +181,7 @@ ORDER BY reservation.created_at LIMIT 1 FOR UPDATE`, scope.ChainID, scope.Contra
 
 	case chainprojection.EventRefunded:
 		amount, _ := event.Payload["amount"].(string)
-		taskID, formalID, asset, err := formalAccountForChainTask(ctx, tx, event.TaskID)
+		taskID, formalID, asset, err := formalAccountForChainTask(ctx, tx, scope, event.TaskID)
 		if err != nil {
 			return err
 		}
@@ -191,7 +230,7 @@ WHERE reservation.chain_id=$1 AND reservation.contract_address=$2 AND reservatio
 		publisherAmount, _ := event.Payload["publisherAmount"].(string)
 		agentAmount, _ := event.Payload["agentAmount"].(string)
 		feeAmount, _ := event.Payload["feeAmount"].(string)
-		taskID, formalID, asset, err := formalAccountForChainTask(ctx, tx, event.TaskID)
+		taskID, formalID, asset, err := formalAccountForChainTask(ctx, tx, scope, event.TaskID)
 		if err != nil {
 			return err
 		}
@@ -250,6 +289,7 @@ FROM chain_events event JOIN fund_journals journal ON journal.source_ref=event.e
 JOIN fund_entries entry ON entry.journal_id=journal.journal_id
 WHERE event.chain_id=$1 AND event.contract_address=$2 AND event.block_hash=$3
   AND journal.journal_type IN ('funding','settlement_release','settlement_refund','earnings_withdrawal','change_order_release','change_order_residual','dispute_allocation')
+  AND NOT EXISTS (SELECT 1 FROM fund_journals reversal WHERE reversal.reversal_of=journal.journal_id)
 ORDER BY journal.journal_id,entry.entry_index`, scope.ChainID, scope.Contract, blockHash)
 	if err != nil {
 		return err
@@ -295,14 +335,32 @@ ORDER BY journal.journal_id,entry.entry_index`, scope.ChainID, scope.Contract, b
 		if value.taskID != "" {
 			target := "chain_reorg_pending"
 			if value.funding {
-				target = "pending_escrow"
+				var currentStatus string
+				if err = tx.QueryRowContext(ctx, `SELECT status FROM tasks WHERE task_id=$1 FOR UPDATE`, value.taskID).Scan(&currentStatus); err != nil {
+					return err
+				}
+				if currentStatus == "pending_escrow" || currentStatus == "escrowed" || currentStatus == "funding_refund_pending" {
+					target = "pending_escrow"
+				}
 			}
 			if _, err = tx.ExecContext(ctx, `UPDATE tasks SET status=$2,aggregate_version=aggregate_version+1,updated_at=$3 WHERE task_id=$1 AND status<>$2`, value.taskID, target, now); err != nil {
 				return err
 			}
 			if value.funding {
-				var intentID string
+				var intentID, attemptID, chainEventID string
 				var version int64
+				canonicalErr := tx.QueryRowContext(ctx, `UPDATE task_funding_canonicalizations SET reversal_journal_id=$1,orphaned_at=$2 WHERE journal_id=$3 AND orphaned_at IS NULL RETURNING intent_id,attempt_id,chain_event_id`, reversalID, now, originalID).Scan(&intentID, &attemptID, &chainEventID)
+				if canonicalErr != nil && !errors.Is(canonicalErr, sql.ErrNoRows) {
+					return canonicalErr
+				}
+				if canonicalErr == nil {
+					if _, err = tx.ExecContext(ctx, `UPDATE task_funding_attempts SET state='canonical_orphaned',updated_at=$1 WHERE attempt_id=$2`, now, attemptID); err != nil {
+						return err
+					}
+					if _, err = tx.ExecContext(ctx, `INSERT INTO task_funding_attempt_states(attempt_id,state,chain_event_id,reason_code,occurred_at) VALUES($1,'canonical_orphaned',$2,'chain_reorganization',$3)`, attemptID, chainEventID, now); err != nil {
+						return err
+					}
+				}
 				if err = tx.QueryRowContext(ctx, `UPDATE task_funding_intents SET status='orphaned',aggregate_version=aggregate_version+1,updated_at=$2 WHERE task_id=$1 AND status='confirmed' RETURNING intent_id,aggregate_version`, value.taskID, now).Scan(&intentID, &version); err != nil && !errors.Is(err, sql.ErrNoRows) {
 					return err
 				}
@@ -364,23 +422,10 @@ func addCanonicalAmounts(values ...string) (string, bool) {
 	return total.String(), true
 }
 
-func formalAccountForChainTask(ctx context.Context, tx *sql.Tx, chainTaskID string) (string, string, string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT task_id,account_id,asset_key FROM fund_accounts WHERE account_type='formal_escrow'`)
-	if err != nil {
-		return "", "", "", err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var taskID, accountID, asset string
-		if err = rows.Scan(&taskID, &accountID, &asset); err != nil {
-			return "", "", "", err
-		}
-		if selection.TaskChainID(taskID) == chainTaskID {
-			return taskID, accountID, asset, nil
-		}
-	}
-	if err = rows.Err(); err != nil {
-		return "", "", "", err
-	}
-	return "", "", "", sql.ErrNoRows
+func formalAccountForChainTask(ctx context.Context, tx *sql.Tx, scope chainprojection.Scope, chainTaskID string) (string, string, string, error) {
+	var taskID, accountID, asset string
+	err := tx.QueryRowContext(ctx, `SELECT account.task_id,account.account_id,account.asset_key
+FROM task_funding_intents intent JOIN fund_accounts account ON account.task_id=intent.task_id AND account.account_type='formal_escrow'
+WHERE intent.chain_id=$1 AND intent.contract_address=$2 AND intent.chain_task_id=$3`, scope.ChainID, scope.Contract, chainTaskID).Scan(&taskID, &accountID, &asset)
+	return taskID, accountID, asset, err
 }

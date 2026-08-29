@@ -7,26 +7,26 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/example/agent-platform/engine/internal/chain/taskescrowabi"
 	"github.com/example/agent-platform/engine/internal/selection"
-	"golang.org/x/crypto/sha3"
 )
 
 var eventSignatures = map[string]string{
-	hexKeccak("TaskCreated(bytes32,address,uint256)"):                                                                        EventTaskCreated,
-	hexKeccak("SelectionConfirmed(bytes32,bytes32,address,address,bytes32,bytes32,uint256,uint256,uint256,uint256,uint256)"): EventSelection,
-	hexKeccak("WorkNonceAdvanced(bytes32,bytes32,uint256)"):                                                                  EventWorkNonce,
-	hexKeccak("FundsReleased(bytes32,address,uint256)"):                                                                      EventReleased,
-	hexKeccak("FundsRefunded(bytes32,address,uint256)"):                                                                      EventRefunded,
-	hexKeccak("EarningsAccrued(bytes32,bytes32,address,address,uint256)"):                                                    EventEarnings,
-	hexKeccak("EarningsWithdrawn(address,address,uint256)"):                                                                  EventWithdrawal,
-	hexKeccak("YieldEligibilityChanged(bytes32,uint256,bool)"):                                                               EventYield,
-	hexKeccak("DisputeOpened(bytes32,address)"):                                                                              EventDisputeOpen,
-	hexKeccak("DisputeResolved(bytes32,address,uint256)"):                                                                    EventDisputeDone,
-	hexKeccak("DisputeFrozen(bytes32,bytes32,uint32,uint256,uint256,uint64)"):                                                EventDisputeFreeze,
-	hexKeccak("DisputeAllocationFinalized(bytes32,bytes32,uint256,uint256,uint256)"):                                         EventDisputeAlloc,
+	taskescrowabi.EventID("TaskCreated"):                EventTaskCreated,
+	taskescrowabi.EventID("SelectionConfirmed"):         EventSelection,
+	taskescrowabi.EventID("WorkNonceAdvanced"):          EventWorkNonce,
+	taskescrowabi.EventID("FundsReleased"):              EventReleased,
+	taskescrowabi.EventID("FundsRefunded"):              EventRefunded,
+	taskescrowabi.EventID("EarningsAccrued"):            EventEarnings,
+	taskescrowabi.EventID("EarningsWithdrawn"):          EventWithdrawal,
+	taskescrowabi.EventID("YieldEligibilityChanged"):    EventYield,
+	taskescrowabi.EventID("DisputeOpened"):              EventDisputeOpen,
+	taskescrowabi.EventID("DisputeResolved"):            EventDisputeDone,
+	taskescrowabi.EventID("DisputeFrozen"):              EventDisputeFreeze,
+	taskescrowabi.EventID("DisputeAllocationFinalized"): EventDisputeAlloc,
 }
 
-var selectAgentSelector = hexKeccak("selectAgent((bytes32,bytes32,address,address,bytes32,bytes32,bytes32,bytes32,uint64,uint64,uint256,uint256,uint256,bytes32,bytes32,uint64),bytes)")[:10]
+var selectAgentSelector = taskescrowabi.MethodID("selectAgent")
 
 func IsSelectionInput(input string) bool {
 	return len(input) >= 10 && strings.EqualFold(input[:10], selectAgentSelector)
@@ -235,9 +235,4 @@ func subtract(left, right string) string {
 		return ""
 	}
 	return l.Sub(l, r).String()
-}
-func hexKeccak(value string) string {
-	hasher := sha3.NewLegacyKeccak256()
-	_, _ = hasher.Write([]byte(value))
-	return "0x" + hex.EncodeToString(hasher.Sum(nil))
 }

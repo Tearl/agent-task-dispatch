@@ -97,6 +97,11 @@ func (store *Store) CreateRevision(ctx context.Context, key matching.SnapshotKey
 	if err = insertCandidates(ctx, tx, snapshot); err != nil {
 		return matching.Snapshot{}, false, err
 	}
+	for _, selected := range snapshot.Selections {
+		if _, err = tx.ExecContext(ctx, `UPDATE agents SET matching_exposure_count=matching_exposure_count+1 WHERE agent_id=$1`, selected.Candidate.Candidate.AgentID); err != nil {
+			return matching.Snapshot{}, false, fmt.Errorf("record matching exposure: %w", err)
+		}
+	}
 	if _, err = tx.ExecContext(ctx, `UPDATE match_snapshots SET sealed_at=created_at WHERE snapshot_id=$1 AND sealed_at IS NULL`, snapshot.ID); err != nil {
 		return matching.Snapshot{}, false, fmt.Errorf("seal matching snapshot: %w", err)
 	}

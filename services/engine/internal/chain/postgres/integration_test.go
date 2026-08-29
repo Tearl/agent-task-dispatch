@@ -49,6 +49,23 @@ func TestPostgresProjectionReplayRewindAndReconciliationEvidence(t *testing.T) {
 	if err = store.ApplyBlock(ctx, scope, block1, nil); err != nil {
 		t.Fatal(err)
 	}
+	activeStoredScope := chainprojection.Scope{ChainID: scope.ChainID, Contract: "0x000000000000000000000000000000000000abcd", StartBlock: 10, Confirmations: 5, MaxReorgDepth: 20}
+	resolver := "0x0000000000000000000000000000000000009999"
+	if err = store.RegisterDeployment(ctx, Deployment{ChainID: scope.ChainID, Contract: scope.Contract, Asset: "evm:31337/native", DisputeResolver: resolver}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.RegisterDeployment(ctx, Deployment{ChainID: activeStoredScope.ChainID, Contract: activeStoredScope.Contract, Asset: "evm:31337/erc20:0x0000000000000000000000000000000000005678", DisputeResolver: resolver, ActiveForNewTasks: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.ApplyBlock(ctx, activeStoredScope, chainprojection.Block{Number: 10, Hash: integrationHash(10), ParentHash: integrationHash(9), Timestamp: time.Unix(10, 0).UTC()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	activeScope := activeStoredScope
+	activeScope.Contract = "0x000000000000000000000000000000000000AbCd"
+	persisted, err := store.PersistedProjectionScopes(ctx, activeScope)
+	if err != nil || len(persisted) != 1 || persisted[0].Contract != scope.Contract || persisted[0].Confirmations != activeScope.Confirmations || persisted[0].MaxReorgDepth != activeScope.MaxReorgDepth {
+		t.Fatalf("persisted deployment scopes=%#v err=%v", persisted, err)
+	}
 	txHash := integrationHash(402)
 	block2 := chainprojection.Block{Number: 2, Hash: integrationHash(2), ParentHash: block1.Hash, Timestamp: time.Unix(2, 0).UTC(), Transactions: []chainprojection.Transaction{{Hash: txHash, To: scope.Contract, Input: chainprojection.SelectionCallSelector(), Status: chainprojection.TxFailed}}}
 	if err = store.ApplyBlock(ctx, scope, block2, nil); err != nil {

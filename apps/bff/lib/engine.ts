@@ -1,3 +1,10 @@
+import {
+  EngineConnectionError,
+  EngineRequestTimeoutError,
+  EngineResponseTooLargeError,
+  requestEngine,
+} from "./engine-http.ts";
+
 export type EngineResourceKind = "agents" | "tasks";
 export type EngineFinanceKind = "publisher" | "agent" | "reconciliation";
 export type EngineWorkspaceKind = "tasks" | "agents" | "marketplace" | "notifications";
@@ -18,7 +25,6 @@ export type EngineMutationInput = {
 export class InvalidResourceIdError extends Error {}
 export class InvalidEngineResponseError extends Error {}
 
-const maxEngineResponseBytes = 1_048_576;
 const sensitiveKeys = new Set([
   "authorization",
   "accesstoken",
@@ -57,13 +63,12 @@ export async function aggregateEngineResource(
 ): Promise<EngineAggregateResult> {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) throw new InvalidResourceIdError("invalid resource id");
   if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
-  const request = options.fetch ?? fetch;
   const baseUrl = options.engineBaseUrl ?? resolveEngineBaseUrl();
   const encodedID = encodeURIComponent(id);
   const headers = { authorization: `Bearer ${sessionToken}`, accept: "application/json" };
   const singular = kind === "agents" ? "agent" : "task";
-  const response = await request(`${baseUrl}/v1/${kind}/${encodedID}/view`, { headers, cache: "no-store" });
-  if (!response.ok) return engineError(response);
+  const response = await requestEngine(`${baseUrl}/v1/${kind}/${encodedID}/view`, { headers, cache: "no-store" }, options);
+  if (!response.ok) return readEngineError(response);
   const view = sanitizePayload(await readEngineJSON(response));
   if (!view || typeof view !== "object" || Array.isArray(view)) throw new InvalidEngineResponseError("invalid engine view response");
   const resource = (view as Record<string, unknown>)[singular];
@@ -80,10 +85,9 @@ export async function aggregateEngineFinance(
   options: { fetch?: typeof fetch; engineBaseUrl?: string } = {},
 ): Promise<EngineAggregateResult> {
   if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
-  const request = options.fetch ?? fetch;
   const baseUrl = options.engineBaseUrl ?? resolveEngineBaseUrl();
-  const response = await request(`${baseUrl}/v1/finance/${kind}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
-  if (!response.ok) return engineError(response);
+  const response = await requestEngine(`${baseUrl}/v1/finance/${kind}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" }, options);
+  if (!response.ok) return readEngineError(response);
   const value = sanitizePayload(await readEngineJSON(response));
   if (!validFinanceView(kind, value)) throw new InvalidEngineResponseError("invalid engine finance response");
   return { status: 200, body: value as Record<string, unknown> };
@@ -96,10 +100,9 @@ export async function aggregateEngineMatching(
 ): Promise<EngineAggregateResult> {
   if (!validID(taskID)) throw new InvalidResourceIdError("invalid resource id");
   if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
-  const request = options.fetch ?? fetch;
   const baseUrl = options.engineBaseUrl ?? resolveEngineBaseUrl();
-  const response = await request(`${baseUrl}/v1/tasks/${encodeURIComponent(taskID)}/matching-view`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
-  if (!response.ok) return engineError(response);
+  const response = await requestEngine(`${baseUrl}/v1/tasks/${encodeURIComponent(taskID)}/matching-view`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" }, options);
+  if (!response.ok) return readEngineError(response);
   const value = sanitizePayload(await readEngineJSON(response));
   if (!validMatchingView(taskID, value)) throw new InvalidEngineResponseError("invalid engine matching response");
   return { status: 200, body: value as Record<string, unknown> };
@@ -112,8 +115,8 @@ export async function aggregateEngineExecutions(
 ): Promise<EngineAggregateResult> {
 	if (!validID(taskID)) throw new InvalidResourceIdError("invalid resource id");
 	if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
-	const response = await (options.fetch ?? fetch)(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}/v1/tasks/${encodeURIComponent(taskID)}/executions`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
-	if (!response.ok) return engineError(response);
+	const response = await requestEngine(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}/v1/tasks/${encodeURIComponent(taskID)}/executions`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" }, options);
+	if (!response.ok) return readEngineError(response);
 	const value = sanitizePayload(await readEngineJSON(response));
 	if (!Array.isArray(value) || !value.every(validExecutionView)) throw new InvalidEngineResponseError("invalid engine execution response");
 	return { status: 200, body: { executions: value } };
@@ -121,8 +124,8 @@ export async function aggregateEngineExecutions(
 
 export async function aggregateEngineWorkspace(kind: EngineWorkspaceKind, sessionToken: string, options: { fetch?: typeof fetch; engineBaseUrl?: string } = {}): Promise<EngineAggregateResult> {
 	if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
-	const response = await (options.fetch ?? fetch)(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}/v1/workspace/${kind}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
-	if (!response.ok) return engineError(response);
+	const response = await requestEngine(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}/v1/workspace/${kind}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" }, options);
+	if (!response.ok) return readEngineError(response);
 	const value = sanitizePayload(await readEngineJSON(response));
 	const body = record(value);
 	if (!body || !Array.isArray(body[kind])) throw new InvalidEngineResponseError("invalid engine workspace response");
@@ -136,11 +139,12 @@ export async function aggregateEngineFormalDelivery(
 ): Promise<EngineAggregateResult> {
   if (!validID(taskID)) throw new InvalidResourceIdError("invalid resource id");
   if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
-  const request = options.fetch ?? fetch;
   const baseUrl = options.engineBaseUrl ?? resolveEngineBaseUrl();
-  const response = await request(`${baseUrl}/v1/tasks/${encodeURIComponent(taskID)}/formal-package`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
-  if (!response.ok) return engineError(response);
-  const value = sanitizePayload(await readEngineJSON(response));
+  const response = await requestEngine(`${baseUrl}/v1/tasks/${encodeURIComponent(taskID)}/formal-package`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" }, options);
+  if (!response.ok) return readEngineError(response);
+  const raw = await readEngineJSON(response);
+  if (!validFormalDelivery(taskID, raw)) throw new InvalidEngineResponseError("invalid engine formal delivery response");
+  const value = sanitizeFormalDelivery(raw);
   if (!validFormalDelivery(taskID, value)) throw new InvalidEngineResponseError("invalid engine formal delivery response");
   return { status: 200, body: value as Record<string, unknown> };
 }
@@ -153,8 +157,8 @@ export async function aggregateEngineDisputes(
   if (caseID !== undefined && !/^sha256:[0-9a-f]{64}$/.test(caseID)) throw new InvalidResourceIdError("invalid dispute id");
   if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
   const path = caseID === undefined ? "/v1/disputes" : `/v1/disputes/${encodeURIComponent(caseID)}`;
-  const response = await (options.fetch ?? fetch)(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}${path}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
-  if (!response.ok) return engineError(response);
+  const response = await requestEngine(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}${path}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" }, options);
+  if (!response.ok) return readEngineError(response);
   const value = sanitizePayload(await readEngineJSON(response));
   const valid = caseID === undefined ? Boolean(record(value) && Array.isArray(record(value)?.cases) && (record(value)?.cases as unknown[]).every(validDisputeView)) : validDisputeView(value);
   if (!valid) throw new InvalidEngineResponseError("invalid engine dispute response");
@@ -164,8 +168,8 @@ export async function aggregateEngineDisputes(
 export async function forwardEngineRead(path: string, sessionToken: string, options: { fetch?: typeof fetch; engineBaseUrl?: string } = {}): Promise<EngineAggregateResult> {
   if (!/^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:selection-reservations\/sha256(?::|%3A)[0-9a-f]{64}|funding-intent|orchestration-plan)$/.test(path)) throw new InvalidResourceIdError("invalid read path");
   if (!sessionToken) return { status: 401, body: { error: "unauthorized" } };
-  const response = await (options.fetch ?? fetch)(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}${path}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" });
-  if (!response.ok) return engineError(response);
+  const response = await requestEngine(`${options.engineBaseUrl ?? resolveEngineBaseUrl()}${path}`, { headers: { authorization: `Bearer ${sessionToken}`, accept: "application/json" }, cache: "no-store" }, options);
+  if (!response.ok) return readEngineError(response);
   const value = sanitizePayload(await readEngineJSON(response));
   if (!record(value)) throw new InvalidEngineResponseError("invalid engine read response");
   return { status: 200, body: value as Record<string, unknown> };
@@ -173,14 +177,13 @@ export async function forwardEngineRead(path: string, sessionToken: string, opti
 
 export async function forwardEngineMutation(
   input: EngineMutationInput,
-  options: { fetch?: typeof fetch; engineBaseUrl?: string } = {},
+  options: { fetch?: typeof fetch; engineBaseUrl?: string; timeoutMs?: number } = {},
 ): Promise<EngineAggregateResult> {
   if (!validMutationPath(input.path)) throw new InvalidResourceIdError("invalid mutation path");
   if (!input.sessionToken) return { status: 401, body: { error: "unauthorized" } };
   if (!input.idempotencyKey || input.idempotencyKey.length > 200) return { status: 400, body: { error: "invalid idempotency key" } };
-  const request = options.fetch ?? fetch;
   const baseUrl = options.engineBaseUrl ?? resolveEngineBaseUrl();
-  const response = await request(`${baseUrl}${input.path}`, {
+  const response = await requestEngine(`${baseUrl}${input.path}`, {
     method: input.method ?? "POST",
     headers: {
       authorization: `Bearer ${input.sessionToken}`,
@@ -189,8 +192,8 @@ export async function forwardEngineMutation(
     },
     body: input.body,
     cache: "no-store",
-  });
-  if (!response.ok) return engineError(response);
+  }, options);
+  if (!response.ok) return readEngineError(response);
   const value = sanitizePayload(await readEngineJSON(response));
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new InvalidEngineResponseError("invalid engine mutation response");
   return { status: response.status, body: value as Record<string, unknown> };
@@ -199,6 +202,7 @@ export async function forwardEngineMutation(
 function validMutationPath(path: string): boolean {
   if (path === "/v1/agents" || path === "/v1/tasks") return true;
 	return /^\/v1\/agents\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:credentials|health|prices|lifecycle|profile)$/.test(path)
+		|| /^\/v1\/admin\/agents\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/matching-authority$/.test(path)
 		|| /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:matching-runs|overview-batches)$/.test(path)
 		|| /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/orchestration-plans$/.test(path)
 		|| /^\/v1\/tasks\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/deletion-requests$/.test(path)
@@ -222,41 +226,17 @@ function validExecutionView(value: unknown): boolean {
 
 function validID(value: string): boolean { return /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value); }
 
-async function engineError(response: Response): Promise<EngineAggregateResult> {
-  try {
-    const value = await readEngineJSON(response);
-    if (value && typeof value === "object" && !Array.isArray(value) && typeof (value as Record<string, unknown>).error === "string") {
-      return { status: response.status, body: { error: (value as Record<string, string>).error } };
-    }
-  } catch {
-    // Replace malformed upstream errors with a stable BFF error contract.
+export async function readEngineError(response: Response): Promise<EngineAggregateResult> {
+  const value = await readEngineJSON(response);
+  if (value && typeof value === "object" && !Array.isArray(value) && typeof (value as Record<string, unknown>).error === "string") {
+    return { status: response.status, body: { error: (value as Record<string, string>).error } };
   }
-  return { status: response.status >= 400 && response.status <= 599 ? response.status : 502, body: { error: "engine request failed" } };
+  throw new InvalidEngineResponseError("invalid Engine error response");
 }
 
-async function readEngineJSON(response: Response): Promise<unknown> {
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxEngineResponseBytes) throw new InvalidEngineResponseError("engine response too large");
+export async function readEngineJSON(response: Response): Promise<unknown> {
   if (!response.body) throw new InvalidEngineResponseError("empty engine response");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxEngineResponseBytes) {
-      await reader.cancel();
-      throw new InvalidEngineResponseError("engine response too large");
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -270,6 +250,19 @@ async function readEngineJSON(response: Response): Promise<unknown> {
   }
 }
 
+export function mapEngineFailure(error: unknown): EngineAggregateResult {
+  if (error instanceof EngineRequestTimeoutError) {
+    return { status: 504, body: { error: "engine request timed out" } };
+  }
+  if (error instanceof InvalidEngineResponseError || error instanceof EngineResponseTooLargeError) {
+    return { status: 502, body: { error: "invalid engine response" } };
+  }
+  if (error instanceof EngineConnectionError) {
+    return { status: 503, body: { error: "engine service temporarily unavailable" } };
+  }
+  return { status: 503, body: { error: "engine service temporarily unavailable" } };
+}
+
 function sanitizePayload(value: unknown, depth = 0): unknown {
   if (depth > 20) throw new InvalidEngineResponseError("engine response too deeply nested");
   if (Array.isArray(value)) return value.map((item) => sanitizePayload(item, depth + 1));
@@ -279,6 +272,21 @@ function sanitizePayload(value: unknown, depth = 0): unknown {
     if (!sensitiveKeys.has(key.toLowerCase())) result[key] = sanitizePayload(item, depth + 1);
   }
   return result;
+}
+
+function sanitizeFormalDelivery(value: unknown): unknown {
+  const sanitized = sanitizePayload(value);
+  const source = record(value);
+  const target = record(sanitized);
+  if (!source || !target || !Array.isArray(source.versions) || !Array.isArray(target.versions)) return sanitized;
+  const targetVersions = target.versions;
+  source.versions.forEach((sourceVersion, index) => {
+    const rawProof = record(record(sourceVersion)?.proof);
+    const targetVersion = record(targetVersions[index]);
+    const targetProof = record(targetVersion?.proof);
+    if (rawProof && targetProof && validFormalProof(rawProof)) targetProof.signature = rawProof.signature;
+  });
+  return sanitized;
 }
 
 function validResource(value: unknown, id: string): value is Record<string, unknown> & { aggregateVersion: number } {
@@ -306,7 +314,7 @@ function validFinanceView(kind: EngineFinanceKind, value: unknown): value is Rec
 
 function validMatchingView(taskID: string, value: unknown): value is Record<string, unknown> {
   const view = record(value); const task = record(view?.task);
-  if (!view || !text(view.asOf) || !task || task.id !== taskID || !text(task.title) || !text(task.status) || !text(task.specHash) || typeof task.deletionPending !== "boolean") return false;
+  if (!view || !text(view.asOf) || typeof view.overviewFundingReady !== "boolean" || !task || task.id !== taskID || !text(task.title) || !text(task.status) || !text(task.specHash) || typeof task.deletionPending !== "boolean") return false;
   if (view.snapshot === undefined) return true;
   const snapshot = record(view.snapshot);
   return Boolean(snapshot && text(snapshot.id) && Number.isSafeInteger(snapshot.revision) && text(snapshot.algorithmVersion) && text(snapshot.seedDigest) && Array.isArray(snapshot.degradations) && snapshot.degradations.every((item)=>{const d=record(item);return Boolean(d&&text(d.dependency)&&text(d.code)&&text(d.message));}) && Array.isArray(snapshot.candidates) && snapshot.candidates.every(validMatchingCandidate));

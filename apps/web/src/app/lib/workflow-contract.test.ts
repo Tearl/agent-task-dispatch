@@ -145,8 +145,17 @@ test("matching comparison uses authoritative snapshots and exposes degraded and 
   assert.match(page, /aria-pressed=\{active\}/);
   assert.match(page, /系统与审计详情/);
   assert.match(page, /candidateSelectable\(candidate, selectionBlocked\)/);
+  assert.match(page, /overviewFundingBlocked/);
+  assert.match(page, /尚无独立 DiscoveryPool 充值通道/);
   for (const token of ["startMatching", "startOverview", "readTaskExecutions", "finalizeOverviewSlot", "权威执行状态"]) assert.match(page, new RegExp(token));
   assert.doesNotMatch(page, /from "\.\.\/\.\.\/lib\/mock"/);
+});
+
+test("task funding reserves replacement submission for an already submitted intent", async () => {
+  const page = await readFile(new URL("../pages/publisher/TaskFunding.tsx", import.meta.url), "utf8");
+  assert.match(page, /intent\?\.status==="submitted"[\s\S]*onClick=\{\(\)=>void act\(true\)\}/);
+  assert.match(page, /intent\?\.status==="submitted"[\s\S]*onClick=\{\(\)=>void act\(false\)\}[\s\S]*onClick=\{\(\)=>void act\(true\)\}/);
+  assert.match(page, /onClick=\{\(\)=>void act\(false\)\}>\{intent\?\.status==="failed"\|\|intent\?\.status==="orphaned"/);
 });
 
 test("primary workspaces load Engine read models instead of static fixtures",async()=>{
@@ -170,4 +179,31 @@ test("dispute and administration workflows use authoritative cases, canonical fr
   assert.match(review,/\[\s*0,\s*25,\s*50,\s*75,\s*100\s*\]/);assert.match(review,/reviewDispute/);assert.match(review,/evidenceRoot/);assert.match(review,/同一人员不能复核/);
   assert.match(admin,/runAdminOperation/);assert.match(admin,/dlq_replay/);assert.match(admin,/ledger_reversal/);assert.match(admin,/不能代签客户交易/);
   for(const page of [workspace,review,admin,publisher,agent])assert.doesNotMatch(page,/lib\/mock|CASES|toast\.success/);
+});
+
+test("arbitrator access and resource navigation remain session- and ID-bound", async () => {
+  const [layout, login, pending, review, tasks, roles, routes] = await Promise.all([
+    readFile(new URL("../layouts/ArbitratorLayout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../pages/ArbitratorLogin.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../pages/arbitrator/PendingCases.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../pages/arbitrator/CaseReview.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../pages/publisher/Tasks.tsx", import.meta.url), "utf8"),
+    readFile(new URL("roles.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../routes.ts", import.meta.url), "utf8"),
+  ]);
+  for (const token of ["roleAccessDecision", '"arbitrator"', "SessionRecovery", "/arbitrator/login"]) assert.match(layout, new RegExp(token.replaceAll("/", "\\/")));
+  for (const token of ["authenticateWallet", "clientRolesForEngineRoles", "disconnect", 'connect(session, "arbitrator")', "Engine 仍会"]) assert.ok(login.includes(token), `ArbitratorLogin is missing ${token}`);
+  assert.ok(login.includes("await disconnect()"));
+  assert.ok(pending.includes("arbitratorCaseReviewPath(view.case.id)"));
+  assert.ok(review.includes("useParams"));
+	assert.ok(review.includes("readDispute(requestedCaseId)"));
+	assert.ok(review.includes("activeCaseId.current === requestedCaseId"));
+	assert.ok(review.includes("view.case.id !== caseId"));
+  assert.equal(review.includes("cases[0]"), false);
+  assert.ok(tasks.includes("publisherTaskDestination(t.id, t.status, act.to)"));
+	assert.ok(tasks.includes("t.status === 'funding_refund_pending' ? void remove(t)"));
+  assert.equal(roles.includes('{ to: "/publisher/settlement", label: "交付与结算"'), false);
+  assert.equal(roles.includes('{ to: "/arbitrator/review", label: "案件审理"'), false);
+  assert.ok(routes.includes('route("arbitrator/review/:caseId"'));
+  assert.equal(routes.includes('route("arbitrator/review",'), false);
 });

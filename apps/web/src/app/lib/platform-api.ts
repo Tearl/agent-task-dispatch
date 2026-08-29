@@ -1,4 +1,6 @@
 import type { TaskAnalysis } from "./publisher-flow";
+import { encodeFunctionData, erc20Abi, type Address, type Hex } from "viem";
+import { taskEscrowAbi } from "../generated/task-escrow.ts";
 
 export type PublicSession = {
   sessionId: string;
@@ -31,6 +33,7 @@ export type ReconciliationFinanceView = {
 export type MatchingView = {
   asOf: string;
   task: { id: string; title: string; status: string; specHash: string; deletionPending: boolean };
+  overviewFundingReady: boolean;
   snapshot?: { id: string; revision: number; algorithmVersion: string; ruleVersion: string; modelVersion: string; seedDigest: string; explorationTriggered: boolean; createdAt: string; degradations: Array<{ dependency: string; code: string; message: string }>; candidates: Array<{ agentId: string; name: string; category: string; tags: string[]; estimatedDurationSeconds: number; position: number; exploration: boolean; overviewPrice: string; formalPrice: string; externalCostCap: string; score: { taskMatch: number; reputation: number; priceTime: number; availability: number; rule: number; modelDelta: number; ranking: number }; overview?: { slotId: string; logicalExecutionId: string; status: string; billingStatus: string; validationCodes: string[]; contentHash?: string; replacement: boolean } }> };
   batch?: { id: string; status: string; deadline: string; replacementUsed: boolean; replacementExhausted: boolean };
   reservation?: { id: string; agentId: string; slotId: string; status: string; transactionHash?: string };
@@ -45,7 +48,7 @@ export type WorkspaceNotification = { id: string; action: string; resourceType: 
 export type OverviewBatch = { id: string; snapshotId: string; taskId: string; taskSpecHash: string; matchRevision: number; algorithmVersion: string; deadline: string; status: string; replacementUsed: boolean; replacementExhausted: boolean; slots: Array<{ id: string; logicalExecutionId: string; agentId: string; status: string; billingStatus: string; validation: { valid: boolean; codes: string[] } }> };
 export type SelectionProof = { taskId: string; assignmentId: string; agentController: string; payout: string; overviewId: string; allocationId: string; quoteHash: string; taskSpecHash: string; matchRevision: number; priceVersion: number; overviewPrice: string; formalGrossPrice: string; overviewCredit: string; policyHash: string; nonce: string; deadline: number };
 export type SelectionIntent = { reservation: { id: string; publisherWallet: string; taskId: string; batchId: string; slotId: string; agentId: string; chainId: string; contractAddress: string; proof: SelectionProof; formalPayable: string; status: string; transactionHash?: string }; platformSignature: string };
-export type TaskFundingIntent = { id: string; taskId: string; publisherWallet: string; chainId: string; contractAddress: string; chainTaskId: string; overviewAmount: string; formalAmount: string; externalCostAmount: string; totalAmount: string; status: "prepared" | "submitted" | "confirmed" | "orphaned" | "failed"; transactionHash?: string; failureReasonCode?: string; aggregateVersion: number; createdAt: string; updatedAt: string };
+export type TaskFundingIntent = { id: string; taskId: string; publisherWallet: string; chainId: string; contractAddress: string; assetAddress: string; chainTaskId: string; platformTaskKey: string; taskSpecHash: string; fundingDeadline: number; formalBudget: string; overviewAmount: string; formalAmount: string; externalCostAmount: string; totalAmount: string; status: "prepared" | "submitted" | "confirmed" | "orphaned" | "failed"; transactionHash?: string; failureReasonCode?: string; aggregateVersion: number; createdAt: string; updatedAt: string; attempts: Array<{ id: string; transactionHash: string; state: string; createdAt: string; updatedAt: string }>; refundOnly: boolean };
 
 export type FormalProofRecord = {
   proof: { version: string; taskId: string; assignmentId: string; deliveryUnit: string; packageId: string; scopeHash: string; formalVersion: number; packageAggregateVersion: number; workNonce: number; agentId: string; contentHash: string; parentContentHash?: string; feedbackDigest?: string; changeOrderId?: string; agentResponseHash: string; changeSummaryHash: string; policyHash: string; deadline: number };
@@ -178,22 +181,57 @@ export async function submitSelectionTransaction(provider: WalletProvider, inten
   if (!intent.platformSignature || intent.reservation.status !== "reserved") throw new Error("选择证明当前不可提交。");
   const walletChain = await provider.request({ method: "eth_chainId" });
   if (typeof walletChain !== "string" || !/^0x[0-9a-fA-F]+$/.test(walletChain) || BigInt(walletChain).toString(10) !== intent.reservation.chainId) throw new Error(`请将钱包切换到链 ${intent.reservation.chainId}。`);
-  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: intent.reservation.publisherWallet, to: intent.reservation.contractAddress, data: encodeSelectionCall(intent.reservation.proof, intent.platformSignature), value: "0x0" }] });
+  const proof = intent.reservation.proof;
+  const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "selectAgent", args: [{
+    taskId: proof.taskId as Hex, assignmentId: proof.assignmentId as Hex, agentController: proof.agentController as Address,
+    payout: proof.payout as Address, overviewId: proof.overviewId as Hex, allocationId: proof.allocationId as Hex,
+    quoteHash: proof.quoteHash as Hex, taskSpecHash: proof.taskSpecHash as Hex, matchRevision: BigInt(proof.matchRevision),
+    priceVersion: BigInt(proof.priceVersion), overviewPrice: BigInt(proof.overviewPrice), formalGrossPrice: BigInt(proof.formalGrossPrice),
+    overviewCredit: BigInt(proof.overviewCredit), policyHash: proof.policyHash as Hex, nonce: proof.nonce as Hex,
+    deadline: BigInt(proof.deadline),
+  }, intent.platformSignature as Hex] });
+  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: intent.reservation.publisherWallet, to: intent.reservation.contractAddress, data, value: "0x0" }] });
   if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效交易哈希。");
   return transactionHash.toLowerCase();
 }
 
 export async function submitTaskFundingTransaction(provider: WalletProvider, intent: TaskFundingIntent): Promise<string> {
-  if (intent.status !== "prepared" && intent.status !== "orphaned") throw new Error("当前托管意图不可提交。");
-  if (!/^0x[0-9a-f]{64}$/.test(intent.chainTaskId) || !/^0x[0-9a-f]{40}$/.test(intent.contractAddress) || !/^0x[0-9a-f]{40}$/.test(intent.publisherWallet) || !/^[1-9][0-9]*$/.test(intent.totalAmount)) throw new Error("托管链上绑定无效。");
+	if (!["prepared", "orphaned", "failed"].includes(intent.status)) throw new Error("当前托管意图不可提交。");
+  if (!/^0x[0-9a-f]{64}$/.test(intent.chainTaskId) || !/^0x[0-9a-f]{64}$/.test(intent.platformTaskKey) || !/^0x[0-9a-f]{64}$/.test(intent.taskSpecHash) || !/^0x[0-9a-f]{40}$/.test(intent.contractAddress) || !/^0x[0-9a-f]{40}$/.test(intent.assetAddress) || !/^0x[0-9a-f]{40}$/.test(intent.publisherWallet) || !/^[1-9][0-9]*$/.test(intent.formalBudget) || intent.fundingDeadline < 1) throw new Error("托管链上绑定无效。");
   const walletChain = await provider.request({ method: "eth_chainId" });
   if (typeof walletChain !== "string" || !/^0x[0-9a-fA-F]+$/.test(walletChain) || BigInt(walletChain).toString(10) !== intent.chainId) throw new Error(`请将钱包切换到链 ${intent.chainId}。`);
   const accounts = await provider.request({ method: "eth_requestAccounts" });
   const from = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0].toLowerCase() : "";
   if (from !== intent.publisherWallet) throw new Error("当前钱包不是任务发布钱包。");
-  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from, to: intent.contractAddress, data: `0xb293e81c${intent.chainTaskId.slice(2)}`, value: `0x${BigInt(intent.totalAmount).toString(16)}` }] });
+  const approvalData = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [intent.contractAddress as Address, BigInt(intent.formalBudget)] });
+  const approvalHash = await provider.request({ method: "eth_sendTransaction", params: [{ from, to: intent.assetAddress, data: approvalData, value: "0x0" }] });
+  if (typeof approvalHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(approvalHash)) throw new Error("钱包未返回有效授权交易哈希。");
+  const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "createTask", args: [intent.platformTaskKey as Hex, intent.taskSpecHash as Hex, BigInt(intent.fundingDeadline), BigInt(intent.formalBudget)] });
+  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from, to: intent.contractAddress, data, value: "0x0" }] });
   if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效交易哈希。");
-  return transactionHash.toLowerCase();
+	return transactionHash.toLowerCase();
+}
+
+export async function submitTaskFundingReplacement(provider: WalletProvider, intent: TaskFundingIntent): Promise<string> {
+	if (intent.status !== "submitted" || !intent.transactionHash || !/^0x[0-9a-f]{64}$/.test(intent.transactionHash)) throw new Error("只有已提交且仍待确认的托管交易可以 replacement。");
+	if (!/^0x[0-9a-f]{64}$/.test(intent.chainTaskId) || !/^0x[0-9a-f]{64}$/.test(intent.platformTaskKey) || !/^0x[0-9a-f]{64}$/.test(intent.taskSpecHash) || !/^0x[0-9a-f]{40}$/.test(intent.contractAddress) || !/^0x[0-9a-f]{40}$/.test(intent.publisherWallet) || !/^[1-9][0-9]*$/.test(intent.formalBudget) || intent.fundingDeadline < 1) throw new Error("托管链上绑定无效。");
+	const walletChain = await provider.request({ method: "eth_chainId" });
+	if (typeof walletChain !== "string" || !/^0x[0-9a-fA-F]+$/.test(walletChain) || BigInt(walletChain).toString(10) !== intent.chainId) throw new Error(`请将钱包切换到链 ${intent.chainId}。`);
+	const accounts = await provider.request({ method: "eth_requestAccounts" });
+	const from = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0].toLowerCase() : "";
+	if (from !== intent.publisherWallet) throw new Error("当前钱包不是任务发布钱包。");
+	const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "createTask", args: [intent.platformTaskKey as Hex, intent.taskSpecHash as Hex, BigInt(intent.fundingDeadline), BigInt(intent.formalBudget)] });
+	const original = await provider.request({ method: "eth_getTransactionByHash", params: [intent.transactionHash] });
+	if (!original || typeof original !== "object") throw new Error("钱包节点未返回原托管交易。");
+	const transaction = original as Record<string, unknown>;
+	const originalFrom = typeof transaction.from === "string" ? transaction.from.toLowerCase() : "";
+	const originalTo = typeof transaction.to === "string" ? transaction.to.toLowerCase() : "";
+	const originalInput = typeof transaction.input === "string" ? transaction.input.toLowerCase() : "";
+	const nonce = typeof transaction.nonce === "string" ? transaction.nonce.toLowerCase() : "";
+	if (transaction.blockNumber != null || originalFrom !== from || originalTo !== intent.contractAddress || originalInput !== data.toLowerCase() || !/^0x(?:0|[1-9a-f][0-9a-f]*)$/.test(nonce)) throw new Error("原交易不再待确认，或与当前托管意图不匹配，已拒绝 replacement。");
+	const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from, to: intent.contractAddress, data, value: "0x0", nonce }] });
+	if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效 replacement 交易哈希。");
+	return transactionHash.toLowerCase();
 }
 
 export async function submitTaskRefundTransaction(provider: WalletProvider, deletion: TaskDeletion): Promise<string> {
@@ -203,7 +241,8 @@ export async function submitTaskRefundTransaction(provider: WalletProvider, dele
   const accounts = await provider.request({ method: "eth_requestAccounts" });
   const from = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0].toLowerCase() : "";
   if (from !== deletion.publisherWallet) throw new Error("当前钱包不是任务发布钱包。");
-  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from, to: deletion.contractAddress, data: `0x7249fbb6${deletion.chainTaskId.slice(2)}`, value: "0x0" }] });
+  const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "refund", args: [deletion.chainTaskId as Hex] });
+  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from, to: deletion.contractAddress, data, value: "0x0" }] });
   if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效退款交易哈希。");
   return transactionHash.toLowerCase();
 }
@@ -213,7 +252,8 @@ export async function submitFormalAcceptanceTransaction(provider: WalletProvider
   if (!/^0x[0-9a-f]{64}$/.test(intent.chainTaskId) || !/^0x[0-9a-f]{40}$/.test(intent.contractAddress) || !/^0x[0-9a-f]{40}$/.test(intent.publisherWallet)) throw new Error("验收链上绑定无效。");
   const walletChain = await provider.request({ method: "eth_chainId" });
   if (typeof walletChain !== "string" || !/^0x[0-9a-fA-F]+$/.test(walletChain) || BigInt(walletChain).toString(10) !== intent.chainId) throw new Error(`请将钱包切换到链 ${intent.chainId}。`);
-  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: intent.publisherWallet, to: intent.contractAddress, data: `0xe4725ba1${intent.chainTaskId.slice(2)}`, value: "0x0" }] });
+  const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "accept", args: [intent.chainTaskId as Hex] });
+  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: intent.publisherWallet, to: intent.contractAddress, data, value: "0x0" }] });
   if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效交易哈希。");
   return transactionHash.toLowerCase();
 }
@@ -222,7 +262,8 @@ export async function submitWorkNonceTransaction(provider: WalletProvider, chain
   if (!/^0x[0-9a-f]{64}$/.test(chain.taskId) || !/^0x[0-9a-f]{40}$/.test(chain.contractAddress) || !/^0x[0-9a-f]{40}$/.test(chain.publisherWallet)) throw new Error("工作 nonce 链上绑定无效。");
   const walletChain = await provider.request({ method: "eth_chainId" });
   if (typeof walletChain !== "string" || !/^0x[0-9a-fA-F]+$/.test(walletChain) || BigInt(walletChain).toString(10) !== chain.chainId) throw new Error(`请将钱包切换到链 ${chain.chainId}。`);
-  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: chain.publisherWallet, to: chain.contractAddress, data: `0x201abd80${chain.taskId.slice(2)}`, value: "0x0" }] });
+  const data = encodeFunctionData({ abi: taskEscrowAbi, functionName: "advanceWorkNonce", args: [chain.taskId as Hex, BigInt(chain.workNonce)] });
+  const transactionHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: chain.publisherWallet, to: chain.contractAddress, data, value: "0x0" }] });
   if (typeof transactionHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) throw new Error("钱包未返回有效交易哈希。");
   return transactionHash.toLowerCase();
 }
@@ -231,41 +272,15 @@ export async function submitDisputeFreezeTransaction(provider:WalletProvider,vie
   const chain=view.context;if(!chain.eligible||!/^0x[0-9a-f]{64}$/.test(chain.chainTaskId)||!/^0x[0-9a-f]{40}$/.test(chain.contractAddress)||!/^0x[0-9a-f]{40}$/.test(chain.publisherWallet)||!/^0x[0-9a-f]{40}$/.test(chain.agentPayout)||!/^0x[0-9a-f]{40}$/.test(chain.disputeResolver))throw new Error("争议冻结链绑定无效。");
   const walletChain=await provider.request({method:"eth_chainId"});if(typeof walletChain!=="string"||BigInt(walletChain).toString(10)!==chain.chainId)throw new Error(`请将钱包切换到链 ${chain.chainId}。`);
   const accounts=await provider.request({method:"eth_requestAccounts"});const from=Array.isArray(accounts)&&typeof accounts[0]==="string"?accounts[0].toLowerCase():"";if(from!==chain.publisherWallet&&from!==chain.agentController)throw new Error("当前钱包不是争议当事方。");
-  const head=[normalizeWord(chain.chainTaskId),uintWord(128),addressWord(chain.disputeResolver),uintWord(chain.feeCap)];const leaves=[uintWord(2),uintWord(0),addressWord(chain.publisherWallet),uintWord(chain.frozenAmount),uintWord(0),uintWord(1),addressWord(chain.agentPayout),uintWord(chain.frozenAmount),uintWord(1)];
-  const transactionHash=await provider.request({method:"eth_sendTransaction",params:[{from,to:chain.contractAddress,data:`0xee1e9b21${head.join("")}${leaves.join("")}`,value:"0x0"}]});if(typeof transactionHash!=="string"||!/^0x[0-9a-fA-F]{64}$/.test(transactionHash))throw new Error("钱包未返回有效交易哈希。");return transactionHash.toLowerCase();
+  const leaves=[{index:0,owner:chain.publisherWallet as Address,cap:BigInt(chain.frozenAmount),accountKind:0},{index:1,owner:chain.agentPayout as Address,cap:BigInt(chain.frozenAmount),accountKind:1}] as const;
+  const data=encodeFunctionData({abi:taskEscrowAbi,functionName:"freezeDispute",args:[chain.chainTaskId as Hex,leaves,chain.disputeResolver as Address,BigInt(chain.feeCap)]});
+  const transactionHash=await provider.request({method:"eth_sendTransaction",params:[{from,to:chain.contractAddress,data,value:"0x0"}]});if(typeof transactionHash!=="string"||!/^0x[0-9a-fA-F]{64}$/.test(transactionHash))throw new Error("钱包未返回有效交易哈希。");return transactionHash.toLowerCase();
 }
 
 export async function sha256Digest(value: unknown): Promise<string> {
   const encoded = new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
   const digest = await crypto.subtle.digest("SHA-256", encoded);
   return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
-
-function encodeSelectionCall(proof: SelectionProof, signature: string): string {
-  const words = [proof.taskId, proof.assignmentId, addressWord(proof.agentController), addressWord(proof.payout), proof.overviewId, proof.allocationId, proof.quoteHash, proof.taskSpecHash, uintWord(proof.matchRevision), uintWord(proof.priceVersion), uintWord(proof.overviewPrice), uintWord(proof.formalGrossPrice), uintWord(proof.overviewCredit), proof.policyHash, proof.nonce, uintWord(proof.deadline)].map(normalizeWord);
-  const rawSignature = signature.replace(/^0x/, "");
-  if (!/^[0-9a-fA-F]{130}$/.test(rawSignature)) throw new Error("平台选择签名无效。");
-  const offset = uintWord(17 * 32);
-  const length = uintWord(rawSignature.length / 2);
-  const paddedSignature = rawSignature.toLowerCase().padEnd(Math.ceil(rawSignature.length / 64) * 64, "0");
-  return `0xa2dfc191${words.join("")}${offset}${length}${paddedSignature}`;
-}
-
-function normalizeWord(value: string): string {
-  const raw = value.replace(/^0x/, "").toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(raw)) throw new Error("选择证明字段无效。");
-  return raw;
-}
-function addressWord(value: string): string {
-  const raw = value.replace(/^0x/, "").toLowerCase();
-  if (!/^[0-9a-f]{40}$/.test(raw)) throw new Error("选择地址无效。");
-  return raw.padStart(64, "0");
-}
-function uintWord(value: string | number): string {
-  let encoded: string;
-  try { encoded = BigInt(value).toString(16); } catch { throw new Error("选择数值无效。"); }
-  if (encoded.length > 64 || encoded.startsWith("-")) throw new Error("选择数值超出范围。");
-  return encoded.padStart(64, "0");
 }
 
 export type AgentOnboardingInput = {

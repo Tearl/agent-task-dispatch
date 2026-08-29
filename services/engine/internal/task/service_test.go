@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"errors"
+	"math/big"
 	"testing"
 	"time"
 
@@ -143,6 +144,19 @@ func TestUpdateAndPublishRequireAggregateVersion(t *testing.T) {
 	}
 	if _, _, err := service.Publish(context.Background(), publisher, "publish", "task-1", PublishInput{ExpectedVersion: 2}); err != nil || store.publishCalls != 1 {
 		t.Fatalf("valid publish: calls=%d err=%v", store.publishCalls, err)
+	}
+}
+
+func TestFormalBudgetUsesPositiveUint256Domain(t *testing.T) {
+	max := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1)).String()
+	overflow := new(big.Int).Lsh(big.NewInt(1), 256).String()
+	if !ValidFormalBudget("1") || !ValidFormalBudget(max) {
+		t.Fatal("valid EVM formal budget was rejected")
+	}
+	for _, invalid := range []string{"0", overflow, "01", "-1", "1.0", ""} {
+		if ValidFormalBudget(invalid) {
+			t.Fatalf("invalid EVM formal budget accepted: %q", invalid)
+		}
 	}
 }
 

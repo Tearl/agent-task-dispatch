@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,6 +17,11 @@ import (
 
 type Store struct{ db *sql.DB }
 
+type Deployment struct {
+	ChainID, Contract, Asset, DisputeResolver string
+	ActiveForNewTasks                         bool
+}
+
 var _ chainprojection.Repository = (*Store)(nil)
 
 func NewStore(db *sql.DB) (*Store, error) {
@@ -23,6 +29,56 @@ func NewStore(db *sql.DB) (*Store, error) {
 		return nil, errors.New("database is required")
 	}
 	return &Store{db: db}, nil
+}
+
+func (store *Store) RegisterDeployment(ctx context.Context, deployment Deployment) error {
+	deployment.Contract = strings.ToLower(deployment.Contract)
+	deployment.DisputeResolver = strings.ToLower(deployment.DisputeResolver)
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if deployment.ActiveForNewTasks {
+		if _, err = tx.ExecContext(ctx, `UPDATE escrow_deployments SET active_for_new_tasks=false,updated_at=clock_timestamp() WHERE chain_id=$1 AND active_for_new_tasks`, deployment.ChainID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO escrow_deployments(chain_id,contract_address,asset_key,dispute_resolver_address,active_for_new_tasks,created_at,updated_at)
+VALUES($1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp())
+ON CONFLICT(chain_id,contract_address) DO UPDATE SET asset_key=EXCLUDED.asset_key,dispute_resolver_address=EXCLUDED.dispute_resolver_address,active_for_new_tasks=EXCLUDED.active_for_new_tasks,updated_at=EXCLUDED.updated_at`, deployment.ChainID, deployment.Contract, deployment.Asset, deployment.DisputeResolver, deployment.ActiveForNewTasks); err != nil {
+		return fmt.Errorf("register escrow deployment: %w", err)
+	}
+	return tx.Commit()
+}
+
+// PersistedProjectionScopes returns every deployment that already owns a
+// projection cursor. Contract rotation changes only the active write target;
+// older deployments must keep consuming exits, refunds and withdrawals.
+func (store *Store) PersistedProjectionScopes(ctx context.Context, active chainprojection.Scope) ([]chainprojection.Scope, error) {
+	active.Contract = strings.ToLower(active.Contract)
+	var missing string
+	err := store.db.QueryRowContext(ctx, `SELECT cursor.contract_address FROM chain_projection_cursors cursor LEFT JOIN escrow_deployments deployment ON deployment.chain_id=cursor.chain_id AND deployment.contract_address=cursor.contract_address WHERE cursor.chain_id=$1 AND cursor.contract_address<>$2 AND deployment.contract_address IS NULL ORDER BY cursor.contract_address LIMIT 1`, active.ChainID, active.Contract).Scan(&missing)
+	if err == nil {
+		return nil, fmt.Errorf("escrow deployment metadata is missing for %s", missing)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	rows, err := store.db.QueryContext(ctx, `SELECT chain_id::text,contract_address FROM chain_projection_cursors WHERE chain_id=$1 AND contract_address<>$2 ORDER BY contract_address`, active.ChainID, active.Contract)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := []chainprojection.Scope{}
+	for rows.Next() {
+		value := chainprojection.Scope{Confirmations: active.Confirmations, MaxReorgDepth: active.MaxReorgDepth}
+		if err = rows.Scan(&value.ChainID, &value.Contract); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
 }
 
 func (store *Store) Cursor(ctx context.Context, scope chainprojection.Scope) (chainprojection.Cursor, error) {
@@ -84,6 +140,9 @@ func (store *Store) ApplyBlock(ctx context.Context, scope chainprojection.Scope,
 		if _, err = tx.ExecContext(ctx, `INSERT INTO chain_transactions (chain_id,contract_address,block_hash,transaction_hash,transaction_status,input_hash,selection_call,observed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, scope.ChainID, scope.Contract, block.Hash, transaction.Hash, transaction.Status, "sha256:"+hex.EncodeToString(inputHash[:]), selectionCall, now); err != nil {
 			return err
 		}
+		if err = projectFundingTransaction(ctx, tx, scope, transaction, block.Hash, now); err != nil {
+			return err
+		}
 	}
 	for _, event := range events {
 		payload, marshalErr := json.Marshal(event.Payload)
@@ -119,6 +178,111 @@ func (store *Store) ApplyBlock(ctx context.Context, scope chainprojection.Scope,
 		return err
 	}
 	return tx.Commit()
+}
+
+// ReconcileFundingAttempt applies retained canonical evidence after /submit has
+// persisted an attempt. It shares the projector lock and projection function,
+// so projection-before-submit and normal block processing converge.
+func (store *Store) ReconcileFundingAttempt(ctx context.Context, scope chainprojection.Scope, transactionHash string) error {
+	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0)),pg_advisory_xact_lock(hashtextextended($2,0))`, "chain-projector:"+scope.ChainID+":"+scope.Contract, "funding-attempt:"+scope.ChainID+":"+scope.Contract+":"+transactionHash); err != nil {
+		return err
+	}
+	var transactionStatus, transactionBlockHash string
+	statusErr := tx.QueryRowContext(ctx, `SELECT transaction.transaction_status,transaction.block_hash
+FROM chain_transactions transaction
+JOIN chain_canonical_blocks canonical ON canonical.chain_id=transaction.chain_id AND canonical.contract_address=transaction.contract_address AND canonical.block_hash=transaction.block_hash
+WHERE transaction.chain_id=$1 AND transaction.contract_address=$2 AND transaction.transaction_hash=$3
+ORDER BY transaction.observed_at DESC LIMIT 1`, scope.ChainID, scope.Contract, transactionHash).Scan(&transactionStatus, &transactionBlockHash)
+	if statusErr != nil && !errors.Is(statusErr, sql.ErrNoRows) {
+		return statusErr
+	}
+	if statusErr == nil && transactionStatus == chainprojection.TxFailed {
+		var now time.Time
+		if err = tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+			return err
+		}
+		if err = projectFundingTransaction(ctx, tx, scope, chainprojection.Transaction{Hash: transactionHash, Status: chainprojection.TxFailed}, transactionBlockHash, now); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	var event chainprojection.Event
+	var payload []byte
+	err = tx.QueryRowContext(ctx, `SELECT event.event_id,event.block_number,event.block_hash,event.transaction_hash,event.log_index,event.task_chain_id,event.payload
+FROM chain_events event
+JOIN chain_canonical_blocks canonical ON canonical.chain_id=event.chain_id AND canonical.contract_address=event.contract_address AND canonical.block_hash=event.block_hash
+WHERE event.chain_id=$1 AND event.contract_address=$2 AND event.transaction_hash=$3 AND event.event_type='task_created'
+ORDER BY event.block_number,event.log_index LIMIT 1`, scope.ChainID, scope.Contract, transactionHash).Scan(&event.ID, &event.BlockNumber, &event.BlockHash, &event.TransactionHash, &event.LogIndex, &event.TaskID, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	event.Type = chainprojection.EventTaskCreated
+	if err = json.Unmarshal(payload, &event.Payload); err != nil {
+		return err
+	}
+	var now time.Time
+	if err = tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return err
+	}
+	if err = projectSettlementEvent(ctx, tx, scope, event, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func projectFundingTransaction(ctx context.Context, tx *sql.Tx, scope chainprojection.Scope, transaction chainprojection.Transaction, blockHash string, now time.Time) error {
+	if transaction.Status != chainprojection.TxFailed {
+		return nil
+	}
+	var attemptID, intentID, intentStatus, attemptState string
+	var aggregateVersion int64
+	err := tx.QueryRowContext(ctx, `SELECT attempt.attempt_id,intent.intent_id,intent.status,intent.aggregate_version,attempt.state
+FROM task_funding_attempts attempt JOIN task_funding_intents intent ON intent.intent_id=attempt.intent_id
+WHERE attempt.chain_id=$1 AND attempt.contract_address=$2 AND attempt.transaction_hash=$3
+FOR UPDATE OF attempt,intent`, scope.ChainID, scope.Contract, transaction.Hash).Scan(&attemptID, &intentID, &intentStatus, &aggregateVersion, &attemptState)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if attemptState == "canonical_confirmed" {
+		return nil
+	}
+	if attemptState == "observed_failed" {
+		return nil
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE task_funding_attempts SET state='observed_failed',updated_at=$1 WHERE attempt_id=$2 AND state<>'canonical_confirmed'`, now, attemptID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO task_funding_attempt_states(attempt_id,state,chain_id,contract_address,block_hash,transaction_hash,reason_code,occurred_at) SELECT $1,'observed_failed',$2,$3,$4,$5,'chain_transaction_failed',$6 WHERE NOT EXISTS (SELECT 1 FROM task_funding_attempt_states WHERE attempt_id=$1 AND state='observed_failed' AND block_hash=$4)`, attemptID, scope.ChainID, scope.Contract, blockHash, transaction.Hash, now); err != nil {
+		return err
+	}
+	if intentStatus == "confirmed" {
+		return nil
+	}
+	var live bool
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_funding_attempts WHERE intent_id=$1 AND attempt_id<>$2 AND state IN ('submitted','canonical_confirmed'))`, intentID, attemptID).Scan(&live); err != nil {
+		return err
+	}
+	if live {
+		return nil
+	}
+	aggregateVersion++
+	if _, err = tx.ExecContext(ctx, `UPDATE task_funding_intents SET status='failed',failure_reason_code='chain_transaction_failed',aggregate_version=$1,updated_at=$2 WHERE intent_id=$3`, aggregateVersion, now, intentID); err != nil {
+		return err
+	}
+	stateID := settlementDigest("task-funding-state", intentID, "failed", fmt.Sprintf("%d", aggregateVersion))
+	_, err = tx.ExecContext(ctx, `INSERT INTO task_funding_intent_events(event_id,intent_id,aggregate_version,state,transaction_hash,reason_code,occurred_at) VALUES($1,$2,$3,'failed',$4,'chain_transaction_failed',$5)`, stateID, intentID, aggregateVersion, transaction.Hash, now)
+	return err
 }
 
 func projectedWorkNonce(event chainprojection.Event) (any, error) {
@@ -159,6 +323,9 @@ func (store *Store) Rewind(ctx context.Context, scope chainprojection.Scope, anc
 		return err
 	}
 	for _, hash := range hashes {
+		if err = orphanFailedFundingTransactions(ctx, tx, scope, hash, now); err != nil {
+			return err
+		}
 		if err = reverseSettlementBlock(ctx, tx, scope, hash, now); err != nil {
 			return err
 		}
@@ -208,6 +375,48 @@ AND event.chain_id=$1 AND event.contract_address=$2 AND event.block_hash=$3`, sc
 		return err
 	}
 	return tx.Commit()
+}
+
+func orphanFailedFundingTransactions(ctx context.Context, tx *sql.Tx, scope chainprojection.Scope, blockHash string, now time.Time) error {
+	rows, err := tx.QueryContext(ctx, `UPDATE task_funding_attempts attempt SET state='canonical_orphaned',updated_at=$4
+FROM task_funding_attempt_states state
+WHERE state.attempt_id=attempt.attempt_id AND state.chain_id=$1 AND state.contract_address=$2 AND state.block_hash=$3
+  AND state.state='observed_failed' AND attempt.state='observed_failed'
+RETURNING attempt.attempt_id,attempt.intent_id,attempt.transaction_hash`, scope.ChainID, scope.Contract, blockHash, now)
+	if err != nil {
+		return err
+	}
+	type orphanedAttempt struct{ attemptID, intentID, transactionHash string }
+	values := []orphanedAttempt{}
+	for rows.Next() {
+		var value orphanedAttempt
+		if err = rows.Scan(&value.attemptID, &value.intentID, &value.transactionHash); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		values = append(values, value)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, value := range values {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO task_funding_attempt_states(attempt_id,state,chain_id,contract_address,block_hash,transaction_hash,reason_code,occurred_at) VALUES($1,'canonical_orphaned',$2,$3,$4,$5,'failed_occurrence_reorganized',$6)`, value.attemptID, scope.ChainID, scope.Contract, blockHash, value.transactionHash, now); err != nil {
+			return err
+		}
+		var version int64
+		err = tx.QueryRowContext(ctx, `UPDATE task_funding_intents SET status='orphaned',failure_reason_code='chain_reorganization',aggregate_version=aggregate_version+1,updated_at=$1 WHERE intent_id=$2 AND status='failed' AND transaction_hash=$3 RETURNING aggregate_version`, now, value.intentID, value.transactionHash).Scan(&version)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		stateID := settlementDigest("task-funding-state", value.intentID, "orphaned", fmt.Sprintf("%d", version))
+		if _, err = tx.ExecContext(ctx, `INSERT INTO task_funding_intent_events(event_id,intent_id,aggregate_version,state,transaction_hash,reason_code,occurred_at) VALUES($1,$2,$3,'orphaned',$4,'chain_reorganization',$5)`, stateID, value.intentID, version, value.transactionHash, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (store *Store) SelectionResult(ctx context.Context, scope chainprojection.Scope, transactionHash string) (selection.ChainResult, bool, error) {

@@ -162,6 +162,11 @@ func (store *Store) RecordValidation(ctx context.Context, batchID, slotID string
 	if _, err = tx.ExecContext(ctx, `UPDATE overview_slots SET status=$1,validation_codes=$2,content_hash=$3,deliverable_ref=$4,updated_at=$5 WHERE slot_id=$6`, status, string(codes), nullable(contentHash), nullable(deliverableRef), now, slotID); err != nil {
 		return overview.Batch{}, overview.Slot{}, false, err
 	}
+	if validation.Valid {
+		if _, err = tx.ExecContext(ctx, `UPDATE agents SET matching_effective_samples=matching_effective_samples+1 WHERE agent_id=$1`, slot.AgentID); err != nil {
+			return overview.Batch{}, overview.Slot{}, false, err
+		}
+	}
 	if err = insertEvent(ctx, tx, batchID, slotID, "overview.slot_"+status, map[string]any{"validationCodes": validation.Codes, "contentHash": contentHash}, now); err != nil {
 		return overview.Batch{}, overview.Slot{}, false, err
 	}

@@ -1,17 +1,30 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// @title Agent 任务原生资产托管合约
-/// @notice 本地 MVP 使用的原生资产（例如 ETH）托管合约。
+import {
+    AccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+
+/// @title Agent 任务测试链 USDC 托管合约 V3
+/// @notice Base Sepolia 使用 6 位精度测试 USDC，本地 Anvil 使用相同精度的 MockUSDC。
 /// @dev 合约负责保管任务资金、验证平台的 Agent 选择凭证、结算正常任务或争议任务。
-///      生产环境最终使用的资产、金额精度和签名人治理方式仍需在部署时决定。
+///      合约不可升级；接口或语义变化必须部署新版本，并由 Engine 把新任务路由到新地址。
 ///
 /// 任务的主要状态流转：
 /// None -> Funded -> Assigned -> Released
 ///                  |             （发布者验收，Agent 收益进入待提现余额）
 ///                  -> Disputed -> Released / Refunded
 /// Funded -> Refunded
-contract TaskEscrow {
+contract TaskEscrow is AccessControlDefaultAdminRules, Pausable {
+    using SafeERC20 for IERC20;
+
+    bytes32 public constant PAUSE_GUARDIAN_ROLE = keccak256("PAUSE_GUARDIAN_ROLE");
+    uint8 public constant ASSET_DECIMALS = 6;
+    string public constant TASK_ID_DOMAIN = "agent-platform-task-v3";
     /// @notice 任务在托管合约中的生命周期状态。
     enum Status {
         None, // 任务不存在；mapping 中未写入时的默认值
@@ -101,6 +114,7 @@ contract TaskEscrow {
     error AlreadyExists();
     error InvalidAddress();
     error InvalidAmount();
+    error InvalidAsset();
     error InvalidNonce();
     error InvalidProof();
     error InvalidState();
@@ -137,9 +151,20 @@ contract TaskEscrow {
     event YieldEligibilityChanged(bytes32 indexed taskId, uint256 amount, bool eligible);
     event DisputeOpened(bytes32 indexed taskId, address indexed openedBy);
     event DisputeResolved(bytes32 indexed taskId, address indexed recipient, uint256 amount);
-    event DisputeFrozen(bytes32 indexed taskId, bytes32 indexed root, uint32 leafCount, uint256 amount, uint256 feeCap, uint64 finalizeAfter);
+    event DisputeFrozen(
+        bytes32 indexed taskId,
+        bytes32 indexed root,
+        uint32 leafCount,
+        uint256 amount,
+        uint256 feeCap,
+        uint64 finalizeAfter
+    );
     event DisputeLeafAllocated(bytes32 indexed taskId, uint32 indexed index, address indexed owner, uint256 amount);
-    event DisputeAllocationFinalized(bytes32 indexed taskId, bytes32 indexed root, uint256 publisherAmount, uint256 agentAmount, uint256 feeAmount);
+    event DisputeAllocationFinalized(
+        bytes32 indexed taskId, bytes32 indexed root, uint256 publisherAmount, uint256 agentAmount, uint256 feeAmount
+    );
+    event PlatformProofSignerUpdated(address indexed previousSigner, address indexed newSigner);
+    event DisputeResolverUpdated(address indexed previousResolver, address indexed newResolver);
 
     // EIP-712 类型哈希和域参数。域中包含 chainId 与当前合约地址，防止跨链、跨合约重放签名。
     bytes32 public constant SELECTION_PROOF_TYPEHASH = keccak256("SelectionProof(bytes32 payloadHash)");
@@ -150,8 +175,9 @@ contract TaskEscrow {
     // secp256k1 曲线阶的一半。要求 s 不大于该值，可拒绝可延展（malleable）签名。
     uint256 private constant SECP256K1_HALF_ORDER = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
-    address public immutable disputeResolver; // 唯一有权提交争议最终分配的地址
-    address public immutable platformProofSigner; // 平台选择凭证的预期签名地址
+    IERC20 public immutable asset; // 单一 6 位精度测试 USDC；每个部署只能绑定一个资产
+    address public disputeResolver; // 2/3 Safe；唯一有权提交争议最终分配
+    address public platformProofSigner; // 独立测试签名地址，可由治理 Safe 轮换
 
     // 任务 ID => 托管任务；public mapping 会由 Solidity 自动生成只读 getter。
     mapping(bytes32 taskId => Task task) public tasks;
@@ -177,13 +203,54 @@ contract TaskEscrow {
     // 简单重入锁：1 = 未锁定，2 = 正在执行 nonReentrant 函数。
     uint256 private locked = 1;
 
-    /// @param resolver 争议解决者地址，只能由它完成争议资金分配。
-    /// @param proofSigner 平台 EIP-712 选择凭证的签名地址。
-    constructor(address resolver, address proofSigner) {
-        // immutable 地址一旦部署便不能修改，因此部署时必须拒绝零地址。
-        if (resolver == address(0) || proofSigner == address(0)) revert InvalidAddress();
+    /// @param assetAddress 6 位精度测试 USDC 或本地 MockUSDC 地址。
+    /// @param governanceAdmin 2/3 Safe 治理地址，拥有角色和解除暂停权限。
+    /// @param pauseGuardian 只能立即暂停新业务的独立运营地址。
+    /// @param resolver 2/3 Safe 争议解决者地址。
+    /// @param proofSigner 独立平台 EIP-712 选择凭证签名地址。
+    constructor(
+        address assetAddress,
+        address governanceAdmin,
+        address pauseGuardian,
+        address resolver,
+        address proofSigner
+    ) AccessControlDefaultAdminRules(0, governanceAdmin) {
+        if (
+            assetAddress == address(0) || governanceAdmin == address(0) || pauseGuardian == address(0)
+                || resolver == address(0) || proofSigner == address(0)
+        ) revert InvalidAddress();
+        if (IERC20Metadata(assetAddress).decimals() != ASSET_DECIMALS) revert InvalidAsset();
+        asset = IERC20(assetAddress);
         disputeResolver = resolver;
         platformProofSigner = proofSigner;
+        _grantRole(PAUSE_GUARDIAN_ROLE, pauseGuardian);
+        _grantRole(PAUSE_GUARDIAN_ROLE, governanceAdmin);
+    }
+
+    /// @notice guardian 或治理 Safe 可立即停止新入金和新状态推进。
+    function pause() external onlyRole(PAUSE_GUARDIAN_ROLE) {
+        _pause();
+    }
+
+    /// @notice 只有治理 Safe 能恢复新业务。
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+
+    /// @notice 治理 Safe 轮换平台证明签名地址。
+    function setPlatformProofSigner(address nextSigner) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (nextSigner == address(0)) revert InvalidAddress();
+        address previous = platformProofSigner;
+        platformProofSigner = nextSigner;
+        emit PlatformProofSignerUpdated(previous, nextSigner);
+    }
+
+    /// @notice 治理 Safe 轮换争议解决者 Safe。
+    function setDisputeResolver(address nextResolver) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (nextResolver == address(0)) revert InvalidAddress();
+        address previous = disputeResolver;
+        disputeResolver = nextResolver;
+        emit DisputeResolverUpdated(previous, nextResolver);
     }
 
     /// @dev 防止外部转账回调再次进入受保护函数。
@@ -194,22 +261,51 @@ contract TaskEscrow {
         locked = 1;
     }
 
-    /// @notice 创建任务，并将随交易发送的原生资产全部作为初始托管资金。
-    /// @param taskId Engine/BFF 为任务生成的唯一 ID，不能为零且不能重复。
-    /// @dev msg.value 就是托管金额；此时尚未选择 Agent，所以资金不具收益资格。
-    function createTask(bytes32 taskId) external payable {
-        if (taskId == bytes32(0)) revert InvalidState();
-        if (msg.value == 0) revert InvalidAmount();
+    /// @notice 从全部冻结输入派生 task ID，并把精确正式预算转入托管。
+    function createTask(bytes32 platformTaskKey, bytes32 taskSpecHash, uint64 fundingDeadline, uint256 formalBudget)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (bytes32 taskId)
+    {
+        if (platformTaskKey == bytes32(0) || taskSpecHash == bytes32(0)) revert InvalidState();
+        if (formalBudget == 0) revert InvalidAmount();
+        if (block.timestamp > fundingDeadline) revert ProofExpired();
+        taskId = deriveTaskId(msg.sender, platformTaskKey, taskSpecHash, fundingDeadline, formalBudget);
         if (tasks[taskId].status != Status.None) revert AlreadyExists();
-        tasks[taskId] = Task(msg.sender, address(0), msg.value, Status.Funded);
-        emit TaskCreated(taskId, msg.sender, msg.value);
+        tasks[taskId] = Task(msg.sender, address(0), formalBudget, Status.Funded);
+        asset.safeTransferFrom(msg.sender, address(this), formalBudget);
+        emit TaskCreated(taskId, msg.sender, formalBudget);
+    }
+
+    /// @notice 计算 V3 链上任务 ID；asset、chain、合约和发布者均进入域隔离。
+    function deriveTaskId(
+        address publisher,
+        bytes32 platformTaskKey,
+        bytes32 taskSpecHash,
+        uint64 fundingDeadline,
+        uint256 formalBudget
+    ) public view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                TASK_ID_DOMAIN,
+                block.chainid,
+                address(this),
+                address(asset),
+                publisher,
+                platformTaskKey,
+                taskSpecHash,
+                fundingDeadline,
+                formalBudget
+            )
+        );
     }
 
     /// @notice 原子地消费平台签名凭证、创建唯一分配、应用 overview 抵扣、锁定正式净价、
     ///         退回多余资金，并把工作轮次初始化为 1。
     /// @param proof 平台签名所覆盖的完整选择数据。
     /// @param signature platformProofSigner 对 EIP-712 摘要产生的 65 字节签名。
-    function selectAgent(SelectionProof calldata proof, bytes calldata signature) external nonReentrant {
+    function selectAgent(SelectionProof calldata proof, bytes calldata signature) external nonReentrant whenNotPaused {
         Task storage task = tasks[proof.taskId];
 
         // 必须由任务发布者主动确认选择，并且任务只能从 Funded 进入 Assigned。
@@ -275,8 +371,7 @@ contract TaskEscrow {
 
         // 发布者预存资金若高于实际应付净价，立即退回差额。
         if (excess != 0) {
-            (bool refunded,) = payable(task.publisher).call{value: excess}("");
-            if (!refunded) revert TransferFailed();
+            asset.safeTransfer(task.publisher, excess);
         }
 
         emit SelectionConfirmed(
@@ -297,7 +392,7 @@ contract TaskEscrow {
 
     /// @notice 以 compare-and-swap 方式推进工作轮次，防止并发或重放授权跳过 nonce。
     /// @param expectedCurrentNonce 调用者认为的当前 nonce；只有与链上值完全一致才能推进。
-    function advanceWorkNonce(bytes32 taskId, uint256 expectedCurrentNonce) external {
+    function advanceWorkNonce(bytes32 taskId, uint256 expectedCurrentNonce) external whenNotPaused {
         Task storage task = tasks[taskId];
         if (msg.sender != task.publisher) revert NotAuthorized();
         if (task.status != Status.Assigned) revert InvalidState();
@@ -362,10 +457,10 @@ contract TaskEscrow {
     }
 
     /// @notice Agent 控制地址将自己的待提现收益发送到绑定的 payout 地址。
-    /// @param payout 选择凭证绑定的收款地址，也是实际收到原生资产的地址。
+    /// @param payout 选择凭证绑定的收款地址，也是实际收到测试 USDC 的地址。
     /// @param amount 本次提现金额，允许部分提现。
     /// @dev msg.sender 自动作为 agentController 查询余额，因此其他地址不能代领。
-    function withdrawEarnings(address payable payout, uint256 amount) external nonReentrant {
+    function withdrawEarnings(address payout, uint256 amount) external nonReentrant {
         if (payout == address(0)) revert InvalidAddress();
         if (amount == 0) revert InvalidAmount();
         uint256 available = claimableEarnings[msg.sender][payout];
@@ -374,8 +469,7 @@ contract TaskEscrow {
         // 先扣减内部账本再转账，配合 nonReentrant 防止回调重复提现。
         claimableEarnings[msg.sender][payout] = available - amount;
         totalClaimableEarnings -= amount;
-        (bool sent,) = payout.call{value: amount}("");
-        if (!sent) revert TransferFailed();
+        asset.safeTransfer(payout, amount);
         emit EarningsWithdrawn(msg.sender, payout, amount);
     }
 
@@ -391,8 +485,7 @@ contract TaskEscrow {
         task.status = Status.Refunded;
         task.amount = 0;
         _endYieldEligibility(taskId);
-        (bool sent,) = payable(task.publisher).call{value: amount}("");
-        if (!sent) revert TransferFailed();
+        asset.safeTransfer(task.publisher, amount);
         emit FundsRefunded(taskId, task.publisher, amount);
     }
 
@@ -407,6 +500,7 @@ contract TaskEscrow {
     ///      防止争议解决者结算时偷偷替换收款人或扩大可分配范围。
     function freezeDispute(bytes32 taskId, FrozenLeaf[] calldata leaves, address feeRecipient, uint256 feeCap)
         external
+        whenNotPaused
     {
         Task storage task = tasks[taskId];
 
@@ -421,9 +515,8 @@ contract TaskEscrow {
         // cap 是各自的独立上限，不表示两者可同时取得完整本金，最终还有总额守恒检查。
         if (
             leaves[0].index != 0 || leaves[0].owner != task.publisher || leaves[0].accountKind != 0
-                || leaves[0].cap != task.amount || leaves[1].index != 1
-                || leaves[1].owner != assignments[taskId].payout || leaves[1].accountKind != 1
-                || leaves[1].cap != task.amount
+                || leaves[0].cap != task.amount || leaves[1].index != 1 || leaves[1].owner != assignments[taskId].payout
+                || leaves[1].accountKind != 1 || leaves[1].cap != task.amount
         ) revert InvalidProof();
 
         // root 是整组冻结数据的承诺；每个任务只允许冻结一次。
@@ -455,7 +548,10 @@ contract TaskEscrow {
         DisputeFreeze storage frozen = disputeFreezes[taskId];
 
         // 必须已经冻结、未结算，并且 1 天等待期已经结束。
-        if (task.status != Status.Disputed || frozen.root == bytes32(0) || frozen.finalized || block.timestamp < frozen.finalizeAfter) revert InvalidState();
+        if (
+            task.status != Status.Disputed || frozen.root == bytes32(0) || frozen.finalized
+                || block.timestamp < frozen.finalizeAfter
+        ) revert InvalidState();
         if (allocations.length != frozen.leafCount || feeAmount > frozen.feeCap) revert InvalidProof();
         uint256 publisherAmount;
         uint256 agentAmount;
@@ -466,7 +562,9 @@ contract TaskEscrow {
             if (allocation.index != i) revert InvalidProof();
             uint8 accountKind = i == 0 ? 0 : 1;
             uint256 cap = task.amount;
-            if (disputeLeafHashes[taskId][i] != keccak256(abi.encode(FrozenLeaf(i, allocation.owner, cap, accountKind)))) {
+            if (
+                disputeLeafHashes[taskId][i] != keccak256(abi.encode(FrozenLeaf(i, allocation.owner, cap, accountKind)))
+            ) {
                 revert InvalidProof();
             }
             if (allocation.amount > cap) revert InvalidAmount();
@@ -495,12 +593,10 @@ contract TaskEscrow {
 
         // 发布者退款和争议费直接发送；任一转账失败会回退整笔交易及上面的状态修改。
         if (publisherAmount != 0) {
-            (bool publisherSent,) = payable(task.publisher).call{value: publisherAmount}("");
-            if (!publisherSent) revert TransferFailed();
+            asset.safeTransfer(task.publisher, publisherAmount);
         }
         if (feeAmount != 0) {
-            (bool feeSent,) = payable(frozen.feeRecipient).call{value: feeAmount}("");
-            if (!feeSent) revert TransferFailed();
+            asset.safeTransfer(frozen.feeRecipient, feeAmount);
         }
         emit DisputeLeafAllocated(taskId, 0, task.publisher, publisherAmount);
         emit DisputeLeafAllocated(taskId, 1, assignments[taskId].payout, agentAmount);
@@ -509,7 +605,7 @@ contract TaskEscrow {
 
     /// @notice 已弃用的“全部资金给单一接收人”争议接口，现已主动禁用。
     /// @dev 所有争议都必须经过冻结叶子的完整性与资金守恒检查。
-    function resolveDispute(bytes32, address payable) external pure {
+    function resolveDispute(bytes32, address) external pure {
         revert InvalidState();
     }
 

@@ -383,6 +383,9 @@ func (*apiAgentStore) UpdateCapacity(context.Context, engineagent.Mutation, stri
 func (*apiAgentStore) PublishPrice(context.Context, engineagent.Mutation, string, engineagent.PriceInput) (engineagent.PriceVersion, bool, error) {
 	return engineagent.PriceVersion{}, false, nil
 }
+func (*apiAgentStore) UpdateMatchingAuthority(_ context.Context, _ engineagent.Mutation, id string, input engineagent.MatchingAuthorityInput) (engineagent.MatchingAuthority, bool, error) {
+	return engineagent.MatchingAuthority{AgentID: id, ApprovalStatus: input.ApprovalStatus, RiskStatus: input.RiskStatus, MatchingVectorVersion: input.MatchingVectorVersion, AgentAggregateVersion: input.ExpectedVersion + 1}, false, nil
+}
 func (s *apiAgentStore) Get(context.Context, string, string) (engineagent.Agent, error) {
 	if s.agent.ID == "" {
 		return engineagent.Agent{}, engineagent.ErrNotFound

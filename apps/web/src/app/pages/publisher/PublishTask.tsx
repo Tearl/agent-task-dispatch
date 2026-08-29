@@ -5,7 +5,7 @@ import { ShieldCheck, Lock, Info, FileCheck2 } from 'lucide-react';
 import { Page } from '../../components/AppShell';
 import { PageHeader, Panel, SectionTitle, CtaButton, GhostButton, InfoNote, Pill } from '../../components/kit/primitives';
 import type { PublisherFlowState } from '../../lib/publisher-flow';
-import { createAndPublishTask, prepareTaskFunding, readTaskFunding, recordTaskFundingSubmission, submitTaskFundingTransaction, validateTaskPublishInput, type TaskFundingIntent, type TaskPublishInput, type WalletProvider } from '../../lib/platform-api';
+import { createAndPublishTask, prepareTaskFunding, readTaskFunding, recordTaskFundingSubmission, submitTaskFundingReplacement, submitTaskFundingTransaction, validateTaskPublishInput, type TaskFundingIntent, type TaskPublishInput, type WalletProvider } from '../../lib/platform-api';
 
 const CATEGORIES = ['数据分析', '翻译', '图像生成', '代码开发', '市场研究', '智能审计'];
 
@@ -70,7 +70,7 @@ export default function PublishTask() {
     setError(null);
   };
 
-  const fundTask = async () => {
+  const fundTask = async (replacement = false) => {
     if (!publication || fundingBusy) return;
     const ethereum = (window as typeof window & { ethereum?: WalletProvider }).ethereum;
     if (!ethereum) { setError('未检测到以太坊兼容钱包。'); return; }
@@ -79,16 +79,18 @@ export default function PublishTask() {
       let current = funding;
       if (!current) current = await prepareTaskFunding(publication.taskId, `${operationId.current}:funding`);
       setFunding(current);
-      if (current.status === 'prepared' || current.status === 'orphaned') {
-        const transactionHash = await submitTaskFundingTransaction(ethereum, current);
+      if (['prepared', 'orphaned', 'failed'].includes(current.status) || (current.status === 'submitted' && replacement)) {
+        const transactionHash = replacement ? await submitTaskFundingReplacement(ethereum, current) : await submitTaskFundingTransaction(ethereum, current);
         current = await recordTaskFundingSubmission(publication.taskId, current, transactionHash);
         setFunding(current);
       } else if (current.status === 'submitted') {
         current = await readTaskFunding(publication.taskId);
         setFunding(current);
       }
-      if (current.status === 'confirmed') {
+      if (current.status === 'confirmed' && !current.refundOnly) {
         toast.success('托管交易已达到确认深度，任务可以开始匹配');
+      } else if (current.status === 'confirmed') {
+        toast.info('托管超期确认，请在任务列表申请退款');
       } else {
         toast.info('托管交易已提交，请稍后同步链上确认');
       }
@@ -189,7 +191,7 @@ export default function PublishTask() {
               <Info size={13} /> UI 仅执行 Engine 返回的 allowed 操作，不自行推导发布资格
             </p>
             {error ? <div className="mt-4 space-y-3"><div role="alert" className="rounded-xl border border-rose-300/30 bg-rose-300/10 px-4 py-3 text-[13px] text-rose-100">{error}</div>{operationId.current ? <><p className="text-[12px] text-[var(--ap-muted)]">为保证幂等重试，当前输入已锁定。可原样重试，或放弃本次操作后修改。</p><GhostButton onClick={resetAttempt}>放弃本次操作并重新编辑</GhostButton></> : null}</div> : null}
-            {publication ? <div role="status" className="mt-4 space-y-3 rounded-xl border border-emerald-300/30 bg-emerald-300/10 px-4 py-3 text-[12px] text-emerald-100"><div><div>任务 {publication.taskId} 已发布</div><div className="break-all">规格：{publication.specHash}</div><div className="break-all">验收：{publication.acceptanceHash}</div>{funding ? <div className="mt-2">托管：{funding.status}{funding.transactionHash ? ` · ${funding.transactionHash.slice(0, 12)}…` : ''}</div> : null}</div>{funding?.status === 'confirmed' ? <GhostButton onClick={() => navigate(`/publisher/recommendations?taskId=${encodeURIComponent(publication.taskId)}`, { state: { ...flowState, taskId: publication.taskId } satisfies PublisherFlowState })}>进入权威匹配</GhostButton> : <GhostButton onClick={() => void fundTask()} disabled={fundingBusy}>{fundingBusy ? '处理中…' : funding?.status === 'submitted' ? '同步托管确认' : '钱包托管任务资金'}</GhostButton>}</div> : null}
+            {publication ? <div role="status" className="mt-4 space-y-3 rounded-xl border border-emerald-300/30 bg-emerald-300/10 px-4 py-3 text-[12px] text-emerald-100"><div><div>任务 {publication.taskId} 已发布</div><div className="break-all">规格：{publication.specHash}</div><div className="break-all">验收：{publication.acceptanceHash}</div>{funding ? <div className="mt-2">托管：{funding.status}{funding.transactionHash ? ` · ${funding.transactionHash.slice(0, 12)}…` : ''}</div> : null}</div>{funding?.status === 'confirmed' && !funding.refundOnly ? <GhostButton onClick={() => navigate(`/publisher/recommendations?taskId=${encodeURIComponent(publication.taskId)}`, { state: { ...flowState, taskId: publication.taskId } satisfies PublisherFlowState })}>进入权威匹配</GhostButton> : funding?.status === 'confirmed' ? <InfoNote tone="amber"><span>托管超期确认，请前往任务列表申请退款。</span></InfoNote> : <div className="flex flex-wrap gap-2"><GhostButton onClick={() => void fundTask(false)} disabled={fundingBusy}>{fundingBusy ? '处理中…' : funding?.status === 'submitted' ? '同步托管确认' : '钱包托管任务资金'}</GhostButton>{funding?.status === 'submitted' ? <GhostButton onClick={() => void fundTask(true)} disabled={fundingBusy}>提交 replacement</GhostButton> : null}</div>}</div> : null}
           </Panel>
 
           <Panel className="p-5 space-y-3">

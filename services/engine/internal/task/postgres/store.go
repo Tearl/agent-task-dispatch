@@ -115,6 +115,9 @@ func (s *Store) Publish(ctx context.Context, mutation enginetask.Mutation, id st
 		if !current.Deadline.After(databaseNow) {
 			return nil, enginetask.ErrInvalidInput
 		}
+		if !enginetask.ValidFormalBudget(current.FormalBudget) {
+			return nil, enginetask.ErrInvalidInput
+		}
 		change := mutation
 		change.Now = databaseNow
 		version := 1
@@ -167,7 +170,7 @@ func (s *Store) RequestDelete(ctx context.Context, mutation enginetask.Mutation,
 		if err != nil {
 			return nil, err
 		}
-		allowed := map[string]bool{"draft": true, "pending_escrow": true, "escrowed": true, "matching": true, "overview_generating": true, "awaiting_selection": true}
+		allowed := map[string]bool{"draft": true, "pending_escrow": true, "escrowed": true, "matching": true, "overview_generating": true, "awaiting_selection": true, "funding_configuration_invalid": true, "funding_refund_pending": true}
 		if !allowed[current.Status] {
 			return nil, enginetask.ErrInvalidState
 		}
@@ -175,12 +178,18 @@ func (s *Store) RequestDelete(ctx context.Context, mutation enginetask.Mutation,
 		if err != nil {
 			return nil, err
 		}
-		var chainID, contract, chainTaskID, wallet, fundingStatus string
-		fundingErr := tx.QueryRowContext(ctx, `SELECT chain_id,contract_address,chain_task_id,publisher_wallet,status FROM task_funding_intents WHERE task_id=$1`, id).Scan(&chainID, &contract, &chainTaskID, &wallet, &fundingStatus)
+		var intentID, chainID, contract, chainTaskID, wallet, fundingStatus string
+		fundingErr := tx.QueryRowContext(ctx, `SELECT intent_id,chain_id,contract_address,chain_task_id,publisher_wallet,status FROM task_funding_intents WHERE task_id=$1`, id).Scan(&intentID, &chainID, &contract, &chainTaskID, &wallet, &fundingStatus)
 		if fundingErr != nil && !errors.Is(fundingErr, sql.ErrNoRows) {
 			return nil, fundingErr
 		}
-		funded := current.Status != "draft" && current.Status != "pending_escrow" || fundingStatus == "confirmed"
+		fundedStatuses := map[string]bool{"escrowed": true, "matching": true, "overview_generating": true, "awaiting_selection": true, "funding_refund_pending": true}
+		funded := fundedStatuses[current.Status] || fundingStatus == "confirmed"
+		if !funded && fundingStatus == "orphaned" {
+			if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_funding_canonicalizations WHERE intent_id=$1)`, intentID).Scan(&funded); err != nil {
+				return nil, err
+			}
+		}
 		if fundingStatus == "submitted" && current.Status == "pending_escrow" {
 			return nil, enginetask.ErrInvalidState
 		}

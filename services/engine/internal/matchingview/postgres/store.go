@@ -45,7 +45,7 @@ WHERE task.task_id=$1 AND task.publisher_id=$2 AND task.deleted_at IS NULL`, tas
 		}
 		return view, err
 	}
-	snapshot, err := store.snapshots.Latest(ctx, taskID, view.Task.SpecHash, matching.CategoryTagsAlgorithmVersion)
+	snapshot, err := store.snapshots.Latest(ctx, taskID, view.Task.SpecHash, matching.FairShuffleAlgorithmVersion)
 	if errors.Is(err, matching.ErrSnapshotNotFound) {
 		return view, nil
 	}
@@ -65,6 +65,17 @@ WHERE task.task_id=$1 AND task.publisher_id=$2 AND task.deleted_at IS NULL`, tas
 		projected.Candidates = append(projected.Candidates, matchingview.Candidate{AgentID: candidate.AgentID, Name: names[candidate.AgentID], Category: candidate.Category, Tags: candidate.Tags, EstimatedDurationSecond: int64(candidate.EstimatedDuration.Seconds()), Position: selected.Position, Exploration: selected.Exploration, OverviewPrice: candidate.OverviewPrice, FormalPrice: candidate.FormalPrice, ExternalCostCap: candidate.ExternalCostCap, Score: matchingview.Score{TaskMatch: selected.Candidate.Score.TaskMatch, Reputation: selected.Candidate.Score.Reputation, PriceTime: selected.Candidate.Score.PriceTime, Availability: selected.Candidate.Score.Availability, Rule: selected.Candidate.Score.RuleScore, ModelDelta: selected.Candidate.Score.ModelDelta, Ranking: selected.Candidate.Score.RankingScore}})
 	}
 	view.Snapshot = projected
+	if err = store.db.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM fund_accounts discovery
+JOIN fund_accounts formal ON formal.task_id=discovery.task_id AND formal.reference_id=discovery.reference_id
+    AND formal.account_type='formal_escrow' AND formal.asset_key=discovery.asset_key
+WHERE discovery.task_id=$1 AND discovery.reference_id=$1 AND discovery.account_type='discovery_pool'
+  AND discovery.state='open'
+  AND discovery.balance-COALESCE((SELECT sum(reserve_amount) FROM fund_allocations WHERE account_id=discovery.account_id AND status='authorized'),0)
+      >= COALESCE((SELECT sum(overview_price::numeric+external_cost_cap::numeric) FROM match_snapshot_candidates WHERE snapshot_id=$2 AND final_position IS NOT NULL),0)
+)`, taskID, snapshot.ID).Scan(&view.OverviewFundingReady); err != nil {
+		return view, err
+	}
 	var batchID string
 	err = store.db.QueryRowContext(ctx, `SELECT batch_id FROM overview_batches WHERE snapshot_id=$1 ORDER BY created_at DESC LIMIT 1`, snapshot.ID).Scan(&batchID)
 	if err == nil {

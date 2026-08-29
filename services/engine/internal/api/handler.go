@@ -125,6 +125,7 @@ func NewHandlerWithOrchestration(logger *slog.Logger, authService *auth.Service,
 		mux.HandleFunc("POST /v1/agents/{id}/health", h.updateAgentHealth)
 		mux.HandleFunc("POST /v1/agents/{id}/capacity", h.updateAgentCapacity)
 		mux.HandleFunc("POST /v1/agents/{id}/prices", h.publishAgentPrice)
+		mux.HandleFunc("POST /v1/admin/agents/{id}/matching-authority", h.updateAgentMatchingAuthority)
 		mux.HandleFunc("GET /v1/agents/{id}/available-actions", h.availableAgentActions)
 		mux.HandleFunc("GET /v1/agents/{id}/view", h.agentView)
 	}
@@ -1108,6 +1109,28 @@ func (h *handler) publishAgentPrice(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	writeJSON(writer, http.StatusCreated, value)
+}
+
+func (h *handler) updateAgentMatchingAuthority(writer http.ResponseWriter, request *http.Request) {
+	var input agent.MatchingAuthorityInput
+	if decodeJSON(writer, request, 8_192, &input) != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	session, ok := h.agentSession(writer, request)
+	if !ok {
+		return
+	}
+	value, replay, err := h.agents.UpdateMatchingAuthority(request.Context(), session, request.Header.Get("Idempotency-Key"), request.PathValue("id"), input)
+	if err != nil {
+		h.writeAgentError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if replay {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, value)
 }
 
 func (h *handler) agentSession(writer http.ResponseWriter, request *http.Request) (auth.Session, bool) {

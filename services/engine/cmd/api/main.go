@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -48,6 +50,7 @@ func main() {
 	domain := requiredEnv(logger, "AUTH_DOMAIN")
 	chainID := requiredEnv(logger, "EVM_CHAIN_ID")
 	escrowContract := os.Getenv("ESCROW_CONTRACT_ADDRESS")
+	escrowAssetAddress := os.Getenv("ESCROW_ASSET_ADDRESS")
 	purpose := requiredEnv(logger, "AUTH_PURPOSE")
 	credentialKeyReference := requiredEnv(logger, "AGENT_CREDENTIAL_KEY_REF")
 	credentialRootKey, err := base64.StdEncoding.DecodeString(requiredEnv(logger, "AGENT_CREDENTIAL_KEK_BASE64"))
@@ -144,7 +147,11 @@ func main() {
 	}
 	fundsAsset := os.Getenv("FUNDS_ASSET")
 	if fundsAsset == "" {
-		fundsAsset = "evm:" + chainID + "/native"
+		if escrowAssetAddress != "" {
+			fundsAsset = "evm:" + chainID + "/erc20:" + strings.ToLower(escrowAssetAddress)
+		} else {
+			fundsAsset = "evm:" + chainID + "/erc20:unconfigured"
+		}
 	}
 	deliveryStore, err := deliverypostgres.NewStoreWithConfig(db, chainIDIfConfigured(escrowContract, chainID), escrowContract, fundsAsset, os.Getenv("PLATFORM_INCIDENT_OWNER_ID"))
 	if err != nil {
@@ -172,7 +179,7 @@ func main() {
 		logger.Error("dispute resolver address is required with escrow projection")
 		os.Exit(1)
 	}
-	disputeStore, err := disputepostgres.NewStore(db, disputeResolver)
+	disputeStore, err := disputepostgres.NewStore(db)
 	if err != nil {
 		logger.Error("dispute store failed", "error", err)
 		os.Exit(1)
@@ -184,13 +191,17 @@ func main() {
 	}
 	var selectionService *selection.Service
 	var taskFundingService *taskfunding.Service
-	var chainProjector *chainprojection.Projector
-	var chainReconciler *chainprojection.Reconciler
-	selectionContract := escrowContract
+	var chainProjectors []*chainprojection.Projector
+	var chainReconcilers []*chainprojection.Reconciler
+	selectionContract := strings.ToLower(escrowContract)
 	selectionSigningKey := os.Getenv("SELECTION_PROOF_SIGNING_KEY_HEX")
 	if selectionContract != "" || selectionSigningKey != "" {
 		if selectionContract == "" || selectionSigningKey == "" {
 			logger.Error("selection contract and proof signing key must be configured together")
+			os.Exit(1)
+		}
+		if escrowAssetAddress == "" {
+			logger.Error("escrow asset address is required with escrow projection")
 			os.Exit(1)
 		}
 		rpcURL := requiredEnv(logger, "EVM_RPC_URL")
@@ -210,20 +221,62 @@ func main() {
 			logger.Error("chain projection store failed", "error", chainStoreErr)
 			os.Exit(1)
 		}
-		chainProjector, err = chainprojection.NewProjector(chainSource, chainStore, projectionScope)
-		if err != nil {
-			logger.Error("chain projector configuration failed", "error", err)
+		expectedAsset := "evm:" + chainID + "/erc20:" + strings.ToLower(escrowAssetAddress)
+		if fundsAsset != expectedAsset {
+			logger.Error("funds asset must match the escrow deployment asset")
 			os.Exit(1)
 		}
+		if registerErr := chainStore.RegisterDeployment(startupContext, chainpostgres.Deployment{ChainID: chainID, Contract: selectionContract, Asset: expectedAsset, DisputeResolver: disputeResolver, ActiveForNewTasks: true}); registerErr != nil {
+			logger.Error("active escrow deployment registration failed", "error", registerErr)
+			os.Exit(1)
+		}
+		legacyDeployments, legacyConfigErr := legacyEscrowDeployments()
+		if legacyConfigErr != nil {
+			logger.Error("legacy escrow deployment configuration failed", "error", legacyConfigErr)
+			os.Exit(1)
+		}
+		for _, deployment := range legacyDeployments {
+			if registerErr := chainStore.RegisterDeployment(startupContext, deployment); registerErr != nil {
+				logger.Error("legacy escrow deployment registration failed", "contract", deployment.Contract, "error", registerErr)
+				os.Exit(1)
+			}
+		}
+		chainProjector, projectorErr := chainprojection.NewProjector(chainSource, chainStore, projectionScope)
+		if projectorErr != nil {
+			logger.Error("chain projector configuration failed", "error", projectorErr)
+			os.Exit(1)
+		}
+		chainProjectors = append(chainProjectors, chainProjector)
 		chainVerifier, verifierErr := chainprojection.NewVerifier(chainStore, projectionScope)
 		if verifierErr != nil {
 			logger.Error("chain verifier configuration failed", "error", verifierErr)
 			os.Exit(1)
 		}
-		chainReconciler, err = chainprojection.NewReconciler(chainStore, chainSource, projectionScope)
-		if err != nil {
-			logger.Error("chain reconciler configuration failed", "error", err)
+		chainReconciler, reconcilerErr := chainprojection.NewReconciler(chainStore, chainSource, projectionScope)
+		if reconcilerErr != nil {
+			logger.Error("chain reconciler configuration failed", "error", reconcilerErr)
 			os.Exit(1)
+		}
+		chainReconcilers = append(chainReconcilers, chainReconciler)
+		legacyScopes, scopesErr := chainStore.PersistedProjectionScopes(startupContext, projectionScope)
+		if scopesErr != nil {
+			logger.Error("persisted escrow deployment discovery failed", "error", scopesErr)
+			os.Exit(1)
+		}
+		for _, legacyScope := range legacyScopes {
+			legacySource, legacySourceErr := chainprojection.NewRPCSource(rpcURL, legacyScope.Contract, os.Getenv("EVM_RPC_ALLOW_PRIVATE_HTTP") == "true")
+			if legacySourceErr != nil {
+				logger.Error("legacy chain RPC configuration failed", "contract", legacyScope.Contract)
+				os.Exit(1)
+			}
+			legacyProjector, legacyProjectorErr := chainprojection.NewProjector(legacySource, chainStore, legacyScope)
+			legacyReconciler, legacyReconcilerErr := chainprojection.NewReconciler(chainStore, legacySource, legacyScope)
+			if legacyProjectorErr != nil || legacyReconcilerErr != nil {
+				logger.Error("legacy escrow projection configuration failed", "contract", legacyScope.Contract, "projectorError", legacyProjectorErr, "reconcilerError", legacyReconcilerErr)
+				os.Exit(1)
+			}
+			chainProjectors = append(chainProjectors, legacyProjector)
+			chainReconcilers = append(chainReconcilers, legacyReconciler)
 		}
 		selectionStore, storeErr := selectionpostgres.NewStore(db)
 		if storeErr != nil {
@@ -240,7 +293,9 @@ func main() {
 			logger.Error("selection service failed", "error", err)
 			os.Exit(1)
 		}
-		taskFundingService, err = taskfunding.NewService(db, taskfunding.Config{ChainID: chainID, ContractAddress: selectionContract, Asset: fundsAsset})
+		taskFundingService, err = taskfunding.NewService(db, taskfunding.Config{ChainID: chainID, ContractAddress: selectionContract, Asset: fundsAsset, AssetAddress: escrowAssetAddress}, func(ctx context.Context, transactionHash string) error {
+			return chainStore.ReconcileFundingAttempt(ctx, projectionScope, transactionHash)
+		})
 		if err != nil {
 			logger.Error("task funding configuration failed", "error", err)
 			os.Exit(1)
@@ -318,8 +373,8 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer stop()
-	if chainProjector != nil {
-		go runChainProjection(shutdownSignal, logger, chainProjector, chainReconciler)
+	for index := range chainProjectors {
+		go runChainProjection(shutdownSignal, logger, chainProjectors[index], chainReconcilers[index])
 	}
 	workerErrors := make(chan error, 1)
 	if workerEnabled {
@@ -349,6 +404,32 @@ func main() {
 		os.Exit(1)
 	default:
 	}
+}
+
+type legacyEscrowDeployment struct {
+	ChainID         string `json:"chainId"`
+	Contract        string `json:"contractAddress"`
+	Asset           string `json:"assetKey"`
+	DisputeResolver string `json:"disputeResolverAddress"`
+}
+
+func legacyEscrowDeployments() ([]chainpostgres.Deployment, error) {
+	raw := os.Getenv("ESCROW_LEGACY_DEPLOYMENTS_JSON")
+	if raw == "" {
+		return nil, nil
+	}
+	var configured []legacyEscrowDeployment
+	if err := json.Unmarshal([]byte(raw), &configured); err != nil {
+		return nil, err
+	}
+	deployments := make([]chainpostgres.Deployment, 0, len(configured))
+	for _, value := range configured {
+		if value.ChainID == "" || value.Contract == "" || value.Asset == "" || value.DisputeResolver == "" {
+			return nil, errors.New("legacy escrow deployment fields are required")
+		}
+		deployments = append(deployments, chainpostgres.Deployment{ChainID: value.ChainID, Contract: value.Contract, Asset: value.Asset, DisputeResolver: value.DisputeResolver})
+	}
+	return deployments, nil
 }
 
 func chainIDIfConfigured(contract, chainID string) string {

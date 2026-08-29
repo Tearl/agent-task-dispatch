@@ -27,6 +27,8 @@ func TestHardFilterCoversEveryEligibilityGate(t *testing.T) {
 		{name: "language", code: "language_mismatch", alter: func(value *Candidate) { value.Languages = []string{"en"} }},
 		{name: "capability", code: "capability_missing", alter: func(value *Candidate) { value.Capabilities = []string{"research"} }},
 		{name: "risk", code: "risk_not_eligible", alter: func(value *Candidate) { value.RiskStatus = "blocked" }},
+		{name: "reputation missing", code: "reputation_unavailable", alter: func(value *Candidate) { value.ReputationAvailable = false }},
+		{name: "reputation invalid", code: "reputation_unavailable", alter: func(value *Candidate) { value.Reputation.Quality = 101 }},
 		{name: "payout", code: "payout_address_invalid", alter: func(value *Candidate) { value.PayoutAddress = "invalid" }},
 		{name: "vector", code: "vector_version_mismatch", alter: func(value *Candidate) { value.VectorVersion = "old" }},
 		{name: "deadline", code: "deadline_unavailable", alter: func(value *Candidate) { value.EstimatedDuration = 25 * time.Hour }},
@@ -119,6 +121,7 @@ func validFixture() (Request, Candidate) {
 			Communication: 100,
 			Compliance:    100,
 		},
+		ReputationAvailable: true,
 	}
 	return request, candidate
 }

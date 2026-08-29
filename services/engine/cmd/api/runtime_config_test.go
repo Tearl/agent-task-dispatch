@@ -26,3 +26,15 @@ func TestDecodeRuntimeCredentialsRejectsUnknownTrailingAndInvalidBase64(t *testi
 		}
 	}
 }
+
+func TestLegacyEscrowDeploymentsRequireCompleteDeploymentMetadata(t *testing.T) {
+	t.Setenv("ESCROW_LEGACY_DEPLOYMENTS_JSON", `[{"chainId":"84532","contractAddress":"0x1111111111111111111111111111111111111111","assetKey":"evm:84532/native","disputeResolverAddress":"0x2222222222222222222222222222222222222222"}]`)
+	values, err := legacyEscrowDeployments()
+	if err != nil || len(values) != 1 || values[0].ChainID != "84532" || values[0].Asset != "evm:84532/native" || values[0].ActiveForNewTasks {
+		t.Fatalf("legacy deployments=%#v err=%v", values, err)
+	}
+	t.Setenv("ESCROW_LEGACY_DEPLOYMENTS_JSON", `[{"chainId":"84532"}]`)
+	if _, err = legacyEscrowDeployments(); err == nil {
+		t.Fatal("incomplete legacy deployment metadata accepted")
+	}
+}

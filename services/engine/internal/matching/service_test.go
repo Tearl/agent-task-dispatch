@@ -107,6 +107,42 @@ func TestMatchRejectsInvalidRequestBeforeFiltering(t *testing.T) {
 	}
 }
 
+func TestMatchTenSimulatedAgentsCoversAuthorityAndOperationalGates(t *testing.T) {
+	request, base := validFixture()
+	candidates := make([]Candidate, 10)
+	for index := range candidates {
+		candidates[index] = base
+		candidates[index].AgentID = agentID3(index)
+		candidates[index].ProviderID = "provider-" + agentID3(index)
+	}
+	candidates[4].ProviderID = request.PublisherID
+	candidates[5].ApprovalStatus = "pending"
+	candidates[6].RiskStatus = "blocked"
+	candidates[7].ReputationAvailable = false
+	candidates[8].VectorVersion = "embedding-old"
+	candidates[9].ActiveCapacity = candidates[9].MaxConcurrency
+
+	result, err := NewService(UnavailableDenseRecall{}, nil).Match(context.Background(), request, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Excluded) != 6 || len(result.Scored) != 4 || len(result.Qualified) != 4 {
+		t.Fatalf("unexpected ten-agent result: excluded=%d scored=%d qualified=%d", len(result.Excluded), len(result.Scored), len(result.Qualified))
+	}
+	for _, code := range []string{"self_provider", "approval_required", "risk_not_eligible", "reputation_unavailable", "vector_version_mismatch", "capacity_unavailable"} {
+		found := false
+		for _, exclusion := range result.Excluded {
+			found = found || hasReason(exclusion, code)
+		}
+		if !found {
+			t.Fatalf("missing simulated-agent exclusion %q: %#v", code, result.Excluded)
+		}
+	}
+	if !hasDegradation(result.Degradations, "recall_unavailable") || !hasDegradation(result.Degradations, "model_disabled") {
+		t.Fatalf("production degradation was not recorded: %#v", result.Degradations)
+	}
+}
+
 func containsScored(candidates []ScoredCandidate, agentID string) bool {
 	for _, candidate := range candidates {
 		if candidate.Candidate.AgentID == agentID {

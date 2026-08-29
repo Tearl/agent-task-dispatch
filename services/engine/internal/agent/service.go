@@ -135,6 +135,32 @@ type PriceInput struct {
 	ExpectedVersion         int64  `json:"expectedVersion"`
 }
 
+type MatchingAuthorityInput struct {
+	ApprovalStatus          string `json:"approvalStatus"`
+	RiskStatus              string `json:"riskStatus"`
+	MatchingVectorVersion   string `json:"matchingVectorVersion"`
+	ReputationQuality       int    `json:"reputationQuality"`
+	ReputationSpeed         int    `json:"reputationSpeed"`
+	ReputationReliability   int    `json:"reputationReliability"`
+	ReputationCommunication int    `json:"reputationCommunication"`
+	ReputationCompliance    int    `json:"reputationCompliance"`
+	ExpectedVersion         int64  `json:"expectedVersion"`
+}
+
+type MatchingAuthority struct {
+	AgentID                 string    `json:"agentId"`
+	ApprovalStatus          string    `json:"approvalStatus"`
+	RiskStatus              string    `json:"riskStatus"`
+	MatchingVectorVersion   string    `json:"matchingVectorVersion,omitempty"`
+	ReputationQuality       int       `json:"reputationQuality"`
+	ReputationSpeed         int       `json:"reputationSpeed"`
+	ReputationReliability   int       `json:"reputationReliability"`
+	ReputationCommunication int       `json:"reputationCommunication"`
+	ReputationCompliance    int       `json:"reputationCompliance"`
+	AgentAggregateVersion   int64     `json:"agentAggregateVersion"`
+	UpdatedAt               time.Time `json:"updatedAt"`
+}
+
 type Mutation struct {
 	ActorID        string
 	IdempotencyKey string
@@ -150,6 +176,7 @@ type Store interface {
 	CheckHealth(context.Context, Mutation, string, HealthCheckInput, func(context.Context, string) error) (Agent, bool, error)
 	UpdateCapacity(context.Context, Mutation, string, CapacityInput) (Agent, bool, error)
 	PublishPrice(context.Context, Mutation, string, PriceInput) (PriceVersion, bool, error)
+	UpdateMatchingAuthority(context.Context, Mutation, string, MatchingAuthorityInput) (MatchingAuthority, bool, error)
 	Get(context.Context, string, string) (Agent, error)
 	GetForActions(context.Context, string, string) (Agent, time.Time, error)
 	ReserveCapacity(context.Context, string, string, time.Time) (CapacityLease, error)
@@ -287,6 +314,27 @@ func (s *Service) PublishPrice(ctx context.Context, session auth.Session, key, i
 	}
 	return s.store.PublishPrice(ctx, m, id, input)
 }
+
+func (s *Service) UpdateMatchingAuthority(ctx context.Context, session auth.Session, key, id string, input MatchingAuthorityInput) (MatchingAuthority, bool, error) {
+	if !hasRole(session, "admin") {
+		return MatchingAuthority{}, false, ErrForbidden
+	}
+	if strings.TrimSpace(id) == "" || input.ExpectedVersion < 1 ||
+		!slices.Contains([]string{"pending", "approved", "revoked"}, input.ApprovalStatus) ||
+		!slices.Contains([]string{"pending", "eligible", "blocked"}, input.RiskStatus) ||
+		!validReputation(input) {
+		return MatchingAuthority{}, false, ErrInvalidInput
+	}
+	input.MatchingVectorVersion = strings.TrimSpace(input.MatchingVectorVersion)
+	if input.ApprovalStatus == "approved" && input.RiskStatus == "eligible" && input.MatchingVectorVersion == "" {
+		return MatchingAuthority{}, false, ErrInvalidInput
+	}
+	mutation, err := s.mutation(session, key, input)
+	if err != nil {
+		return MatchingAuthority{}, false, err
+	}
+	return s.store.UpdateMatchingAuthority(ctx, mutation, id, input)
+}
 func (s *Service) Get(ctx context.Context, session auth.Session, id string) (Agent, error) {
 	if !hasRole(session, "agent_provider") {
 		return Agent{}, ErrForbidden
@@ -418,6 +466,15 @@ func validPrices(i PriceInput) bool {
 	}
 	_, ok = nonnegative(i.ExternalCostCap)
 	return ok
+}
+
+func validReputation(input MatchingAuthorityInput) bool {
+	for _, value := range []int{input.ReputationQuality, input.ReputationSpeed, input.ReputationReliability, input.ReputationCommunication, input.ReputationCompliance} {
+		if value < 0 || value > 100 {
+			return false
+		}
+	}
+	return true
 }
 func nonnegative(value string) (*big.Int, bool) {
 	if value == "" || strings.HasPrefix(value, "+") || len(value) > 78 {

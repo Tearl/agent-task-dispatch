@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { aggregateEngineExecutions, aggregateEngineMatching, forwardEngineRead, InvalidEngineResponseError, InvalidResourceIdError } from "./engine";
+import { aggregateEngineExecutions, aggregateEngineMatching, forwardEngineRead, InvalidResourceIdError, mapEngineFailure } from "./engine";
 import { sessionCookieName } from "./session";
 
 async function respond(work: (token: string) => Promise<{ status: number; body: Record<string, unknown> }>) {
@@ -11,8 +11,8 @@ async function respond(work: (token: string) => Promise<{ status: number; body: 
     return NextResponse.json(result.body, { status: result.status });
   } catch (error) {
     if (error instanceof InvalidResourceIdError) return NextResponse.json({ error: "invalid resource id" }, { status: 400 });
-    if (error instanceof InvalidEngineResponseError) return NextResponse.json({ error: "invalid engine response" }, { status: 502 });
-    return NextResponse.json({ error: "engine service temporarily unavailable" }, { status: 503 });
+    const failure = mapEngineFailure(error);
+    return NextResponse.json(failure.body, { status: failure.status });
   }
 }
 

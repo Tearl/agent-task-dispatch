@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/example/agent-platform/engine/internal/chain/taskescrowabi"
 )
 
 type RPCSource struct {
@@ -116,15 +118,15 @@ func (source *RPCSource) ObservedInventory(ctx context.Context, scope Scope, hei
 		}
 	}
 	for taskID := range tasks {
-		taskWords, err := source.ethCall(ctx, selector("tasks(bytes32)"), taskID, height)
+		taskWords, err := source.ethCall(ctx, taskescrowabi.MethodID("tasks"), taskID, height)
 		if err != nil || len(taskWords) != 4 {
 			return nil, errors.Join(ErrInvalidInput, err)
 		}
-		assignmentWords, err := source.ethCall(ctx, selector("assignments(bytes32)"), taskID, height)
+		assignmentWords, err := source.ethCall(ctx, taskescrowabi.MethodID("assignments"), taskID, height)
 		if err != nil || len(assignmentWords) != 13 {
 			return nil, errors.Join(ErrInvalidInput, err)
 		}
-		nonceWords, err := source.ethCall(ctx, selector("workNonces(bytes32)"), taskID, height)
+		nonceWords, err := source.ethCall(ctx, taskescrowabi.MethodID("workNonces"), taskID, height)
 		if err != nil || len(nonceWords) != 1 {
 			return nil, errors.Join(ErrInvalidInput, err)
 		}
@@ -136,7 +138,7 @@ func (source *RPCSource) ObservedInventory(ctx context.Context, scope Scope, hei
 			result["ledger_formal_balance:"+taskID] = number(taskWords[2])
 		}
 		if _, exists := expected["yield_principal:"+taskID]; exists {
-			yieldWords, callErr := source.ethCall(ctx, selector("yieldEligiblePrincipal(bytes32)"), taskID, height)
+			yieldWords, callErr := source.ethCall(ctx, taskescrowabi.MethodID("yieldEligiblePrincipal"), taskID, height)
 			if callErr != nil || len(yieldWords) != 1 {
 				return nil, errors.Join(ErrInvalidInput, callErr)
 			}
@@ -148,7 +150,7 @@ func (source *RPCSource) ObservedInventory(ctx context.Context, scope Scope, hei
 		if len(parts) != 3 || (parts[0] != "claimable" && parts[0] != "ledger_claimable") || !validAddress(parts[1]) || !validAddress(parts[2]) {
 			continue
 		}
-		words, err := source.ethCallArguments(ctx, selector("claimableEarnings(address,address)"), []string{
+		words, err := source.ethCallArguments(ctx, taskescrowabi.MethodID("claimableEarnings"), []string{
 			strings.Repeat("0", 24) + strings.TrimPrefix(parts[1], "0x"),
 			strings.Repeat("0", 24) + strings.TrimPrefix(parts[2], "0x"),
 		}, height)
@@ -247,8 +249,7 @@ func parseQuantity(value string) (uint64, error) {
 	parsed, err := strconv.ParseUint(value[2:], 16, 64)
 	return parsed, err
 }
-func quantity(value uint64) string     { return fmt.Sprintf("0x%x", value) }
-func selector(signature string) string { return hexKeccak(signature)[:10] }
+func quantity(value uint64) string { return fmt.Sprintf("0x%x", value) }
 
 var _ Source = (*RPCSource)(nil)
 var _ InventorySource = (*RPCSource)(nil)

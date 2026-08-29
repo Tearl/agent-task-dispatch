@@ -284,7 +284,7 @@ func (s *Service) View(ctx context.Context, session auth.Session, id string) (Vi
 }
 
 func deleteReasons(status string) []action.Reason {
-	for _, allowed := range []string{"draft", "pending_escrow", "escrowed", "matching", "overview_generating", "awaiting_selection"} {
+	for _, allowed := range []string{"draft", "pending_escrow", "escrowed", "matching", "overview_generating", "awaiting_selection", "funding_configuration_invalid", "funding_refund_pending"} {
 		if status == allowed {
 			return nil
 		}
@@ -384,6 +384,13 @@ func validateDraft(input DraftInput) error {
 		}
 	}
 	return nil
+}
+
+// ValidFormalBudget defines the EVM amount domain enforced before an immutable
+// task specification is published.
+func ValidFormalBudget(value string) bool {
+	number, ok := new(big.Int).SetString(value, 10)
+	return ok && number.Sign() > 0 && number.BitLen() <= 256 && number.String() == value
 }
 
 func canonicalUint(value string) bool {

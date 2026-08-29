@@ -1,7 +1,8 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { BodyTooLargeError, readBoundedBody } from "../../../lib/body";
-import { resolveEngineBaseUrl } from "../../../lib/engine";
+import { InvalidEngineResponseError, mapEngineFailure, readEngineError, readEngineJSON, resolveEngineBaseUrl } from "../../../lib/engine";
+import { requestEngine } from "../../../lib/engine-http";
 import { sessionCookieName, type PublicSession } from "../../../lib/session";
 import {
   generateTaskAnalysis,
@@ -42,17 +43,22 @@ export async function POST(request: Request) {
 
 async function authorizePublisher(token: string): Promise<NextResponse | null> {
   try {
-    const response = await fetch(`${resolveEngineBaseUrl()}/v1/auth/session`, {
+    const response = await requestEngine(`${resolveEngineBaseUrl()}/v1/auth/session`, {
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
       cache: "no-store",
-      signal: AbortSignal.timeout(3_000),
     });
-    if (response.status === 401) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    if (!response.ok) return NextResponse.json({ error: "authorization service temporarily unavailable" }, { status: 503 });
-    const session = await response.json() as PublicSession;
-    if (!Array.isArray(session.roles) || !session.roles.includes("publisher")) return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    if (!response.ok) {
+      const failure = await readEngineError(response);
+      return NextResponse.json(failure.body, { status: failure.status });
+    }
+    const session = await readEngineJSON(response) as Partial<PublicSession> | null;
+    if (!session || !Array.isArray(session.roles) || !session.roles.every((role) => typeof role === "string")) {
+      throw new InvalidEngineResponseError("invalid Engine authorization response");
+    }
+    if (!session.roles.includes("publisher")) return NextResponse.json({ error: "forbidden" }, { status: 403 });
     return null;
-  } catch {
-    return NextResponse.json({ error: "authorization service temporarily unavailable" }, { status: 503 });
+  } catch (error) {
+    const failure = mapEngineFailure(error);
+    return NextResponse.json(failure.body, { status: failure.status });
   }
 }

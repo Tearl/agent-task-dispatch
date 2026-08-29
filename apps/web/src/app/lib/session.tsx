@@ -73,11 +73,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         return applySession(session, preferredRole);
       },
       disconnect: async () => {
-        await revokeSession();
-        restoreGeneration.current += 1;
-        setConnected(false);
-        setAddress("");
-        setAuthorizedRoles([]);
+		try {
+			await revokeSession();
+		} finally {
+			restoreGeneration.current += 1;
+			setConnected(false);
+			setAddress("");
+			setAuthorizedRoles([]);
+		}
       },
       switchRole: (nextRole) => { if (authorizedRoles.includes(nextRole)) setRole(nextRole); },
     }),

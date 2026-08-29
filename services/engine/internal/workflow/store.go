@@ -39,11 +39,142 @@ type TaskInput struct {
 
 type Store struct{ db *sql.DB }
 
+type MatchingOperationLock struct {
+	conn *sql.Conn
+	key  string
+}
+
 func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, ErrInvalidInput
 	}
 	return &Store{db: db}, nil
+}
+
+func (store *Store) LockMatchingOperation(ctx context.Context, publisherID, operationID string) (*MatchingOperationLock, error) {
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key := "matching-operation:" + publisherID + ":" + operationID
+	if _, err = conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtextextended($1,0))`, key); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return &MatchingOperationLock{conn: conn, key: key}, nil
+}
+
+func (lock *MatchingOperationLock) Close() {
+	if lock == nil || lock.conn == nil {
+		return
+	}
+	_, _ = lock.conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtextextended($1,0))`, lock.key)
+	_ = lock.conn.Close()
+	lock.conn = nil
+}
+
+func (lock *MatchingOperationLock) Completed(ctx context.Context, publisherID, operationID, taskID string) (StartMatchingResult, bool, error) {
+	var storedTaskID string
+	var payload []byte
+	err := lock.conn.QueryRowContext(ctx, `SELECT task_id,response_body FROM matching_run_operations WHERE publisher_id=$1 AND operation_id=$2`, publisherID, operationID).Scan(&storedTaskID, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StartMatchingResult{}, false, nil
+	}
+	if err != nil {
+		return StartMatchingResult{}, false, err
+	}
+	if storedTaskID != taskID {
+		return StartMatchingResult{}, false, ErrInvalidInput
+	}
+	if payload == nil {
+		return StartMatchingResult{}, false, nil
+	}
+	var result StartMatchingResult
+	if err = json.Unmarshal(payload, &result); err != nil {
+		return StartMatchingResult{}, false, err
+	}
+	return result, true, nil
+}
+
+func (lock *MatchingOperationLock) PendingEvaluation(ctx context.Context, publisherID, operationID, taskID string) (time.Time, bool, error) {
+	var storedTaskID string
+	var evaluatedAt time.Time
+	err := lock.conn.QueryRowContext(ctx, `SELECT task_id,evaluated_at FROM matching_run_operations WHERE publisher_id=$1 AND operation_id=$2 AND response_body IS NULL`, publisherID, operationID).Scan(&storedTaskID, &evaluatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if storedTaskID != taskID {
+		return time.Time{}, false, ErrInvalidInput
+	}
+	return evaluatedAt, true, nil
+}
+
+func (lock *MatchingOperationLock) Begin(ctx context.Context, publisherID, operationID, taskID string, evaluatedAt time.Time) (time.Time, StartMatchingResult, bool, error) {
+	if _, err := lock.conn.ExecContext(ctx, `INSERT INTO matching_run_operations(publisher_id,operation_id,task_id,evaluated_at,created_at) VALUES($1,$2,$3,$4,$4) ON CONFLICT DO NOTHING`, publisherID, operationID, taskID, evaluatedAt); err != nil {
+		return time.Time{}, StartMatchingResult{}, false, err
+	}
+	var storedTaskID string
+	var storedTime time.Time
+	var payload []byte
+	err := lock.conn.QueryRowContext(ctx, `SELECT task_id,evaluated_at,COALESCE(response_body,'null'::jsonb) FROM matching_run_operations WHERE publisher_id=$1 AND operation_id=$2`, publisherID, operationID).Scan(&storedTaskID, &storedTime, &payload)
+	if err != nil {
+		return time.Time{}, StartMatchingResult{}, false, err
+	}
+	if storedTaskID != taskID {
+		return time.Time{}, StartMatchingResult{}, false, ErrInvalidInput
+	}
+	if string(payload) == "null" {
+		return storedTime, StartMatchingResult{}, false, nil
+	}
+	var result StartMatchingResult
+	if err = json.Unmarshal(payload, &result); err != nil {
+		return time.Time{}, StartMatchingResult{}, false, err
+	}
+	return storedTime, result, true, nil
+}
+
+func (lock *MatchingOperationLock) FrozenDraft(ctx context.Context, publisherID, operationID, taskID string) (matching.SnapshotDraft, bool, error) {
+	var storedTaskID string
+	var payload []byte
+	err := lock.conn.QueryRowContext(ctx, `SELECT task_id,snapshot_draft FROM matching_run_operations WHERE publisher_id=$1 AND operation_id=$2`, publisherID, operationID).Scan(&storedTaskID, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return matching.SnapshotDraft{}, false, ErrNotFound
+	}
+	if err != nil {
+		return matching.SnapshotDraft{}, false, err
+	}
+	if storedTaskID != taskID {
+		return matching.SnapshotDraft{}, false, ErrInvalidInput
+	}
+	if payload == nil {
+		return matching.SnapshotDraft{}, false, nil
+	}
+	var draft matching.SnapshotDraft
+	if err = json.Unmarshal(payload, &draft); err != nil {
+		return matching.SnapshotDraft{}, false, err
+	}
+	return draft, true, nil
+}
+
+func (lock *MatchingOperationLock) FreezeDraft(ctx context.Context, publisherID, operationID, taskID string, draft matching.SnapshotDraft) (matching.SnapshotDraft, error) {
+	payload, err := json.Marshal(draft)
+	if err != nil {
+		return matching.SnapshotDraft{}, err
+	}
+	if _, err = lock.conn.ExecContext(ctx, `UPDATE matching_run_operations SET snapshot_draft=$1 WHERE publisher_id=$2 AND operation_id=$3 AND task_id=$4 AND response_body IS NULL AND snapshot_draft IS NULL`, payload, publisherID, operationID, taskID); err != nil {
+		return matching.SnapshotDraft{}, err
+	}
+	stored, exists, err := lock.FrozenDraft(ctx, publisherID, operationID, taskID)
+	if err != nil {
+		return matching.SnapshotDraft{}, err
+	}
+	if !exists {
+		return matching.SnapshotDraft{}, ErrInvalidInput
+	}
+	return stored, nil
 }
 
 func (store *Store) Task(ctx context.Context, publisherID, taskID string) (TaskInput, error) {
@@ -64,7 +195,7 @@ WHERE task.task_id=$1 AND task.publisher_id=$2`, taskID, publisherID, specHash).
 }
 
 func (store *Store) Candidates(ctx context.Context) ([]matching.Candidate, error) {
-	rows, err := store.db.QueryContext(ctx, `SELECT agent.agent_id,agent.owner_id,agent.status,agent.health,agent.health_checked_at,agent.health_valid_until,agent.max_concurrency,(SELECT count(*)::integer FROM agent_capacity_leases lease WHERE lease.agent_id=agent.agent_id AND lease.released_at IS NULL AND lease.expires_at>statement_timestamp()),agent.category,agent.languages,agent.tags,agent.capabilities,agent.payout_address,agent.estimated_duration_seconds,price.overview_price::text,price.formal_package_gross_price::text,price.external_cost_cap::text,price.version_no
+	rows, err := store.db.QueryContext(ctx, `SELECT agent.agent_id,agent.owner_id,agent.status,agent.approval_status,agent.health,agent.health_checked_at,agent.health_valid_until,agent.max_concurrency,(SELECT count(*)::integer FROM agent_capacity_leases lease WHERE lease.agent_id=agent.agent_id AND lease.released_at IS NULL AND lease.expires_at>statement_timestamp()),agent.category,agent.languages,agent.tags,agent.capabilities,agent.risk_status,agent.payout_address,agent.matching_vector_version,agent.estimated_duration_seconds,price.overview_price::text,price.formal_package_gross_price::text,price.external_cost_cap::text,price.version_no,agent.matching_exposure_count,agent.matching_effective_samples,agent.reputation_quality,agent.reputation_speed,agent.reputation_reliability,agent.reputation_communication,agent.reputation_compliance
 FROM agents agent JOIN agent_price_versions price ON price.agent_id=agent.agent_id AND price.version_no=agent.current_price_version
 ORDER BY agent.agent_id`)
 	if err != nil {
@@ -77,21 +208,23 @@ ORDER BY agent.agent_id`)
 		var languages, tags pq.StringArray
 		var capabilities string
 		var duration int64
-		if err = rows.Scan(&candidate.AgentID, &candidate.ProviderID, &candidate.Status, &candidate.Health, &candidate.HealthCheckedAt, &candidate.HealthValidUntil, &candidate.MaxConcurrency, &candidate.ActiveCapacity, &candidate.Category, &languages, &tags, &capabilities, &candidate.PayoutAddress, &duration, &candidate.OverviewPrice, &candidate.FormalPrice, &candidate.ExternalCostCap, &candidate.PriceVersion); err != nil {
+		var vector sql.NullString
+		var reputation [5]sql.NullInt64
+		if err = rows.Scan(&candidate.AgentID, &candidate.ProviderID, &candidate.Status, &candidate.ApprovalStatus, &candidate.Health, &candidate.HealthCheckedAt, &candidate.HealthValidUntil, &candidate.MaxConcurrency, &candidate.ActiveCapacity, &candidate.Category, &languages, &tags, &capabilities, &candidate.RiskStatus, &candidate.PayoutAddress, &vector, &duration, &candidate.OverviewPrice, &candidate.FormalPrice, &candidate.ExternalCostCap, &candidate.PriceVersion, &candidate.ExposureCount, &candidate.EffectiveSamples, &reputation[0], &reputation[1], &reputation[2], &reputation[3], &reputation[4]); err != nil {
 			return nil, err
 		}
 		candidate.Languages = []string(languages)
 		candidate.Tags = []string(tags)
 		candidate.Capabilities = parseCapabilities(capabilities)
 		candidate.EstimatedDuration = time.Duration(duration) * time.Second
-		// Activation is the current persisted approval/risk gate. Dedicated
-		// approval and risk projections can replace these mappings without
-		// changing the matching contract.
-		candidate.ApprovalStatus = "approved"
-		candidate.RiskStatus = "eligible"
 		candidate.ProtocolVersion = execution.ProtocolVersion
-		candidate.VectorVersion = vectorVersion
-		candidate.Reputation = matching.Reputation{Quality: 80, Speed: 80, Reliability: 80, Communication: 80, Compliance: 80}
+		if vector.Valid {
+			candidate.VectorVersion = vector.String
+		}
+		candidate.ReputationAvailable = reputation[0].Valid && reputation[1].Valid && reputation[2].Valid && reputation[3].Valid && reputation[4].Valid
+		if candidate.ReputationAvailable {
+			candidate.Reputation = matching.Reputation{Quality: int(reputation[0].Int64), Speed: int(reputation[1].Int64), Reliability: int(reputation[2].Int64), Communication: int(reputation[3].Int64), Compliance: int(reputation[4].Int64)}
+		}
 		result = append(result, candidate)
 	}
 	return result, rows.Err()
@@ -137,7 +270,42 @@ func (store *Store) BatchOwned(ctx context.Context, publisherID, taskID, batchID
 	return nil
 }
 
+func (store *Store) OverviewFundingReady(ctx context.Context, publisherID, taskID, snapshotID string) (bool, error) {
+	var ready bool
+	err := store.db.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1
+FROM tasks task
+JOIN fund_accounts formal ON formal.task_id=task.task_id AND formal.reference_id=task.task_id AND formal.account_type='formal_escrow'
+JOIN fund_accounts discovery ON discovery.task_id=task.task_id AND discovery.reference_id=task.task_id
+    AND discovery.account_type='discovery_pool' AND discovery.asset_key=formal.asset_key AND discovery.state='open'
+WHERE task.task_id=$1 AND task.publisher_id=$2
+AND discovery.balance-COALESCE((
+    SELECT sum(allocation.reserve_amount)
+    FROM fund_allocations allocation
+    WHERE allocation.account_id=discovery.account_id AND allocation.status='authorized'
+),0) >= COALESCE((
+    SELECT sum(candidate.overview_price::numeric+candidate.external_cost_cap::numeric)
+    FROM match_snapshot_candidates candidate
+    WHERE candidate.snapshot_id=$3 AND candidate.final_position IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM fund_allocations existing
+          WHERE existing.snapshot_id=candidate.snapshot_id AND existing.agent_id=candidate.agent_id
+            AND existing.price_version=candidate.price_version
+      )
+),0)
+)`, taskID, publisherID, snapshotID).Scan(&ready)
+	return ready, err
+}
+
 func (store *Store) TransitionTask(ctx context.Context, publisherID, taskID, target, eventType string) error {
+	return store.transitionTask(ctx, publisherID, taskID, target, eventType, "", nil)
+}
+
+func (store *Store) TransitionTaskAndRecordMatchingOperation(ctx context.Context, publisherID, operationID, taskID, target, eventType string, response StartMatchingResult) error {
+	return store.transitionTask(ctx, publisherID, taskID, target, eventType, operationID, &response)
+}
+
+func (store *Store) transitionTask(ctx context.Context, publisherID, taskID, target, eventType, operationID string, response *StartMatchingResult) error {
 	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
@@ -150,32 +318,42 @@ func (store *Store) TransitionTask(ctx context.Context, publisherID, taskID, tar
 	} else if err != nil {
 		return err
 	}
-	if status == target {
-		return tx.Commit()
-	}
-	if !workflowTransitionAllowed(status, target) {
-		return ErrInvalidInput
-	}
 	var now time.Time
 	if err = tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return err
 	}
-	version++
-	if result, updateErr := tx.ExecContext(ctx, `UPDATE tasks SET status=$1,aggregate_version=$2,updated_at=$3 WHERE task_id=$4 AND publisher_id=$5`, target, version, now, taskID, publisherID); updateErr != nil {
-		return updateErr
-	} else if changed, _ := result.RowsAffected(); changed != 1 {
-		return ErrNotFound
+	if status != target {
+		if !workflowTransitionAllowed(status, target) {
+			return ErrInvalidInput
+		}
+		version++
+		if result, updateErr := tx.ExecContext(ctx, `UPDATE tasks SET status=$1,aggregate_version=$2,updated_at=$3 WHERE task_id=$4 AND publisher_id=$5`, target, version, now, taskID, publisherID); updateErr != nil {
+			return updateErr
+		} else if changed, _ := result.RowsAffected(); changed != 1 {
+			return ErrNotFound
+		}
+		payload, marshalErr := json.Marshal(map[string]any{"previousStatus": status, "status": target, "aggregateVersion": version})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		eventID := workflowEventID(eventType, taskID, fmt.Sprintf("%d", version))
+		if _, err = tx.ExecContext(ctx, `INSERT INTO domain_events (event_id,aggregate_type,aggregate_id,aggregate_version,event_type,payload,occurred_at) VALUES ($1,'task',$2,$3,$4,$5,$6)`, eventID, taskID, version, eventType, string(payload), now); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events (event_id,actor_id,action,resource_type,resource_id,metadata,occurred_at) VALUES ($1,$2,$3,'task',$4,$5,$6)`, eventID+"_audit", publisherID, eventType, taskID, string(payload), now); err != nil {
+			return err
+		}
 	}
-	payload, err := json.Marshal(map[string]any{"previousStatus": status, "status": target, "aggregateVersion": version})
-	if err != nil {
-		return err
-	}
-	eventID := workflowEventID(eventType, taskID, fmt.Sprintf("%d", version))
-	if _, err = tx.ExecContext(ctx, `INSERT INTO domain_events (event_id,aggregate_type,aggregate_id,aggregate_version,event_type,payload,occurred_at) VALUES ($1,'task',$2,$3,$4,$5,$6)`, eventID, taskID, version, eventType, string(payload), now); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events (event_id,actor_id,action,resource_type,resource_id,metadata,occurred_at) VALUES ($1,$2,$3,'task',$4,$5,$6)`, eventID+"_audit", publisherID, eventType, taskID, string(payload), now); err != nil {
-		return err
+	if response != nil {
+		payload, marshalErr := json.Marshal(response)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if result, updateErr := tx.ExecContext(ctx, `UPDATE matching_run_operations SET response_body=$1,completed_at=$2 WHERE publisher_id=$3 AND operation_id=$4 AND task_id=$5 AND response_body IS NULL`, payload, now, publisherID, operationID, taskID); updateErr != nil {
+			return updateErr
+		} else if changed, _ := result.RowsAffected(); changed != 1 {
+			return ErrInvalidInput
+		}
 	}
 	return tx.Commit()
 }

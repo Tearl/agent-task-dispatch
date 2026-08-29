@@ -1,0 +1,2 @@
+-- Escrow V3 identities, attempts, canonicalization epochs, and journals are
+-- immutable chain evidence. Rollback intentionally retains them.

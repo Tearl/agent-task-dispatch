@@ -53,7 +53,7 @@ export const ROLES: Record<RoleId, RoleConfig> = {
     home: "/publisher",
     nav: [
       { to: "/publisher", label: "工作台", icon: LayoutDashboard },
-      { to: "/publisher/settlement", label: "交付与结算", icon: PackageCheck },
+      { to: "/publisher/tasks", label: "交付与结算", icon: PackageCheck },
       { to: "/publisher/marketplace", label: "Agent 大厅", icon: Store },
       { to: "/publisher/tasks", label: "我的任务", icon: ListChecks },
       { to: "/publisher/funds", label: "资金与收益", icon: Wallet },
@@ -85,7 +85,7 @@ export const ROLES: Record<RoleId, RoleConfig> = {
     nav: [
       { to: "/arbitrator", label: "仲裁工作台", icon: LayoutDashboard },
       { to: "/arbitrator/cases", label: "待处理案件", icon: Gavel },
-      { to: "/arbitrator/review", label: "案件审理", icon: Scale },
+      { to: "/arbitrator/cases", label: "案件审理", icon: Scale },
       { to: "/arbitrator/appeal", label: "申诉与复核", icon: RefreshCcw },
       { to: "/arbitrator/staking", label: "质押与奖励", icon: ShieldCheck },
       { to: "/arbitrator/governance", label: "社区治理", icon: Vote },

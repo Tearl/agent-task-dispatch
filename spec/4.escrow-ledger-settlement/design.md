@@ -14,6 +14,7 @@
 | v9 | 2026-08-24 | 加固 published-task-funding-v3 链上预算承诺、occurrence 收敛与 EVM 金额域 |
 | v10 | 2026-08-24 | 加固 published-task-funding-v4 广播先于 attempt 注册的双向对账 |
 | v11 | 2026-08-24 | 加固 published-task-funding-v5 同一 occurrence 再次 canonical 的 epoch 化恢复 |
+| v12 | 2026-08-28 | 冻结 testnet-only Escrow V3：Base Sepolia、6 位测试 USDC、完整 task ID 域、2/3 Safe 治理和不可升级迁移 |
 
 ## 架构与影响层
 `contracts/escrow` 拥有资产和账户状态。Engine 拥有意图/状态校验、不可变复式记账、交易参数与事件投影。BFF/Web 展示分离余额与确认状态。
@@ -40,13 +41,13 @@
 只在版本化决策后部署到选定测试链。合约升级/迁移需单独授权；链下模式保持可加性与可重放。
 
 ## 技术决策与备选方案
-不内置生产链、资产、费率或生息假设。资金冲突以合约状态为准，PostgreSQL 保存可审计业务账务。
+Escrow V3 仅面向测试环境：Anvil `31337` 和 Base Sepolia `84532`。每个部署绑定一个 6 位精度 ERC-20；公开测试链使用测试 USDC，本地使用 MockUSDC，不连接主网。治理管理员和争议解决者分别使用 2/3 Safe，独立 guardian 只能暂停，平台证明签名人由治理 Safe 轮换。合约不可升级，ABI/语义变化通过新版本部署和 Engine 新任务路由迁移。完整决策见 `docs/adr/0001-escrow-v3-testnet.md`。资金冲突以合约状态为准，PostgreSQL 保存可审计业务账务。
 
-### published-task-funding-v5 [CHANGED v11]
+### published-task-funding-v6 [CHANGED v12]
 
 - Engine 在 `POST /v1/tasks/{taskId}/funding-intents` 中权威验证 publisher 角色、任务所有权、`pending_escrow` 状态、当前不可变规格和未过期业务 deadline。意图由 `task_id + chain_id + contract + formal_budget + publisher_wallet + task_spec_hash + funding_deadline + funding-v5` 确定性派生，同一输入稳定回放，不允许客户端提供金额、合约、期限或链上任务 ID。`platform_task_key = keccak256(UTF8(task_id))`，`funding_deadline` 由 Engine 冻结且不得晚于业务 deadline。
 - 发布与入金入口共同采用 EVM 金额域：`formal_budget` 必须是以配置资产最小单位表示的规范十进制整数，且满足 `1 <= formal_budget <= 2^256-1`。新草稿在 publish 事务内拒绝不兼容预算；可加性迁移把已经发布且处于 `pending_escrow` 的不兼容任务标记为 `funding_configuration_invalid` 并写审计事件，不改不可变规格、不创建 intent。发布者只能取消该任务并从原规格克隆新草稿后修正预算；该隔离态不可匹配、不可入金。
-- 合约入口改为 `createTask(bytes32 platformTaskKey, bytes32 taskSpecHash, uint64 fundingDeadline, uint256 formalBudget)`，要求 `formalBudget > 0`、`msg.value == formalBudget` 且 `block.timestamp <= fundingDeadline`，并在合约内计算 `chain_task_id = keccak256(abi.encode("agent-platform-task-v3", block.chainid, address(this), msg.sender, platformTaskKey, taskSpecHash, fundingDeadline, formalBudget))`。因此复制 calldata 的第三方只能在自己的地址域创建不同 ID，错误金额交易则在写入前回滚，均不能抢占预期任务。返回交易必须绑定 `to`、`value`、完整 `data`、`chainId` 与 session wallet `from`；浏览器不得修改字段或自行推导确认。
+- 合约入口为 `createTask(bytes32 platformTaskKey, bytes32 taskSpecHash, uint64 fundingDeadline, uint256 formalBudget)`，要求 `formalBudget > 0`、`block.timestamp <= fundingDeadline`，并通过 `SafeERC20.safeTransferFrom` 从发布者精确转入绑定的 6 位 ERC-20。浏览器先向 intent 的 `asset_address` 提交 `approve(escrow, formalBudget)`，再以 `value = 0` 调用 `createTask`。合约内计算 `chain_task_id = keccak256(abi.encode("agent-platform-task-v3", block.chainid, address(this), address(asset), msg.sender, platformTaskKey, taskSpecHash, fundingDeadline, formalBudget))`；复制 calldata 的第三方、错误资产/合约域或不足 allowance/balance 均不能占用预期任务 ID。两笔交易都必须绑定 `to`、`value`、完整 `data`、`chainId` 与 session wallet `from`；浏览器不得修改字段或自行推导确认。
 - funding intent 与交易 attempt 分离，attempt 的状态转换证据按交易 occurrence `chain + contract + transaction_hash + block_hash` 追加保存，事件证据再绑定 `log_index`，当前状态只是可重建投影。`submit` 为新哈希创建 attempt，同一哈希稳定回放；失败或钱包 replacement 后可追加新哈希。状态投影允许 `submitted -> observed_failed|canonical_confirmed|superseded`、`canonical_confirmed -> canonical_orphaned`，以及 `observed_failed|superseded|canonical_orphaned -> canonical_confirmed`，后者仅在该已持久化交易出现新的成功 canonical occurrence 时发生。历史状态和 receipt 永不删除。
 - 链投影器按 `chain_id + contract + transaction_hash` 查找任意已持久化 attempt，而不因当前投影为 failed、superseded 或 orphaned 忽略新的 canonical occurrence；随后验证成功 receipt、目标合约、`createTask` calldata、由发布者/任务键/规格/期限/正式预算重算的 chain task ID，以及唯一 `TaskCreated` 的 publisher/amount/task ID。未知哈希、错误 calldata/事件或当前非 canonical occurrence 一律不能确认。同一 canonical 链上若已有另一 attempt 的有效资金效果则拒绝区块并隔离；正常合约唯一性应使该情况不可达。
 - `/submit` 与链投影器调用同一个 `reconcileFundingAttempt(tx_hash)` 事务例程，并以 `chain + contract + transaction_hash` advisory lock 串行化。投影先到时仍完整保存 transaction、receipt、calldata 摘要、日志和 canonical occurrence，但因 attempt 未知不产生业务效果；后续 `/submit` 在持久化 attempt 后、返回成功前查询 retained canonical occurrence 并调用该例程。attempt 先到时由正常投影调用同一路径。并发双方、进程重启和显式 replay 都由 occurrence/journal 唯一键收敛，不依赖一次性内存队列。
@@ -76,7 +77,7 @@
 
 ### escrow-selection-v1
 
-- 当前 `TaskEscrow` 是本地 MVP 的原生资产实现；生产资产、精度、签名人治理和升级方式仍由阶段 0 决策，不得把本地部署参数当成生产默认值。
+- `TaskEscrow` V3 是单一 6 位 ERC-20 测试资产实现；本地绑定 MockUSDC，Base Sepolia 绑定测试 USDC。资产地址进入 task ID 域，任何主网地址均不属于本版本。
 - 发布者直接提交选择交易即构成发布者授权；独立的平台证明签名人签署同一组选择字段。证明绑定任务、assignment、Agent 控制者、收款地址、概览、allocation、报价、任务规格哈希、匹配修订、价格版本、概览价格、正式总价、抵扣、策略、nonce、有效期、链 ID 和合约地址。
 - EIP-712 domain 固定为 `AgentTaskEscrow` / `1`。结构为 `SelectionProof(bytes32 payloadHash)`，其中 `payloadHash = keccak256(abi.encode(SelectionProof))`，字段顺序以合约结构定义为准；签名拒绝高 `s`、非法 `v` 和零恢复地址。
 - 一个任务只能从 `Funded` 原子进入一次 `Assigned`。选择消费全局唯一非零 nonce；assignment ID 和概览 allocation 抵扣身份同样只能消费一次。成功选择创建不可替换 assignment，并同时初始化 `work_nonce = 1`；失败交易回滚所有消费标记、assignment 和资金变化。

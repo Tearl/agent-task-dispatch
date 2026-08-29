@@ -15,4 +15,5 @@ broadcast/
 .env.chain
 infrastructure/ec2-agents/.runtime.env
 .data/
+.local/
 .DS_Store

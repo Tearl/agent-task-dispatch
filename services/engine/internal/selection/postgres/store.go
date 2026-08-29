@@ -280,10 +280,13 @@ func (store *Store) terminate(ctx context.Context, reservationID, transactionHas
 	return value, true, nil
 }
 
-const eligibilitySelect = `SELECT task.task_id,task.deadline,batch.snapshot_id,batch.task_spec_hash,batch.match_revision,snapshot.policy_hash,batch.batch_id,slot.slot_id,
+const eligibilitySelect = `SELECT task.task_id,funding.chain_task_id,funding.chain_id::text,funding.contract_address,task.deadline,batch.snapshot_id,batch.task_spec_hash,batch.match_revision,snapshot.policy_hash,batch.batch_id,slot.slot_id,
 slot.agent_id,slot.provider_id,agent.controller_address,agent.payout_address,slot.price_version,slot.quote_hash,slot.allocation_id,
 slot.overview_price::text,price.formal_package_gross_price::text
 FROM tasks task
+JOIN task_funding_intents funding ON funding.task_id=task.task_id AND funding.status='confirmed'
+ AND funding.asset_address IS NOT NULL AND funding.platform_task_key IS NOT NULL
+ AND funding.task_spec_hash IS NOT NULL AND funding.funding_deadline IS NOT NULL
 JOIN overview_batches batch ON batch.batch_id=$3 AND batch.task_id=task.task_id AND batch.status='completed'
 JOIN overview_slots slot ON slot.slot_id=$4 AND slot.batch_id=batch.batch_id AND slot.status='valid' AND slot.billing_status='captured'
 JOIN match_snapshots snapshot ON snapshot.snapshot_id=batch.snapshot_id AND snapshot.sealed_at IS NOT NULL
@@ -307,7 +310,7 @@ func requireSelectableTask(ctx context.Context, tx *sql.Tx, taskID string) error
 }
 
 func loadEligibility(row *sql.Row) (value selection.Eligibility, err error) {
-	err = row.Scan(&value.TaskID, &value.TaskDeadline, &value.SnapshotID, &value.TaskSpecHash, &value.MatchRevision, &value.PolicyHash, &value.BatchID, &value.SlotID, &value.AgentID, &value.ProviderID, &value.AgentController, &value.Payout, &value.PriceVersion, &value.QuoteHash, &value.AllocationID, &value.OverviewPrice, &value.FormalGrossPrice)
+	err = row.Scan(&value.TaskID, &value.ChainTaskID, &value.ChainID, &value.ContractAddress, &value.TaskDeadline, &value.SnapshotID, &value.TaskSpecHash, &value.MatchRevision, &value.PolicyHash, &value.BatchID, &value.SlotID, &value.AgentID, &value.ProviderID, &value.AgentController, &value.Payout, &value.PriceVersion, &value.QuoteHash, &value.AllocationID, &value.OverviewPrice, &value.FormalGrossPrice)
 	return value, err
 }
 
@@ -334,7 +337,7 @@ func loadAssignment(row rowScanner) (value selection.Assignment, err error) {
 }
 
 func matches(value selection.Reservation, eligible selection.Eligibility) bool {
-	return value.TaskID == eligible.TaskID && value.BatchID == eligible.BatchID && value.SlotID == eligible.SlotID && value.SnapshotID == eligible.SnapshotID && value.AgentID == eligible.AgentID && value.ProviderID == eligible.ProviderID && value.Proof.AgentController == eligible.AgentController && value.Proof.Payout == eligible.Payout && value.Proof.MatchRevision == eligible.MatchRevision && value.Proof.PriceVersion == eligible.PriceVersion && value.Proof.OverviewPrice == eligible.OverviewPrice && value.Proof.FormalGrossPrice == eligible.FormalGrossPrice && value.Proof.OverviewCredit == eligible.OverviewPrice && value.Proof.QuoteHash == toBytes32(eligible.QuoteHash) && value.Proof.TaskSpecHash == toBytes32(eligible.TaskSpecHash) && value.Proof.PolicyHash == toBytes32(eligible.PolicyHash) && value.Proof.AllocationID == toBytes32(eligible.AllocationID) && value.Proof.OverviewID == toBytes32(eligible.SlotID)
+	return value.TaskID == eligible.TaskID && value.Proof.TaskID == eligible.ChainTaskID && value.BatchID == eligible.BatchID && value.SlotID == eligible.SlotID && value.SnapshotID == eligible.SnapshotID && value.AgentID == eligible.AgentID && value.ProviderID == eligible.ProviderID && value.Proof.AgentController == eligible.AgentController && value.Proof.Payout == eligible.Payout && value.Proof.MatchRevision == eligible.MatchRevision && value.Proof.PriceVersion == eligible.PriceVersion && value.Proof.OverviewPrice == eligible.OverviewPrice && value.Proof.FormalGrossPrice == eligible.FormalGrossPrice && value.Proof.OverviewCredit == eligible.OverviewPrice && value.Proof.QuoteHash == toBytes32(eligible.QuoteHash) && value.Proof.TaskSpecHash == toBytes32(eligible.TaskSpecHash) && value.Proof.PolicyHash == toBytes32(eligible.PolicyHash) && value.Proof.AllocationID == toBytes32(eligible.AllocationID) && value.Proof.OverviewID == toBytes32(eligible.SlotID)
 }
 
 func toBytes32(value string) string {

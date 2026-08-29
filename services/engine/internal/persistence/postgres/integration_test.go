@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -148,6 +150,92 @@ func TestPostgresMigrationsIdempotencyAndAtomicity(t *testing.T) {
 	if err = db.PingContext(ctx); err != nil {
 		t.Fatalf("panic leaked transaction connection or advisory lock: %v", err)
 	}
+}
+
+func TestEscrowV3MigrationPreservesConfirmedLegacyFunding(t *testing.T) {
+	baseURL := os.Getenv("ENGINE_TEST_POSTGRES_URL")
+	if baseURL == "" {
+		t.Skip("ENGINE_TEST_POSTGRES_URL is required for PostgreSQL integration tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	admin, err := sql.Open("postgres", baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := fmt.Sprintf("engine_v3_history_%d", time.Now().UnixNano())
+	if _, err = admin.ExecContext(ctx, "CREATE SCHEMA "+pq.QuoteIdentifier(schema)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = admin.ExecContext(context.Background(), "DROP SCHEMA "+pq.QuoteIdentifier(schema)+" CASCADE")
+	}()
+	db, err := sql.Open("postgres", withSearchPath(baseURL, schema))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	names, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if name >= "migrations/000028_escrow_v3.up.sql" {
+			break
+		}
+		contents, readErr := migrationFiles.ReadFile(name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, err = db.ExecContext(ctx, string(contents)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
+	if _, err = db.ExecContext(ctx, `INSERT INTO users(user_id) VALUES('legacy-publisher')`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, taskID := range []string{"legacy-confirmed", "legacy-pending"} {
+		if _, err = db.ExecContext(ctx, `INSERT INTO tasks(task_id,publisher_id,status,title,description,expert_type,language,overview_budget,formal_budget,external_cost_cap,deadline,inputs,allowed_tools,exclusions,delivery_format,draft_acceptance,created_at,updated_at) VALUES($1,'legacy-publisher','draft','Legacy','Legacy','research','en',10,90,5,$2,'{}','{}','{}','json','[{"id":"quality","title":"Quality","description":"Accurate","weight":100}]',$3,$3)`, taskID, now.Add(time.Hour), now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.ExecContext(ctx, `INSERT INTO task_spec_versions(task_id,version_no,task_aggregate_version,content_hash,title,description,expert_type,language,overview_budget,formal_budget,external_cost_cap,deadline,inputs,allowed_tools,exclusions,delivery_format,created_at) VALUES($1,1,2,$2,'Legacy','Legacy','research','en',10,90,5,$3,'{}','{}','{}','json',$4)`, taskID, "sha256:"+strings.Repeat("1", 64), now.Add(time.Hour), now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.ExecContext(ctx, `INSERT INTO acceptance_versions(task_id,version_no,task_aggregate_version,content_hash,criteria,total_weight,created_at) VALUES($1,1,2,$2,'[{"id":"quality","title":"Quality","description":"Accurate","weight":100}]',100,$3)`, taskID, "sha256:"+strings.Repeat("2", 64), now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.ExecContext(ctx, `UPDATE tasks SET status='pending_escrow',current_spec_version=1,current_acceptance_version=1,published_at=$2,aggregate_version=2,updated_at=$2 WHERE task_id=$1`, taskID, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, value := range []struct{ taskID, state string }{{"legacy-confirmed", "confirmed"}, {"legacy-pending", "submitted"}} {
+		if _, err = db.ExecContext(ctx, `INSERT INTO task_funding_intents(intent_id,task_id,publisher_id,publisher_wallet,idempotency_key,request_hash,chain_id,contract_address,chain_task_id,overview_amount,formal_amount,external_cost_amount,total_amount,status,transaction_hash,aggregate_version,created_at,updated_at) VALUES($1,$2,'legacy-publisher','0x1111111111111111111111111111111111111111',$3,$4,31337,'0x2222222222222222222222222222222222222222',$5,10,90,5,105,$6,$7,1,$8,$8)`, "sha256:"+strings.Repeat(fmt.Sprintf("%x", index+3), 64), value.taskID, "legacy-key-"+value.taskID, "sha256:"+strings.Repeat(fmt.Sprintf("%x", index+5), 64), "0x"+strings.Repeat(fmt.Sprintf("%x", index+7), 64), value.state, "0x"+strings.Repeat(fmt.Sprintf("%x", index+9), 64), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v3, err := migrationFiles.ReadFile("migrations/000028_escrow_v3.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.ExecContext(ctx, string(v3)); err != nil {
+		t.Fatal(err)
+	}
+	var confirmedStatus, confirmedTotal string
+	var confirmedReason sql.NullString
+	if err = db.QueryRowContext(ctx, `SELECT status,total_amount::text,failure_reason_code FROM task_funding_intents WHERE task_id='legacy-confirmed'`).Scan(&confirmedStatus, &confirmedTotal, &confirmedReason); err != nil || confirmedStatus != "confirmed" || confirmedTotal != "105" || confirmedReason.Valid {
+		t.Fatalf("confirmed legacy history changed: status=%s total=%s reason=%v err=%v", confirmedStatus, confirmedTotal, confirmedReason, err)
+	}
+	var pendingStatus, pendingTotal, taskStatus string
+	if err = db.QueryRowContext(ctx, `SELECT intent.status,intent.total_amount::text,task.status FROM task_funding_intents intent JOIN tasks task ON task.task_id=intent.task_id WHERE intent.task_id='legacy-pending'`).Scan(&pendingStatus, &pendingTotal, &taskStatus); err != nil || pendingStatus != "failed" || pendingTotal != "105" || taskStatus != "funding_configuration_invalid" {
+		t.Fatalf("legacy pending isolation: intent=%s total=%s task=%s err=%v", pendingStatus, pendingTotal, taskStatus, err)
+	}
+	assertScalar(t, db, `SELECT count(*)::text FROM task_funding_attempts WHERE intent_id=(SELECT intent_id FROM task_funding_intents WHERE task_id='legacy-confirmed') AND state='canonical_confirmed'`, "1")
+	assertScalar(t, db, `SELECT count(*)::text FROM task_funding_intent_events WHERE intent_id=(SELECT intent_id FROM task_funding_intents WHERE task_id='legacy-pending') AND state='failed' AND reason_code='escrow_v3_migration_required'`, "1")
+	assertScalar(t, db, `SELECT count(*)::text FROM domain_events WHERE aggregate_id='legacy-pending' AND event_type='task.funding_configuration_invalid'`, "1")
+	assertScalar(t, db, `SELECT count(*)::text FROM audit_events WHERE resource_id='legacy-pending' AND action='task.funding_configuration_invalid'`, "1")
 }
 
 func withSearchPath(databaseURL, schema string) string {

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {TaskEscrow} from "../src/TaskEscrow.sol";
+import {MockUSDC} from "../src/MockUSDC.sol";
 
 interface Vm {
     function addr(uint256 privateKey) external returns (address);
@@ -9,59 +10,15 @@ interface Vm {
     function deal(address account, uint256 newBalance) external;
     function etch(address target, bytes calldata code) external;
     function expectRevert(bytes4 selector) external;
+    function expectRevert() external;
     function prank(address sender) external;
     function sign(uint256 privateKey, bytes32 digest) external returns (uint8 v, bytes32 r, bytes32 s);
     function warp(uint256 newTimestamp) external;
 }
 
-contract ReentrantPublisher {
-    TaskEscrow private immutable escrow;
-    TaskEscrow.SelectionProof private pendingProof;
-    bytes private pendingSignature;
-    bool public reentrySucceeded;
-    uint256 public reentryAttempts;
-
-    constructor(TaskEscrow target) {
-        escrow = target;
-    }
-
-    function fund(bytes32 taskId) external payable {
-        escrow.createTask{value: msg.value}(taskId);
-    }
-
-    function select(TaskEscrow.SelectionProof calldata proof, bytes calldata signature) external {
-        pendingProof = proof;
-        pendingSignature = signature;
-        escrow.selectAgent(proof, signature);
-    }
-
-    receive() external payable {
-        reentryAttempts++;
-        TaskEscrow.SelectionProof memory proof = pendingProof;
-        bytes memory signature = pendingSignature;
-        (reentrySucceeded,) =
-            address(escrow).call(abi.encodeWithSelector(TaskEscrow.selectAgent.selector, proof, signature));
-    }
-}
-
-contract ReentrantAgent {
-    TaskEscrow private immutable escrow;
-    bool public reentrySucceeded;
-    uint256 public reentryAttempts;
-
-    constructor(TaskEscrow target) {
-        escrow = target;
-    }
-
-    function withdraw(uint256 amount) external {
-        escrow.withdrawEarnings(payable(address(this)), amount);
-    }
-
-    receive() external payable {
-        reentryAttempts++;
-        (reentrySucceeded,) = address(escrow).call(
-            abi.encodeWithSelector(TaskEscrow.withdrawEarnings.selector, payable(address(this)), 1)
-        );
+contract WrongDecimalsToken {
+    function decimals() external pure returns (uint8) {
+        return 18;
     }
 }
 
@@ -72,17 +29,21 @@ contract TaskEscrowTest {
     address private constant agentController = address(0xBEEF);
     address private constant payout = address(0xF00D);
     TaskEscrow private escrow;
+    MockUSDC private token;
 
     receive() external payable {}
 
     function setUp() public {
-        escrow = new TaskEscrow(address(this), vm.addr(PLATFORM_SIGNER_KEY));
-        vm.deal(publisher, 100 ether);
+        token = new MockUSDC();
+        escrow =
+            new TaskEscrow(address(token), address(this), address(this), address(this), vm.addr(PLATFORM_SIGNER_KEY));
+        token.mint(publisher, 100 ether);
+        vm.prank(publisher);
+        token.approve(address(escrow), type(uint256).max);
     }
 
     function testFrozenLeafAllocationRequiresCompleteStableValueConservingCoverage() public {
-        bytes32 taskId = keccak256("leaf-dispute");
-        _fund(taskId, 4 ether);
+        bytes32 taskId = _fund(keccak256("leaf-dispute"), 4 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
         bytes memory signature = _sign(proof);
         vm.prank(publisher);
@@ -104,19 +65,18 @@ contract TaskEscrowTest {
         TaskEscrow.DisputeAllocation[] memory allocation = new TaskEscrow.DisputeAllocation[](2);
         allocation[0] = TaskEscrow.DisputeAllocation(0, publisher, 1 ether);
         allocation[1] = TaskEscrow.DisputeAllocation(1, payout, 1.5 ether);
-        uint256 publisherBefore = publisher.balance;
+        uint256 publisherBefore = token.balanceOf(publisher);
         escrow.finalizeDisputeAllocation(taskId, allocation, 0.5 ether);
-        require(publisher.balance == publisherBefore + 1 ether, "publisher leaf not paid");
+        require(token.balanceOf(publisher) == publisherBefore + 1 ether, "publisher leaf not paid");
         require(escrow.claimableEarnings(agentController, payout) == 1.5 ether, "agent leaf not isolated");
         require(
-            address(escrow).balance == escrow.totalClaimableEarnings(),
+            token.balanceOf(address(escrow)) == escrow.totalClaimableEarnings(),
             "escrow balance did not retain isolated Agent earnings"
         );
     }
 
     function testFrozenLeafAllocationRejectsOwnerReplacementAndReplay() public {
-        bytes32 taskId = keccak256("leaf-owner");
-        _fund(taskId, 3 ether);
+        bytes32 taskId = _fund(keccak256("leaf-owner"), 3 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 3 ether, 0, 0);
         bytes memory signature = _sign(proof);
         vm.prank(publisher);
@@ -139,26 +99,24 @@ contract TaskEscrowTest {
     }
 
     function testSelectionAppliesCreditLocksNetRefundsExcessAndStartsV1() public {
-        bytes32 taskId = keccak256("task-selection");
-        _fund(taskId, 8 ether);
+        bytes32 taskId = _fund(keccak256("task-selection"), 8 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 6 ether, 2 ether, 2 ether);
         bytes memory signature = _sign(proof);
-        uint256 publisherBefore = publisher.balance;
+        uint256 publisherBefore = token.balanceOf(publisher);
         vm.prank(publisher);
         escrow.selectAgent(proof, signature);
 
         (address storedPublisher, address storedAgent, uint256 amount, TaskEscrow.Status status) = escrow.tasks(taskId);
         require(storedPublisher == publisher && storedAgent == payout, "identity binding changed");
         require(amount == 4 ether && status == TaskEscrow.Status.Assigned, "wrong formal lock");
-        require(publisher.balance == publisherBefore + 4 ether, "excess was not refunded");
-        require(address(escrow).balance == 4 ether, "escrow value was not conserved");
+        require(token.balanceOf(publisher) == publisherBefore + 4 ether, "excess was not refunded");
+        require(token.balanceOf(address(escrow)) == 4 ether, "escrow value was not conserved");
         require(escrow.workNonces(taskId) == 1, "V1 work nonce was not initialized");
         require(escrow.assignmentIdOf(taskId) == proof.assignmentId, "assignment id changed");
     }
 
     function testSelectionReplayProducesOnlyOneAssignment() public {
-        bytes32 taskId = keccak256("task-replay");
-        _fund(taskId, 4 ether);
+        bytes32 taskId = _fund(keccak256("task-replay"), 4 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
         bytes memory signature = _sign(proof);
         vm.prank(publisher);
@@ -169,10 +127,8 @@ contract TaskEscrowTest {
     }
 
     function testNonceCannotBeReusedAcrossTasks() public {
-        bytes32 firstTask = keccak256("task-first");
-        bytes32 secondTask = keccak256("task-second");
-        _fund(firstTask, 4 ether);
-        _fund(secondTask, 4 ether);
+        bytes32 firstTask = _fund(keccak256("task-first"), 4 ether);
+        bytes32 secondTask = _fund(keccak256("task-second"), 4 ether);
         TaskEscrow.SelectionProof memory first = _proof(firstTask, 4 ether, 1 ether, 1 ether);
         TaskEscrow.SelectionProof memory second = _proof(secondTask, 4 ether, 1 ether, 1 ether);
         second.nonce = first.nonce;
@@ -186,10 +142,8 @@ contract TaskEscrowTest {
     }
 
     function testAssignmentAndOverviewCreditCannotBeReusedAcrossTasks() public {
-        bytes32 firstTask = keccak256("task-binding-first");
-        bytes32 secondTask = keccak256("task-binding-second");
-        _fund(firstTask, 4 ether);
-        _fund(secondTask, 4 ether);
+        bytes32 firstTask = _fund(keccak256("task-binding-first"), 4 ether);
+        bytes32 secondTask = _fund(keccak256("task-binding-second"), 4 ether);
         TaskEscrow.SelectionProof memory first = _proof(firstTask, 4 ether, 1 ether, 1 ether);
         TaskEscrow.SelectionProof memory second = _proof(secondTask, 4 ether, 1 ether, 1 ether);
         second.assignmentId = first.assignmentId;
@@ -211,8 +165,7 @@ contract TaskEscrowTest {
     }
 
     function testOnlyPublisherCanSubmitSelectionAndNetMustBeFunded() public {
-        bytes32 taskId = keccak256("task-auth-funding");
-        _fund(taskId, 2 ether);
+        bytes32 taskId = _fund(keccak256("task-auth-funding"), 2 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
         bytes memory signature = _sign(proof);
         vm.expectRevert(TaskEscrow.NotAuthorized.selector);
@@ -223,8 +176,7 @@ contract TaskEscrowTest {
     }
 
     function testTamperedOrCrossContractProofIsRejected() public {
-        bytes32 taskId = keccak256("task-tamper");
-        _fund(taskId, 4 ether);
+        bytes32 taskId = _fund(keccak256("task-tamper"), 4 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
         bytes memory signature = _sign(proof);
         proof.allocationId = keccak256("other-allocation");
@@ -232,10 +184,16 @@ contract TaskEscrowTest {
         vm.prank(publisher);
         escrow.selectAgent(proof, signature);
 
-        TaskEscrow other = new TaskEscrow(address(this), vm.addr(PLATFORM_SIGNER_KEY));
+        TaskEscrow other =
+            new TaskEscrow(address(token), address(this), address(this), address(this), vm.addr(PLATFORM_SIGNER_KEY));
         vm.prank(publisher);
-        other.createTask{value: 4 ether}(taskId);
-        proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
+        token.approve(address(other), type(uint256).max);
+        bytes32 otherTaskId;
+        vm.prank(publisher);
+        otherTaskId = other.createTask(
+            keccak256("other-task"), keccak256("other-spec"), uint64(block.timestamp + 1 days), 4 ether
+        );
+        proof = _proof(otherTaskId, 4 ether, 1 ether, 1 ether);
         bytes memory crossContractSignature = _signFor(escrow, proof);
         vm.expectRevert(TaskEscrow.InvalidProof.selector);
         vm.prank(publisher);
@@ -243,8 +201,7 @@ contract TaskEscrowTest {
     }
 
     function testCrossChainProofIsRejected() public {
-        bytes32 taskId = keccak256("task-cross-chain");
-        _fund(taskId, 4 ether);
+        bytes32 taskId = _fund(keccak256("task-cross-chain"), 4 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
         bytes memory signature = _sign(proof);
         vm.chainId(block.chainid + 1);
@@ -254,7 +211,8 @@ contract TaskEscrowTest {
     }
 
     function testEngineEIP712CompatibilityVector() public {
-        TaskEscrow implementation = new TaskEscrow(address(this), vm.addr(PLATFORM_SIGNER_KEY));
+        TaskEscrow implementation =
+            new TaskEscrow(address(token), address(this), address(this), address(this), vm.addr(PLATFORM_SIGNER_KEY));
         address targetAddress = address(0x1234);
         vm.etch(targetAddress, address(implementation).code);
         vm.chainId(31337);
@@ -288,8 +246,7 @@ contract TaskEscrowTest {
     }
 
     function testExpiredProofAndExcessCreditAreRejected() public {
-        bytes32 taskId = keccak256("task-expired");
-        _fund(taskId, 4 ether);
+        bytes32 taskId = _fund(keccak256("task-expired"), 4 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
         proof.deadline = 0;
         bytes memory expiredSignature = _sign(proof);
@@ -305,8 +262,7 @@ contract TaskEscrowTest {
     }
 
     function testWorkNonceUsesCompareAndSwap() public {
-        bytes32 taskId = keccak256("task-work-nonce");
-        _fund(taskId, 4 ether);
+        bytes32 taskId = _fund(keccak256("task-work-nonce"), 4 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
         bytes memory signature = _sign(proof);
         vm.prank(publisher);
@@ -319,20 +275,16 @@ contract TaskEscrowTest {
         escrow.advanceWorkNonce(taskId, 1);
     }
 
-    function testSelectionRefundCannotReenter() public {
-        ReentrantPublisher attacker = new ReentrantPublisher(escrow);
-        bytes32 taskId = keccak256("task-reentrancy");
-        vm.deal(address(attacker), 8 ether);
-        attacker.fund{value: 8 ether}(taskId);
+    function testSelectionRefundUsesBoundERC20AndPreservesAssignment() public {
+        bytes32 taskId = _fund(keccak256("task-refund"), 8 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 6 ether, 2 ether, 2 ether);
-
-        attacker.select(proof, _sign(proof));
-
-        require(attacker.reentryAttempts() == 1, "refund callback was not exercised");
-        require(!attacker.reentrySucceeded(), "reentrant selection succeeded");
+        bytes memory signature = _sign(proof);
+        vm.prank(publisher);
+        escrow.selectAgent(proof, signature);
         require(escrow.assignmentIdOf(taskId) == proof.assignmentId, "assignment was not confirmed once");
         (,, uint256 locked, TaskEscrow.Status status) = escrow.tasks(taskId);
-        require(locked == 4 ether && status == TaskEscrow.Status.Assigned, "reentry changed escrow state");
+        require(locked == 4 ether && status == TaskEscrow.Status.Assigned, "refund changed escrow state");
+        require(token.balanceOf(address(escrow)) == 4 ether, "refund did not preserve net escrow");
     }
 
     function testFuzzSelectionConservesValue(uint96 fundedRaw, uint96 grossRaw, uint96 creditRaw) public {
@@ -341,34 +293,32 @@ contract TaskEscrowTest {
         uint256 net = gross - credit;
         uint256 funded = net + (uint256(fundedRaw) % 50 ether);
         if (funded == 0) funded = 1;
-        bytes32 taskId = keccak256(abi.encode(fundedRaw, grossRaw, creditRaw));
-        vm.deal(publisher, funded);
-        _fund(taskId, funded);
+        token.mint(publisher, funded);
+        bytes32 taskId = _fund(keccak256(abi.encode(fundedRaw, grossRaw, creditRaw)), funded);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, gross, credit, credit);
         bytes memory signature = _sign(proof);
-        uint256 publisherBefore = publisher.balance;
+        uint256 publisherBefore = token.balanceOf(publisher);
         vm.prank(publisher);
         escrow.selectAgent(proof, signature);
         (,, uint256 locked,) = escrow.tasks(taskId);
-        require(locked == net && address(escrow).balance == net, "value was not conserved");
-        require(publisher.balance == publisherBefore + funded - net, "wrong excess refund");
+        require(locked == net && token.balanceOf(address(escrow)) == net, "value was not conserved");
+        require(token.balanceOf(publisher) == publisherBefore + funded - net, "wrong excess refund");
     }
 
     function testAcceptanceAccruesIsolatedEarningsAndControllerWithdrawsToBoundPayout() public {
-        bytes32 taskId = keccak256("task-acceptance");
-        _fund(taskId, 4 ether);
+        bytes32 taskId = _fund(keccak256("task-acceptance"), 4 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 4 ether, 1 ether, 1 ether);
         bytes memory signature = _sign(proof);
         vm.prank(publisher);
         escrow.selectAgent(proof, signature);
 
-        uint256 payoutBefore = payout.balance;
+        uint256 payoutBefore = token.balanceOf(payout);
         vm.prank(publisher);
         escrow.accept(taskId);
 
         (,, uint256 locked, TaskEscrow.Status status) = escrow.tasks(taskId);
         require(locked == 0 && status == TaskEscrow.Status.Released, "task was not accepted");
-        require(payout.balance == payoutBefore, "acceptance pushed funds externally");
+        require(token.balanceOf(payout) == payoutBefore, "acceptance pushed funds externally");
         require(escrow.claimableEarnings(agentController, payout) == 3 ether, "earnings were not isolated");
         require(escrow.totalClaimableEarnings() == 3 ether, "claimable inventory mismatch");
         require(escrow.yieldEligiblePrincipal(taskId) == 0, "terminal principal remained yield eligible");
@@ -382,14 +332,12 @@ contract TaskEscrowTest {
 
         vm.prank(agentController);
         escrow.withdrawEarnings(payable(payout), 2 ether);
-        require(payout.balance == payoutBefore + 2 ether, "withdrawal missed bound payout");
+        require(token.balanceOf(payout) == payoutBefore + 2 ether, "withdrawal missed bound payout");
         require(escrow.claimableEarnings(agentController, payout) == 1 ether, "partial withdrawal mismatch");
     }
 
     function testAcceptedEarningsCannotBeRefundedDisputedOrClaimedByAnotherAgent() public {
-        bytes32 firstTask = keccak256("settled-isolation");
-        bytes32 secondTask = keccak256("unrelated-refund");
-        _fund(firstTask, 4 ether);
+        bytes32 firstTask = _fund(keccak256("settled-isolation"), 4 ether);
         TaskEscrow.SelectionProof memory firstProof = _proof(firstTask, 4 ether, 0, 0);
         bytes memory firstSignature = _sign(firstProof);
         vm.prank(publisher);
@@ -397,7 +345,7 @@ contract TaskEscrowTest {
         vm.prank(publisher);
         escrow.release(firstTask);
 
-        _fund(secondTask, 2 ether);
+        bytes32 secondTask = _fund(keccak256("unrelated-refund"), 2 ether);
         vm.prank(publisher);
         escrow.refund(secondTask);
         require(escrow.claimableEarnings(agentController, payout) == 4 ether, "refund touched settled earnings");
@@ -411,8 +359,7 @@ contract TaskEscrowTest {
     }
 
     function testOnlyAgentControllerCanOpenDisputeAndAgentAwardBecomesEarnings() public {
-        bytes32 taskId = keccak256("agent-dispute");
-        _fund(taskId, 3 ether);
+        bytes32 taskId = _fund(keccak256("agent-dispute"), 3 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 3 ether, 0, 0);
         bytes memory signature = _sign(proof);
         vm.prank(publisher);
@@ -433,26 +380,24 @@ contract TaskEscrowTest {
         escrow.finalizeDisputeAllocation(taskId, allocation, 0);
 
         require(escrow.claimableEarnings(agentController, payout) == 3 ether, "award was not isolated");
-        require(payout.balance == 0, "resolver bypassed pull payment");
+        require(token.balanceOf(payout) == 0, "resolver bypassed pull payment");
     }
 
     function testDeprecatedSingleRecipientDisputePathFailsClosed() public {
-        bytes32 taskId = keccak256("deprecated-dispute");
-        _fund(taskId, 1 ether);
+        bytes32 taskId = _fund(keccak256("deprecated-dispute"), 1 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 1 ether, 0, 0);
-		bytes memory signature = _sign(proof);
+        bytes memory signature = _sign(proof);
         vm.prank(publisher);
-		escrow.selectAgent(proof, signature);
+        escrow.selectAgent(proof, signature);
         vm.expectRevert(TaskEscrow.InvalidState.selector);
         vm.prank(publisher);
         escrow.openDispute(taskId);
         vm.expectRevert(TaskEscrow.InvalidState.selector);
-        escrow.resolveDispute(taskId, payable(payout));
+        escrow.resolveDispute(taskId, payout);
     }
 
     function testYieldEligibilityStartsOnlyAfterSelection() public {
-        bytes32 taskId = keccak256("yield-eligibility");
-        _fund(taskId, 5 ether);
+        bytes32 taskId = _fund(keccak256("yield-eligibility"), 5 ether);
         require(escrow.yieldEligiblePrincipal(taskId) == 0, "unselected funding became eligible");
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 5 ether, 2 ether, 2 ether);
         bytes memory signature = _sign(proof);
@@ -462,28 +407,201 @@ contract TaskEscrowTest {
         require(escrow.totalYieldEligiblePrincipal() == 3 ether, "yield inventory mismatch");
     }
 
-    function testWithdrawalCannotReenterOrOverdrawOtherEarnings() public {
-        ReentrantAgent agent = new ReentrantAgent(escrow);
-        bytes32 taskId = keccak256("withdrawal-reentry");
-        _fund(taskId, 2 ether);
+    function testWithdrawalCannotOverdrawOtherEarnings() public {
+        bytes32 taskId = _fund(keccak256("withdrawal-overdraw"), 2 ether);
         TaskEscrow.SelectionProof memory proof = _proof(taskId, 2 ether, 0, 0);
-        proof.agentController = address(agent);
-        proof.payout = address(agent);
         bytes memory signature = _sign(proof);
         vm.prank(publisher);
         escrow.selectAgent(proof, signature);
         vm.prank(publisher);
         escrow.accept(taskId);
 
-        agent.withdraw(2 ether);
-        require(agent.reentryAttempts() == 1 && !agent.reentrySucceeded(), "withdrawal reentered");
+        vm.prank(agentController);
+        escrow.withdrawEarnings(payout, 2 ether);
+        vm.expectRevert(TaskEscrow.InvalidAmount.selector);
+        vm.prank(agentController);
+        escrow.withdrawEarnings(payout, 1);
         require(escrow.totalClaimableEarnings() == 0, "withdrawal inventory was not conserved");
-        require(address(escrow).balance == 0, "withdrawal left unaccounted value");
+        require(token.balanceOf(address(escrow)) == 0, "withdrawal left unaccounted value");
     }
 
-    function _fund(bytes32 taskId, uint256 amount) private {
+    function testConstructorRejectsWrongDecimalsAndZeroAddresses() public {
+        WrongDecimalsToken wrongDecimals = new WrongDecimalsToken();
+        vm.expectRevert(TaskEscrow.InvalidAsset.selector);
+        new TaskEscrow(
+            address(wrongDecimals), address(this), address(this), address(this), vm.addr(PLATFORM_SIGNER_KEY)
+        );
+
+        vm.expectRevert(TaskEscrow.InvalidAddress.selector);
+        new TaskEscrow(address(0), address(this), address(this), address(this), vm.addr(PLATFORM_SIGNER_KEY));
+        vm.expectRevert();
+        new TaskEscrow(address(token), address(0), address(this), address(this), vm.addr(PLATFORM_SIGNER_KEY));
+        vm.expectRevert(TaskEscrow.InvalidAddress.selector);
+        new TaskEscrow(address(token), address(this), address(0), address(this), vm.addr(PLATFORM_SIGNER_KEY));
+        vm.expectRevert(TaskEscrow.InvalidAddress.selector);
+        new TaskEscrow(address(token), address(this), address(this), address(0), vm.addr(PLATFORM_SIGNER_KEY));
+        vm.expectRevert(TaskEscrow.InvalidAddress.selector);
+        new TaskEscrow(address(token), address(this), address(this), address(this), address(0));
+    }
+
+    function testTaskIdUsesEveryFrozenDomainFieldAndRejectsDuplicate() public {
+        bytes32 platformTaskKey = keccak256("task-id-key");
+        bytes32 taskSpecHash = keccak256("task-id-spec");
+        uint64 deadline = uint64(block.timestamp + 1 days);
+        uint256 budget = 1_000_000;
+        bytes32 taskId = escrow.deriveTaskId(publisher, platformTaskKey, taskSpecHash, deadline, budget);
+        bytes32 expected = keccak256(
+            abi.encode(
+                "agent-platform-task-v3",
+                block.chainid,
+                address(escrow),
+                address(token),
+                publisher,
+                platformTaskKey,
+                taskSpecHash,
+                deadline,
+                budget
+            )
+        );
+        require(taskId == expected, "task id domain changed");
+        require(
+            escrow.deriveTaskId(address(0xBAD), platformTaskKey, taskSpecHash, deadline, budget) != taskId,
+            "publisher omitted"
+        );
+        require(
+            escrow.deriveTaskId(publisher, keccak256("other-key"), taskSpecHash, deadline, budget) != taskId,
+            "key omitted"
+        );
+        require(
+            escrow.deriveTaskId(publisher, platformTaskKey, keccak256("other-spec"), deadline, budget) != taskId,
+            "spec omitted"
+        );
+        require(
+            escrow.deriveTaskId(publisher, platformTaskKey, taskSpecHash, deadline + 1, budget) != taskId,
+            "deadline omitted"
+        );
+        require(
+            escrow.deriveTaskId(publisher, platformTaskKey, taskSpecHash, deadline, budget + 1) != taskId,
+            "budget omitted"
+        );
+
+        TaskEscrow other =
+            new TaskEscrow(address(token), address(this), address(this), address(this), vm.addr(PLATFORM_SIGNER_KEY));
+        require(
+            other.deriveTaskId(publisher, platformTaskKey, taskSpecHash, deadline, budget) != taskId, "contract omitted"
+        );
+        vm.chainId(block.chainid + 1);
+        require(
+            escrow.deriveTaskId(publisher, platformTaskKey, taskSpecHash, deadline, budget) != taskId, "chain omitted"
+        );
+
         vm.prank(publisher);
-        escrow.createTask{value: amount}(taskId);
+        bytes32 created = escrow.createTask(platformTaskKey, taskSpecHash, deadline, budget);
+        require(created != bytes32(0), "task was not created");
+        vm.expectRevert(TaskEscrow.AlreadyExists.selector);
+        vm.prank(publisher);
+        escrow.createTask(platformTaskKey, taskSpecHash, deadline, budget);
+    }
+
+    function testGuardianPausesButOnlyGovernanceUnpausesAndRotates() public {
+        address guardian = address(0xABCD);
+        address nextSigner = address(0x1234);
+        address nextResolver = address(0x5678);
+        TaskEscrow governed =
+            new TaskEscrow(address(token), address(this), guardian, address(this), vm.addr(PLATFORM_SIGNER_KEY));
+
+        vm.prank(guardian);
+        governed.pause();
+        require(governed.paused(), "guardian did not pause");
+        vm.expectRevert();
+        vm.prank(guardian);
+        governed.unpause();
+        governed.unpause();
+        governed.setPlatformProofSigner(nextSigner);
+        governed.setDisputeResolver(nextResolver);
+        require(governed.platformProofSigner() == nextSigner, "signer did not rotate");
+        require(governed.disputeResolver() == nextResolver, "resolver did not rotate");
+
+        vm.expectRevert(TaskEscrow.InvalidAddress.selector);
+        governed.setPlatformProofSigner(address(0));
+        vm.expectRevert(TaskEscrow.InvalidAddress.selector);
+        governed.setDisputeResolver(address(0));
+    }
+
+    function testPauseStopsOnlyNewRiskIncreasingTransitions() public {
+        bytes32 fundedTask = _fund(keccak256("paused-funded"), 1 ether);
+        bytes32 assignedTask = _fund(keccak256("paused-assigned"), 2 ether);
+        TaskEscrow.SelectionProof memory assignedProof = _proof(assignedTask, 2 ether, 0, 0);
+        bytes memory assignedSignature = _sign(assignedProof);
+        vm.prank(publisher);
+        escrow.selectAgent(assignedProof, assignedSignature);
+        TaskEscrow.SelectionProof memory fundedProof = _proof(fundedTask, 1 ether, 0, 0);
+        bytes memory fundedSignature = _sign(fundedProof);
+        TaskEscrow.FrozenLeaf[] memory leaves = _leaves(assignedTask);
+
+        escrow.pause();
+        vm.expectRevert();
+        vm.prank(publisher);
+        escrow.createTask(
+            keccak256("paused-create"), keccak256("paused-spec"), uint64(block.timestamp + 1 days), 1 ether
+        );
+        vm.expectRevert();
+        vm.prank(publisher);
+        escrow.selectAgent(fundedProof, fundedSignature);
+        vm.expectRevert();
+        vm.prank(publisher);
+        escrow.advanceWorkNonce(assignedTask, 1);
+        vm.expectRevert();
+        vm.prank(publisher);
+        escrow.freezeDispute(assignedTask, leaves, address(this), 0);
+    }
+
+    function testPauseKeepsRefundWithdrawalAndExistingDisputeFinalizationOpen() public {
+        bytes32 refundableTask = _fund(keccak256("paused-refund"), 1 ether);
+
+        bytes32 acceptedTask = _fund(keccak256("paused-withdraw"), 1 ether);
+        TaskEscrow.SelectionProof memory acceptedProof = _proof(acceptedTask, 1 ether, 0, 0);
+        bytes memory acceptedSignature = _sign(acceptedProof);
+        vm.prank(publisher);
+        escrow.selectAgent(acceptedProof, acceptedSignature);
+        vm.prank(publisher);
+        escrow.accept(acceptedTask);
+
+        bytes32 disputedTask = _fund(keccak256("paused-finalize"), 2 ether);
+        TaskEscrow.SelectionProof memory disputedProof = _proof(disputedTask, 2 ether, 0, 0);
+        bytes memory disputedSignature = _sign(disputedProof);
+        vm.prank(publisher);
+        escrow.selectAgent(disputedProof, disputedSignature);
+        TaskEscrow.FrozenLeaf[] memory leaves = _leaves(disputedTask);
+        vm.prank(publisher);
+        escrow.freezeDispute(disputedTask, leaves, address(this), 0);
+
+        escrow.pause();
+        vm.prank(publisher);
+        escrow.refund(refundableTask);
+        vm.prank(agentController);
+        escrow.withdrawEarnings(payout, 1 ether);
+
+        TaskEscrow.DisputeAllocation[] memory allocations = new TaskEscrow.DisputeAllocation[](2);
+        allocations[0] = TaskEscrow.DisputeAllocation(0, publisher, 1 ether);
+        allocations[1] = TaskEscrow.DisputeAllocation(1, payout, 1 ether);
+        vm.warp(block.timestamp + 1 days);
+        escrow.finalizeDisputeAllocation(disputedTask, allocations, 0);
+        require(escrow.claimableEarnings(agentController, payout) == 1 ether, "paused finalization failed");
+    }
+
+    function _fund(bytes32 platformTaskKey, uint256 amount) private returns (bytes32 taskId) {
+        bytes32 taskSpecHash = keccak256(abi.encode("funding-spec", platformTaskKey));
+        uint64 fundingDeadline = uint64(block.timestamp + 1 days);
+        vm.prank(publisher);
+        taskId = escrow.createTask(platformTaskKey, taskSpecHash, fundingDeadline, amount);
+    }
+
+    function _leaves(bytes32 taskId) private view returns (TaskEscrow.FrozenLeaf[] memory leaves) {
+        (address taskPublisher,, uint256 amount,) = escrow.tasks(taskId);
+        leaves = new TaskEscrow.FrozenLeaf[](2);
+        leaves[0] = TaskEscrow.FrozenLeaf(0, taskPublisher, amount, 0);
+        leaves[1] = TaskEscrow.FrozenLeaf(1, payout, amount, 1);
     }
 
     function _proof(bytes32 taskId, uint256 gross, uint256 credit, uint256 overviewPrice)
